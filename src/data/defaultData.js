@@ -6,6 +6,7 @@ const ideasOtherId = generateId()
 const ideasSocietyId = generateId()
 const ideasRelationshipsId = generateId()
 const remindersId = generateId()
+const pastMemoriesId = generateId()
 const defaultProjectId = generateId()
 
 export const BUBBLE_COLORS = [
@@ -36,25 +37,25 @@ export function createDefaultProject() {
       },
       {
         id: ideasSelfId,
-        name: 'Ideas: Self',
+        name: 'Self',
         parent_id: ideasId,
         color: '#8b5cf6',
       },
       {
         id: ideasOtherId,
-        name: 'Ideas: Other People',
+        name: 'Other People',
         parent_id: ideasId,
         color: '#ec4899',
       },
       {
         id: ideasSocietyId,
-        name: 'Ideas: Society',
+        name: 'Society',
         parent_id: ideasId,
         color: '#f43f5e',
       },
       {
         id: ideasRelationshipsId,
-        name: 'Ideas: Relationships',
+        name: 'Relationships',
         parent_id: ideasId,
         color: '#f97316',
       },
@@ -63,6 +64,12 @@ export function createDefaultProject() {
         name: 'Reminders',
         parent_id: null,
         color: '#22c55e',
+      },
+      {
+        id: pastMemoriesId,
+        name: 'Past Memories',
+        parent_id: null,
+        color: '#14b8a6',
       },
     ],
     notes: [],

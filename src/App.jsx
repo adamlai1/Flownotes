@@ -31,8 +31,8 @@ export default function App() {
   const [projectList, setProjectList] = useState([])
   const [activeProject, setActiveProject] = useState(null)
   const [selectedBubbleId, setSelectedBubbleId] = useState(null)
-  const [viewMode, setViewMode] = useState('bubble') // 'bubble' | 'filtered' | 'chronological'
-  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [viewMode, setViewMode] = useState('bubble') // 'bubble' | 'chronological'
+  const [sidebarOpen, setSidebarOpen] = useState(false)
   const [createNoteOpen, setCreateNoteOpen] = useState(false)
   const [selectedNote, setSelectedNote] = useState(null)
   const saveTimerRef = useRef(null)
@@ -61,7 +61,7 @@ export default function App() {
       setActiveProject(proj)
       setSelectedBubbleId(null)
       setSelectedNote(null)
-      setViewMode('filtered')
+      setViewMode('bubble')
     }
   }
 
@@ -215,7 +215,6 @@ export default function App() {
           selectedBubbleId={selectedBubbleId}
           onSelectBubble={(id) => {
             setSelectedBubbleId(id)
-            setViewMode('filtered')
           }}
           onAddBubble={addBubble}
           onRenameBubble={renameBubble}
@@ -225,7 +224,6 @@ export default function App() {
 
         <MainView
           project={activeProject}
-          selectedBubbleId={selectedBubbleId}
           viewMode={viewMode}
           onSetViewMode={setViewMode}
           onSelectNote={setSelectedNote}
