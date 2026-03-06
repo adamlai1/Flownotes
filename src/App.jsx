@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { createDefaultProject, DEFAULT_PROJECT_ID } from './data/defaultData'
+import { AnimatePresence } from 'framer-motion'
+import { createDefaultProject } from './data/defaultData'
 import { generateId } from './utils/helpers'
 import {
   loadProjectList,
@@ -8,11 +9,23 @@ import {
   saveProject,
   deleteProject as deleteProjectFromStorage,
 } from './utils/storage'
+import { TAG_COLORS } from './data/defaultData'
+
+// Ensure default tag colors exist in customTagColors for projects created before they were unified
+function migrateTagColors(project) {
+  if (!project) return project
+  const existing = project.customTagColors || {}
+  const needsAny = Object.keys(TAG_COLORS).some(t => !(t in existing))
+  if (!needsAny) return project
+  return { ...project, customTagColors: { ...TAG_COLORS, ...existing } }
+}
+import { getNoteTitle } from './utils/helpers'
 import TopNav from './components/TopNav'
 import Sidebar from './components/Sidebar'
 import MainView from './components/MainView'
-import CreateNoteModal from './components/CreateNoteModal'
-import NoteModal from './components/NoteModal'
+import NoteEditor from './components/NoteEditor'
+import Settings from './components/Settings'
+import { ThemeProvider } from './contexts/ThemeContext'
 
 function initializeData() {
   let projectList = loadProjectList()
@@ -23,7 +36,7 @@ function initializeData() {
     saveProject(defaultProject)
     return { projectList, activeProject: defaultProject }
   }
-  const activeProject = loadProject(projectList[0].id)
+  const activeProject = migrateTagColors(loadProject(projectList[0].id))
   return { projectList, activeProject }
 }
 
@@ -31,11 +44,17 @@ export default function App() {
   const [projectList, setProjectList] = useState([])
   const [activeProject, setActiveProject] = useState(null)
   const [selectedBubbleId, setSelectedBubbleId] = useState(null)
+  const [navigateBubbleId, setNavigateBubbleId] = useState(null)
+  const [currentBubbleId, setCurrentBubbleId] = useState(null) // tracks where user is in bubble nav
   const [viewMode, setViewMode] = useState('bubble') // 'bubble' | 'chronological'
   const [sidebarOpen, setSidebarOpen] = useState(false)
-  const [createNoteOpen, setCreateNoteOpen] = useState(false)
-  const [selectedNote, setSelectedNote] = useState(null)
+  // Stack of note IDs open in the editor (last = topmost/active)
+  const [noteStack, setNoteStack] = useState([])
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const saveTimerRef = useRef(null)
+  // Always-current ref so deferred callbacks (debounced saves) never read stale state
+  const activeProjectRef = useRef(null)
+  activeProjectRef.current = activeProject
 
   useEffect(() => {
     const { projectList: pl, activeProject: ap } = initializeData()
@@ -56,11 +75,12 @@ export default function App() {
   }
 
   function switchProject(id) {
-    const proj = loadProject(id)
+    const proj = migrateTagColors(loadProject(id))
     if (proj) {
       setActiveProject(proj)
       setSelectedBubbleId(null)
-      setSelectedNote(null)
+      setNoteStack([])
+      setCurrentBubbleId(null)
       setViewMode('bubble')
     }
   }
@@ -118,7 +138,6 @@ export default function App() {
   }
 
   function deleteBubble(bubbleId) {
-    // Remove bubble and its descendants, also clean up note bubble_ids
     const toRemove = new Set()
     function collectIds(id) {
       toRemove.add(id)
@@ -145,7 +164,7 @@ export default function App() {
     const now = new Date().toISOString()
     const note = {
       id: generateId(),
-      content: noteData.content,
+      content: noteData.content || '',
       created_at: now,
       updated_at: now,
       bubble_ids: noteData.bubble_ids || [],
@@ -159,21 +178,17 @@ export default function App() {
 
   function updateNote(noteId, changes) {
     const now = new Date().toISOString()
+    const current = activeProjectRef.current
     const updated = {
-      ...activeProject,
-      notes: activeProject.notes.map(n =>
+      ...current,
+      notes: current.notes.map(n =>
         n.id === noteId ? { ...n, ...changes, updated_at: now } : n
       ),
     }
     updateProject(updated)
-    // Keep selectedNote in sync
-    if (selectedNote?.id === noteId) {
-      setSelectedNote(prev => ({ ...prev, ...changes, updated_at: now }))
-    }
   }
 
   function deleteNote(noteId) {
-    // Remove note and any connections referencing it
     const updated = {
       ...activeProject,
       notes: activeProject.notes
@@ -184,19 +199,77 @@ export default function App() {
         })),
     }
     updateProject(updated)
-    if (selectedNote?.id === noteId) setSelectedNote(null)
+    setNoteStack(prev => prev.filter(id => id !== noteId))
+  }
+
+  function updateCustomTagColors(colors) {
+    const current = activeProjectRef.current
+    const updated = { ...current, customTagColors: colors }
+    updateProject(updated)
+  }
+
+  function deleteCustomTag(tagName) {
+    const updatedColors = { ...(activeProject.customTagColors || {}) }
+    delete updatedColors[tagName]
+    const updatedNotes = activeProject.notes.map(n => ({
+      ...n,
+      tags: n.tags.filter(t => t !== tagName),
+    }))
+    updateProject({ ...activeProject, customTagColors: updatedColors, notes: updatedNotes })
+  }
+
+  function renameCustomTag(oldName, newName) {
+    if (!newName || newName === oldName) return
+    const existingColors = { ...(activeProject.customTagColors || {}) }
+    const color = existingColors[oldName]
+    delete existingColors[oldName]
+    existingColors[newName] = color
+    const updatedNotes = activeProject.notes.map(n => ({
+      ...n,
+      tags: n.tags.map(t => t === oldName ? newName : t),
+    }))
+    updateProject({ ...activeProject, customTagColors: existingColors, notes: updatedNotes })
+  }
+
+  function handleRefresh() {
+    if (!activeProject) return
+    const proj = migrateTagColors(loadProject(activeProject.id))
+    if (proj) setActiveProject(proj)
+  }
+
+  // Open a note, resetting the stack (entry point from list/bubble views)
+  function openNote(note) {
+    setNoteStack([note.id])
+  }
+
+  // Push a connected note on top of the stack (in-editor navigation)
+  function navigateToNote(note) {
+    setNoteStack(prev => [...prev, note.id])
+  }
+
+  // Pop the top note off the stack; if empty, closes the editor
+  function closeTopNote() {
+    setNoteStack(prev => prev.slice(0, -1))
+  }
+
+  // Create an empty note at current bubble context and open editor
+  function handleCreateNote() {
+    const bubbleIds = currentBubbleId ? [currentBubbleId] : []
+    const note = createNote({ content: '', bubble_ids: bubbleIds, tags: [] })
+    setNoteStack([note.id])
   }
 
   if (!activeProject) {
     return (
-      <div className="flex items-center justify-center h-screen bg-gray-50">
-        <div className="text-gray-400 text-lg">Loading...</div>
+      <div className="flex items-center justify-center h-screen bg-black">
+        <div className="text-gray-600 text-lg">Loading…</div>
       </div>
     )
   }
 
   return (
-    <div className="flex flex-col h-screen overflow-hidden bg-gray-50">
+    <ThemeProvider>
+    <div className="flex flex-col h-full overflow-hidden bg-black">
       <TopNav
         projectList={projectList}
         activeProject={activeProject}
@@ -206,6 +279,7 @@ export default function App() {
         onDeleteProject={deleteProject}
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen(o => !o)}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
 
       <div className="flex flex-1 overflow-hidden">
@@ -213,12 +287,19 @@ export default function App() {
           open={sidebarOpen}
           project={activeProject}
           selectedBubbleId={selectedBubbleId}
+          activeBubbleId={currentBubbleId}
           onSelectBubble={(id) => {
             setSelectedBubbleId(id)
+            setViewMode('bubble')
+            setNavigateBubbleId(id !== null ? id : 'root:' + Date.now())
+            setSidebarOpen(false)
           }}
           onAddBubble={addBubble}
           onRenameBubble={renameBubble}
           onDeleteBubble={deleteBubble}
+          onUpdateCustomTagColors={updateCustomTagColors}
+          onDeleteCustomTag={deleteCustomTag}
+          onRenameCustomTag={renameCustomTag}
           onClose={() => setSidebarOpen(false)}
         />
 
@@ -226,37 +307,62 @@ export default function App() {
           project={activeProject}
           viewMode={viewMode}
           onSetViewMode={setViewMode}
-          onSelectNote={setSelectedNote}
+          onSelectNote={openNote}
           onDeleteNote={deleteNote}
+          onCurrentBubbleChange={setCurrentBubbleId}
+          navigateBubbleId={navigateBubbleId}
+          onRefresh={handleRefresh}
+          sidebarOpen={sidebarOpen}
+          onToggleSidebar={() => setSidebarOpen(o => !o)}
         />
       </div>
 
       {/* Floating Create Button */}
       <button
-        onClick={() => setCreateNoteOpen(true)}
-        className="fixed bottom-6 right-6 w-14 h-14 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full shadow-lg flex items-center justify-center text-2xl z-40 transition-colors"
+        onClick={handleCreateNote}
+        className="flex fixed bottom-6 right-6 w-14 h-14 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full shadow-lg items-center justify-center text-2xl z-40 transition-colors"
+        style={{ marginBottom: 'env(safe-area-inset-bottom)' }}
         aria-label="Create note"
       >
         +
       </button>
 
-      {createNoteOpen && (
-        <CreateNoteModal
-          project={activeProject}
-          onClose={() => setCreateNoteOpen(false)}
-          onCreateNote={createNote}
-        />
-      )}
+      {/* Settings panel */}
+      <AnimatePresence>
+        {settingsOpen && (
+          <Settings key="settings" onClose={() => setSettingsOpen(false)} zIndex={45} />
+        )}
+      </AnimatePresence>
 
-      {selectedNote && (
-        <NoteModal
-          note={selectedNote}
-          project={activeProject}
-          onClose={() => setSelectedNote(null)}
-          onUpdateNote={updateNote}
-          onDeleteNote={deleteNote}
-        />
-      )}
+      {/* Note editor stack — each entry renders as a layer; only the top is interactive */}
+      <AnimatePresence>
+        {noteStack.map((noteId, index) => {
+          const note = activeProject.notes.find(n => n.id === noteId)
+          if (!note) return null
+          const isTop = index === noteStack.length - 1
+          const prevNote = index > 0
+            ? activeProject.notes.find(n => n.id === noteStack[index - 1])
+            : null
+          const backLabel = prevNote
+            ? (getNoteTitle(prevNote.content) || 'Untitled')
+            : 'Notes'
+          return (
+            <NoteEditor
+              key={noteId}
+              note={note}
+              project={activeProject}
+              onClose={closeTopNote}
+              onUpdateNote={updateNote}
+              onDeleteNote={deleteNote}
+              onUpdateCustomTagColors={updateCustomTagColors}
+              onNavigateToNote={isTop ? navigateToNote : undefined}
+              backLabel={backLabel}
+              zIndex={50 + index}
+            />
+          )
+        })}
+      </AnimatePresence>
     </div>
+    </ThemeProvider>
   )
 }

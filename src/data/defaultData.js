@@ -9,6 +9,21 @@ const remindersId = generateId()
 const pastMemoriesId = generateId()
 const defaultProjectId = generateId()
 
+// Sentinel ID used when a note is explicitly pinned to the root level
+// alongside membership in other bubbles.
+export const ROOT_BUBBLE_ID = '__root__'
+
+export const DEFAULT_TAGS = ['Certain', 'Think About More', 'Not Sure', 'Could Be Wrong']
+
+export const TAG_COLORS = {
+  'Certain': '#34C759',
+  'Think About More': '#FFD60A',
+  'Not Sure': '#FF9F0A',
+  'Could Be Wrong': '#FF453A',
+}
+
+export const CUSTOM_TAG_PALETTE = ['#0A84FF', '#BF5AF2', '#FF375F', '#64D2FF', '#5E5CE6']
+
 export const BUBBLE_COLORS = [
   '#6366f1', // indigo
   '#8b5cf6', // violet
@@ -73,11 +88,12 @@ export function createDefaultProject() {
       },
     ],
     notes: [],
+    customTagColors: { ...TAG_COLORS },
   }
 }
 
 export const CONNECTION_TYPES = [
-  'causes this',
+  'causes',
   'similar idea',
   'opposing idea',
   'leads to',

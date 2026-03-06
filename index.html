@@ -3,8 +3,13 @@
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>MindMap Notes</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <title>Flownotes</title>
+    <script>
+      window.onerror = function(msg, url, line, col, error) {
+        document.body.innerHTML = '<div style="color:red;padding:20px;font-size:16px;font-family:monospace;white-space:pre-wrap;">' + msg + '<br>Line: ' + line + '<br>File: ' + url + (error && error.stack ? '<br><br>' + error.stack : '') + '</div>';
+      };
+    </script>
   </head>
   <body>
     <div id="root"></div>

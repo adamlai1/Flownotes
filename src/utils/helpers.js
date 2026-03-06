@@ -32,6 +32,16 @@ export function formatDateGroup(isoString) {
   })
 }
 
+// Returns the display title for a note: first non-empty line of content, or '' if blank
+export function getNoteTitle(content) {
+  if (!content?.trim()) return ''
+  for (const line of content.split('\n')) {
+    const t = line.trim()
+    if (t) return t
+  }
+  return ''
+}
+
 export function getPreview(content, lines = 3) {
   if (!content) return ''
   const allLines = content.split('\n').filter(l => l.trim())

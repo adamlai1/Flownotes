@@ -9,6 +9,7 @@ export default function TopNav({
   onDeleteProject,
   sidebarOpen,
   onToggleSidebar,
+  onOpenSettings,
 }) {
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
@@ -27,7 +28,11 @@ export default function TopNav({
       }
     }
     document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
+    document.addEventListener('touchstart', handleClick)
+    return () => {
+      document.removeEventListener('mousedown', handleClick)
+      document.removeEventListener('touchstart', handleClick)
+    }
   }, [])
 
   useEffect(() => {
@@ -58,27 +63,29 @@ export default function TopNav({
   }
 
   return (
-    <nav className="flex items-center gap-2 px-3 py-2 bg-white border-b border-gray-200 shadow-sm z-50 flex-shrink-0">
-      {/* Hamburger / Sidebar toggle */}
-      <button
-        onClick={onToggleSidebar}
-        className="p-2 rounded-md text-gray-500 hover:bg-gray-100 transition-colors"
-        aria-label="Toggle sidebar"
-      >
-        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-            d={sidebarOpen ? "M6 18L18 6M6 6l12 12" : "M4 6h16M4 12h16M4 18h16"} />
-        </svg>
-      </button>
+    <nav className="flex items-center px-3 py-2 bg-gray-900 border-b border-gray-800 z-30 flex-shrink-0"
+      style={{ paddingTop: 'max(8px, env(safe-area-inset-top))', boxShadow: 'var(--nav-shadow, none)' }}
+    >
+      {/* Left: Hamburger */}
+      <div className="flex items-center flex-1">
+        <button
+          onClick={onToggleSidebar}
+          className="flex p-2 text-gray-400"
+          style={{ WebkitTapHighlightColor: 'transparent', outline: 'none', background: 'none' }}
+          aria-label="Toggle sidebar"
+        >
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d={sidebarOpen ? "M6 18L18 6M6 6l12 12" : "M4 6h16M4 12h16M4 18h16"} />
+          </svg>
+        </button>
+      </div>
 
-      {/* Logo */}
-      <span className="font-semibold text-gray-800 text-sm hidden sm:block mr-1">MindMap</span>
-
-      {/* Project dropdown */}
-      <div className="relative flex-1 sm:flex-none" ref={dropdownRef}>
+      {/* Center: Project dropdown */}
+      <div className="relative" ref={dropdownRef}>
         <button
           onClick={() => { setDropdownOpen(o => !o); setCreatingProject(false); setRenamingId(null) }}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-800 rounded-lg text-sm font-medium transition-colors max-w-[200px] sm:max-w-xs"
+          className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-950 hover:bg-indigo-900 text-indigo-300 rounded-lg text-sm font-medium transition-colors max-w-[200px] sm:max-w-xs"
         >
           <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -91,8 +98,8 @@ export default function TopNav({
         </button>
 
         {dropdownOpen && (
-          <div className="absolute top-full left-0 mt-1 w-64 bg-white rounded-xl shadow-xl border border-gray-100 z-50 py-1">
-            <div className="px-3 py-1.5 text-xs font-semibold text-gray-400 uppercase tracking-wider">Projects</div>
+          <div className="absolute top-full left-0 mt-1 w-64 bg-gray-900 rounded-xl shadow-xl border border-gray-800 z-50 py-1">
+            <div className="px-3 py-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wider">Projects</div>
 
             {projectList.map(proj => (
               <div key={proj.id} className="group flex items-center gap-1 px-2">
@@ -106,12 +113,12 @@ export default function TopNav({
                         if (e.key === 'Enter') handleRename(proj.id)
                         if (e.key === 'Escape') setRenamingId(null)
                       }}
-                      className="flex-1 px-2 py-1 text-sm border border-indigo-300 rounded-md outline-none"
+                      className="flex-1 px-2 py-1 text-sm border border-indigo-600 rounded-md outline-none bg-gray-800 text-white"
                     />
                     <button onClick={() => handleRename(proj.id)}
                       className="text-xs px-2 py-1 bg-indigo-600 text-white rounded-md">OK</button>
                     <button onClick={() => setRenamingId(null)}
-                      className="text-xs px-2 py-1 text-gray-500 hover:text-gray-700">✕</button>
+                      className="text-xs px-2 py-1 text-gray-500 hover:text-gray-300">✕</button>
                   </div>
                 ) : (
                   <>
@@ -119,16 +126,16 @@ export default function TopNav({
                       onClick={() => { onSwitchProject(proj.id); setDropdownOpen(false) }}
                       className={`flex-1 text-left px-2 py-2 text-sm rounded-lg transition-colors ${
                         proj.id === activeProject.id
-                          ? 'bg-indigo-50 text-indigo-700 font-medium'
-                          : 'text-gray-700 hover:bg-gray-50'
+                          ? 'bg-indigo-950 text-indigo-300 font-medium'
+                          : 'text-gray-300 hover:bg-gray-800'
                       }`}
                     >
                       {proj.name}
                     </button>
-                    <div className="hidden group-hover:flex items-center gap-0.5">
+                    <div className="flex items-center gap-0.5">
                       <button
                         onClick={() => { setRenamingId(proj.id); setRenameValue(proj.name) }}
-                        className="p-1 text-gray-400 hover:text-gray-600 rounded"
+                        className="p-1 text-gray-600 hover:text-gray-400 rounded"
                         title="Rename"
                       >
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -154,7 +161,7 @@ export default function TopNav({
               </div>
             ))}
 
-            <div className="border-t border-gray-100 mt-1 pt-1 px-2">
+            <div className="border-t border-gray-800 mt-1 pt-1 px-2">
               {creatingProject ? (
                 <div className="flex items-center gap-1 py-1">
                   <input
@@ -166,7 +173,7 @@ export default function TopNav({
                       if (e.key === 'Escape') setCreatingProject(false)
                     }}
                     placeholder="Project name..."
-                    className="flex-1 px-2 py-1 text-sm border border-indigo-300 rounded-md outline-none"
+                    className="flex-1 px-2 py-1 text-sm border border-indigo-600 rounded-md outline-none bg-gray-800 text-white"
                   />
                   <button onClick={handleCreateProject}
                     className="text-xs px-2 py-1 bg-indigo-600 text-white rounded-md">Create</button>
@@ -174,7 +181,7 @@ export default function TopNav({
               ) : (
                 <button
                   onClick={() => setCreatingProject(true)}
-                  className="w-full flex items-center gap-2 px-2 py-2 text-sm text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors"
+                  className="w-full flex items-center gap-2 px-2 py-2 text-sm text-indigo-400 hover:bg-indigo-950 rounded-lg transition-colors"
                 >
                   <span className="text-lg leading-none">+</span>
                   <span>New Project</span>
@@ -185,9 +192,9 @@ export default function TopNav({
         )}
       </div>
 
-      <div className="ml-auto flex items-center gap-1">
-        {/* Settings icon (future use) */}
-        <button className="p-2 rounded-md text-gray-400 hover:bg-gray-100 transition-colors" aria-label="Settings">
+      {/* Right: Settings */}
+      <div className="flex items-center flex-1 justify-end">
+        <button onClick={onOpenSettings} className="p-2 rounded-md text-gray-600 hover:bg-gray-800 transition-colors" aria-label="Settings">
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
               d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
