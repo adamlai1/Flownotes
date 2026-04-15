@@ -154,18 +154,17 @@ export default function Sidebar({
           width: '18rem',
           backgroundColor: 'var(--sidebar)',
           borderRight: '1px solid var(--border-hard)',
-          overflowY: 'scroll',
-          WebkitOverflowScrolling: 'touch',
-          overscrollBehavior: 'none',
-          touchAction: 'pan-y',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
           zIndex: 40,
           transform: open ? 'translateX(0)' : 'translateX(-100%)',
           transition: 'transform 200ms ease-in-out',
         }}
       >
-        {/* Sticky top row: X close button + All Notes — mirrors the TopNav hamburger position */}
+        {/* Fixed top row: X close button + All Notes — mirrors the TopNav hamburger position */}
         <div
-          className="sticky top-0 z-10 flex items-center border-b border-gray-800"
+          className="flex-shrink-0 flex items-center border-b border-gray-800"
           style={{ backgroundColor: 'var(--sidebar)', paddingTop: 'max(8px, env(safe-area-inset-top))' }}
         >
           <button
@@ -196,7 +195,7 @@ export default function Sidebar({
           </button>
         </div>
 
-        <div style={{ paddingBottom: '300px' }}>
+        <div style={{ flex: 1, overflowY: 'scroll', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'none', touchAction: 'pan-y', paddingBottom: '300px' }}>
 
           {/* Bubbles section */}
           <div className="px-3 pt-4 pb-2">

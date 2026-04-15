@@ -35,9 +35,14 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   const [future, setFuture] = useState([])
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const bodyRef = useRef(null)
+  const headerRef = useRef(null)
+  const scrollAreaRef = useRef(null)
   const tagInputRef = useRef(null)
   const saveTimerRef = useRef(null)
   const swipeRef = useRef({ active: false, startX: 0, currentX: 0 })
+  const textareaFocusedRef = useRef(false)
+  const savedOuterScrollRef = useRef(0)
+  const metadataRef = useRef(null)
 
   const buildContent = useCallback((t, b) => b ? `${t}\n${b}` : t, [])
 
@@ -57,9 +62,93 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
   }, [])
 
+
   useEffect(() => {
     if (addingTag) tagInputRef.current?.focus({ preventScroll: true })
   }, [addingTag])
+
+  function setFixedHeight() {
+    const el = bodyRef.current
+    if (!el) return
+    const vvh = window.visualViewport?.height ?? window.innerHeight
+    const headerH = headerRef.current?.offsetHeight ?? 0
+    const metadataH = metadataRef.current?.offsetHeight ?? 0
+    const padding = 40 // pt-4 (16) + pb-3 (12) around textarea + 12px gap
+    el.style.height = `${Math.max(120, vvh - headerH - metadataH - padding)}px`
+  }
+
+  // Set height on mount and whenever the keyboard opens/closes.
+  useEffect(() => {
+    setFixedHeight()
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const vv = window.visualViewport
+    if (!vv) return
+    const handler = () => setFixedHeight()
+    vv.addEventListener('resize', handler)
+    return () => vv.removeEventListener('resize', handler)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // After each keystroke, scroll the textarea so the cursor stays in view.
+  useEffect(() => {
+    scrollToCursor()
+  }, [body]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Lock the outer scroll container ONLY while the keyboard is open and textarea is focused.
+  // When the keyboard is closed the outer container must scroll freely.
+  useEffect(() => {
+    const el = scrollAreaRef.current
+    if (!el) return
+    function onOuterScroll() {
+      const vvh = window.visualViewport?.height ?? window.innerHeight
+      const keyboardOpen = textareaFocusedRef.current && vvh < window.innerHeight - 80
+      if (keyboardOpen) {
+        el.scrollTop = savedOuterScrollRef.current
+      }
+    }
+    el.addEventListener('scroll', onOuterScroll)
+    return () => el.removeEventListener('scroll', onOuterScroll)
+  }, [])
+
+  function handleBodyFocus() {
+    textareaFocusedRef.current = true
+    // Snapshot the outer scroll position so we can restore it if the browser
+    // tries to scroll the outer container when the textarea gains focus.
+    if (scrollAreaRef.current) {
+      savedOuterScrollRef.current = scrollAreaRef.current.scrollTop
+    }
+    // Also prevent the page (document) from scrolling on mobile Chrome.
+    const savedScrollY = window.scrollY
+    requestAnimationFrame(() => {
+      if (window.scrollY !== savedScrollY) window.scrollTo(0, savedScrollY)
+    })
+  }
+
+  function handleBodyBlur() {
+    textareaFocusedRef.current = false
+  }
+
+  function scrollToCursor() {
+    const el = bodyRef.current
+    if (!el) return
+    const cs = window.getComputedStyle(el)
+    const lineHeight = parseFloat(cs.lineHeight) || 24
+    const linesAbove = el.value.substring(0, el.selectionStart).split('\n').length - 1
+    const cursorTop = linesAbove * lineHeight
+    const cursorBottom = cursorTop + lineHeight
+    const elH = el.clientHeight
+    if (cursorBottom > el.scrollTop + elH) {
+      el.scrollTop = cursorBottom - elH
+    } else if (cursorTop < el.scrollTop) {
+      el.scrollTop = cursorTop
+    }
+  }
+
+  function handleBodyClick() {
+    // Wait 50ms for the browser to finalise selectionStart after a tap.
+    setTimeout(scrollToCursor, 50)
+  }
 
   // On mount: register any custom tags on this note that aren't yet in the project color map.
   // This ensures toggling a custom tag off never removes the pill — it just deselects it.
@@ -76,13 +165,6 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     onUpdateCustomTagColors?.(updated)
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-grow textarea
-  useEffect(() => {
-    const el = bodyRef.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = el.scrollHeight + 'px'
-  }, [body])
 
   function handleClose() {
     if (isClosing) return
@@ -292,16 +374,24 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       transition={{ type: 'tween', duration: 0.16, ease: [0.25, 0.46, 0.45, 0.94] }}
     >
     <div
-      className="flex flex-col w-full h-full"
-      style={{ background: 'var(--surface)', transform: `translateX(${swipeOffset}px)`, transition: swipeTransition }}
+      style={{
+        position: 'absolute', top: 0, right: 0, bottom: 0, left: 0,
+        background: 'var(--surface)',
+        display: 'grid', gridTemplateRows: 'auto 1fr', overflow: 'hidden',
+        transform: `translateX(${swipeOffset}px)`, transition: swipeTransition,
+      }}
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
     >
-      {/* ── Header ──────────────────────────────────────────────────────────── */}
+      {/* ── Header — grid row 1 (auto height, never scrolls) ─────────────────── */}
       <div
-        className="flex-shrink-0 relative flex items-center px-3 border-b border-white/10"
-        style={{ paddingTop: 'max(12px, env(safe-area-inset-top))', paddingBottom: 10 }}
+        ref={headerRef}
+        className="relative flex items-center px-3 border-b border-white/10"
+        style={{
+          paddingTop: 'max(12px, env(safe-area-inset-top))', paddingBottom: 10,
+          background: 'var(--surface)',
+        }}
       >
         <button
           onClick={handleClose}
@@ -362,8 +452,8 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         </button>
       </div>
 
-      {/* ── Single scroll area ──────────────────────────────────────────────── */}
-      <div className="flex-1 overflow-y-auto">
+      {/* ── Scroll area — grid row 2 (1fr), only this scrolls ───────────────── */}
+      <div ref={scrollAreaRef} style={{ overflowY: 'auto', minHeight: 0, WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
 
         {/* Text content */}
         <div className="px-5 pt-4 pb-3 border-b border-white/10">
@@ -371,13 +461,16 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             ref={bodyRef}
             value={body}
             onChange={handleBodyChange}
+            onFocus={handleBodyFocus}
+            onBlur={handleBodyBlur}
+            onClick={handleBodyClick}
             placeholder="Start writing…"
             autoComplete="off"
-            autoCorrect="off"
+            autoCorrect="on"
             autoCapitalize="sentences"
-            spellCheck={false}
+            spellCheck={true}
             className="w-full text-[16px] text-gray-200 placeholder-gray-700 outline-none resize-none bg-transparent leading-relaxed"
-            style={{ minHeight: '40vh', overflow: 'hidden', userSelect: 'text', WebkitUserSelect: 'text' }}
+            style={{ display: 'block', overflowY: 'auto', overscrollBehavior: 'contain', userSelect: 'text', WebkitUserSelect: 'text' }}
           />
           <div className="flex items-end justify-between pt-2">
             <p className="text-[11px] text-gray-700">
@@ -391,7 +484,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         </div>
 
         {/* ── Metadata (scrolls with content) ───────────────────────────────── */}
-        <div className="px-4 pt-5 pb-8 space-y-6">
+        <div ref={metadataRef} className="px-4 pt-5 pb-8 space-y-6">
 
           {/* Tags — all in one wrapping row */}
           <div className="flex flex-wrap gap-x-3 gap-y-1.5 items-center">
