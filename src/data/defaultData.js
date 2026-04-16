@@ -5,6 +5,8 @@ const ideasSelfId = generateId()
 const ideasOtherId = generateId()
 const ideasSocietyId = generateId()
 const ideasRelationshipsId = generateId()
+const ideasSchoolId = generateId()
+const ideasSchoolEntrepreneurialId = generateId()
 const remindersId = generateId()
 const pastMemoriesId = generateId()
 const defaultProjectId = generateId()
@@ -73,6 +75,18 @@ export function createDefaultProject() {
         name: 'Relationships',
         parent_id: ideasId,
         color: '#f97316',
+      },
+      {
+        id: ideasSchoolId,
+        name: 'School',
+        parent_id: ideasId,
+        color: '#eab308',
+      },
+      {
+        id: ideasSchoolEntrepreneurialId,
+        name: 'Entrepreneurial Leadership',
+        parent_id: ideasSchoolId,
+        color: '#22c55e',
       },
       {
         id: remindersId,

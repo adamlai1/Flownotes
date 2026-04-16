@@ -156,7 +156,7 @@ export default function MainView({
     >
       {/* Sticky header + filters */}
       <div className="sticky top-0 z-10 bg-black">
-        <div className="max-w-2xl mx-auto px-4">
+        <div className="px-4 md:px-6">
           {/* Title row — h-[52px] matches bubble view sub-bar height exactly */}
           <div className="flex items-center justify-between" style={{ height: 52 }}>
             <div className="flex items-center gap-2">
@@ -365,7 +365,7 @@ export default function MainView({
       </div>
 
       {/* Scrollable notes list */}
-      <div className="max-w-2xl mx-auto px-4 pt-4 pb-32">
+      <div className="px-4 md:px-6 pt-4" style={{ paddingBottom: 'calc(8rem + env(safe-area-inset-bottom))' }}>
         {sortedNotes.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20 text-center">
             <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mb-4">
@@ -408,7 +408,7 @@ export default function MainView({
                   </svg>
                   Pinned
                 </div>
-                <div className="grid grid-cols-1 gap-3 landscape:grid-cols-2">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                   {pinnedNotes.map(note => (
                     <NoteCard
                       key={note.id}
@@ -431,7 +431,7 @@ export default function MainView({
                 <div className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 px-1">
                   {dateLabel}
                 </div>
-                <div className="grid grid-cols-1 gap-3 landscape:grid-cols-2">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
                   {notes.map(note => (
                     <NoteCard
                       key={note.id}

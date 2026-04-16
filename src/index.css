@@ -4,7 +4,7 @@
 
 /* ── Theme tokens ──────────────────────────────────────────────────────────── */
 :root {
-  --bg:          #000000;
+  --bg:          #1C1C1E;
   --surface:     #1C1C1E;
   --surface-2:   #2C2C2E;
   --sidebar:     #111827;
@@ -21,7 +21,7 @@
 }
 
 [data-theme="light"] {
-  --bg:          #F5F5F0;
+  --bg:          #F2F2F7;
   --surface:     #FAFAF7;
   --surface-2:   #EEEEE8;
   --sidebar:     #EEEEE8;
@@ -123,20 +123,24 @@
     -webkit-user-select: none;
   }
   html {
-    /* Cascade: 100dvh (dynamic, shrinks when browser chrome is visible) overrides the fallbacks */
-    height: 100vh;
-    height: calc(100vh - env(safe-area-inset-bottom));
-    height: 100dvh;
+    height: 100%;
+    background-color: #1C1C1E;
     overflow: hidden;
     overscroll-behavior: none;
   }
+  html[data-theme="light"] {
+    background-color: #F2F2F7;
+  }
   body {
-    background-color: var(--bg);
+    background-color: #1C1C1E;
     color: var(--text);
     touch-action: manipulation;
     height: 100%;
     overflow: hidden;
     overscroll-behavior: none;
+  }
+  [data-theme="light"] body {
+    background-color: #F2F2F7;
   }
   #root {
     touch-action: manipulation;

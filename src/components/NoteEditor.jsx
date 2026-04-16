@@ -17,6 +17,13 @@ function splitContent(content) {
 }
 
 export default function NoteEditor({ note, project, onClose, onUpdateNote, onDeleteNote, onUpdateCustomTagColors, onNavigateToNote, backLabel = 'Notes', zIndex = 50 }) {
+  const [isDesktop, setIsDesktop] = useState(() => window.matchMedia('(min-width: 768px)').matches)
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 768px)')
+    const handler = e => setIsDesktop(e.matches)
+    mq.addEventListener('change', handler)
+    return () => mq.removeEventListener('change', handler)
+  }, [])
   const { title: initTitle, body: initBody } = splitContent(note.content)
   const [title, setTitle] = useState(initTitle)
   const [body, setBody] = useState(initBody)
@@ -35,14 +42,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   const [future, setFuture] = useState([])
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const bodyRef = useRef(null)
-  const headerRef = useRef(null)
-  const scrollAreaRef = useRef(null)
   const tagInputRef = useRef(null)
   const saveTimerRef = useRef(null)
   const swipeRef = useRef({ active: false, startX: 0, currentX: 0 })
-  const textareaFocusedRef = useRef(false)
-  const savedOuterScrollRef = useRef(0)
-  const metadataRef = useRef(null)
 
   const buildContent = useCallback((t, b) => b ? `${t}\n${b}` : t, [])
 
@@ -66,89 +68,6 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   useEffect(() => {
     if (addingTag) tagInputRef.current?.focus({ preventScroll: true })
   }, [addingTag])
-
-  function setFixedHeight() {
-    const el = bodyRef.current
-    if (!el) return
-    const vvh = window.visualViewport?.height ?? window.innerHeight
-    const headerH = headerRef.current?.offsetHeight ?? 0
-    const metadataH = metadataRef.current?.offsetHeight ?? 0
-    const padding = 40 // pt-4 (16) + pb-3 (12) around textarea + 12px gap
-    el.style.height = `${Math.max(120, vvh - headerH - metadataH - padding)}px`
-  }
-
-  // Set height on mount and whenever the keyboard opens/closes.
-  useEffect(() => {
-    setFixedHeight()
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    const vv = window.visualViewport
-    if (!vv) return
-    const handler = () => setFixedHeight()
-    vv.addEventListener('resize', handler)
-    return () => vv.removeEventListener('resize', handler)
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // After each keystroke, scroll the textarea so the cursor stays in view.
-  useEffect(() => {
-    scrollToCursor()
-  }, [body]) // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Lock the outer scroll container ONLY while the keyboard is open and textarea is focused.
-  // When the keyboard is closed the outer container must scroll freely.
-  useEffect(() => {
-    const el = scrollAreaRef.current
-    if (!el) return
-    function onOuterScroll() {
-      const vvh = window.visualViewport?.height ?? window.innerHeight
-      const keyboardOpen = textareaFocusedRef.current && vvh < window.innerHeight - 80
-      if (keyboardOpen) {
-        el.scrollTop = savedOuterScrollRef.current
-      }
-    }
-    el.addEventListener('scroll', onOuterScroll)
-    return () => el.removeEventListener('scroll', onOuterScroll)
-  }, [])
-
-  function handleBodyFocus() {
-    textareaFocusedRef.current = true
-    // Snapshot the outer scroll position so we can restore it if the browser
-    // tries to scroll the outer container when the textarea gains focus.
-    if (scrollAreaRef.current) {
-      savedOuterScrollRef.current = scrollAreaRef.current.scrollTop
-    }
-    // Also prevent the page (document) from scrolling on mobile Chrome.
-    const savedScrollY = window.scrollY
-    requestAnimationFrame(() => {
-      if (window.scrollY !== savedScrollY) window.scrollTo(0, savedScrollY)
-    })
-  }
-
-  function handleBodyBlur() {
-    textareaFocusedRef.current = false
-  }
-
-  function scrollToCursor() {
-    const el = bodyRef.current
-    if (!el) return
-    const cs = window.getComputedStyle(el)
-    const lineHeight = parseFloat(cs.lineHeight) || 24
-    const linesAbove = el.value.substring(0, el.selectionStart).split('\n').length - 1
-    const cursorTop = linesAbove * lineHeight
-    const cursorBottom = cursorTop + lineHeight
-    const elH = el.clientHeight
-    if (cursorBottom > el.scrollTop + elH) {
-      el.scrollTop = cursorBottom - elH
-    } else if (cursorTop < el.scrollTop) {
-      el.scrollTop = cursorTop
-    }
-  }
-
-  function handleBodyClick() {
-    // Wait 50ms for the browser to finalise selectionStart after a tap.
-    setTimeout(scrollToCursor, 50)
-  }
 
   // On mount: register any custom tags on this note that aren't yet in the project color map.
   // This ensures toggling a custom tag off never removes the pill — it just deselects it.
@@ -367,26 +286,41 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     <motion.div
       data-modal
       className="fixed inset-0"
-      style={{ zIndex }}
-      initial={{ x: '100%' }}
-      animate={{ x: 0 }}
-      exit={{ x: '100%' }}
-      transition={{ type: 'tween', duration: 0.16, ease: [0.25, 0.46, 0.45, 0.94] }}
+      style={{
+        zIndex,
+        background: isDesktop ? 'rgba(0,0,0,0.6)' : 'var(--surface)',
+        display: isDesktop ? 'flex' : 'block',
+        alignItems: isDesktop ? 'stretch' : undefined,
+        justifyContent: isDesktop ? 'center' : undefined,
+      }}
+      initial={isDesktop ? { opacity: 0 } : { x: '100%' }}
+      animate={isDesktop ? { opacity: 1 } : { x: 0 }}
+      exit={isDesktop ? { opacity: 0 } : { x: '100%' }}
+      transition={{ type: 'tween', duration: isDesktop ? 0.18 : 0.16, ease: [0.25, 0.46, 0.45, 0.94] }}
     >
     <div
-      style={{
+      style={isDesktop ? {
+        position: 'relative',
+        width: '100%',
+        maxWidth: 820,
+        background: 'var(--surface)',
+        display: 'grid',
+        gridTemplateRows: 'auto 1fr',
+        overflow: 'hidden',
+        borderLeft: '1px solid var(--border)',
+        borderRight: '1px solid var(--border)',
+      } : {
         position: 'absolute', top: 0, right: 0, bottom: 0, left: 0,
         background: 'var(--surface)',
         display: 'grid', gridTemplateRows: 'auto 1fr', overflow: 'hidden',
         transform: `translateX(${swipeOffset}px)`, transition: swipeTransition,
       }}
-      onTouchStart={handleTouchStart}
-      onTouchMove={handleTouchMove}
-      onTouchEnd={handleTouchEnd}
+      onTouchStart={!isDesktop ? handleTouchStart : undefined}
+      onTouchMove={!isDesktop ? handleTouchMove : undefined}
+      onTouchEnd={!isDesktop ? handleTouchEnd : undefined}
     >
       {/* ── Header — grid row 1 (auto height, never scrolls) ─────────────────── */}
       <div
-        ref={headerRef}
         className="relative flex items-center px-3 border-b border-white/10"
         style={{
           paddingTop: 'max(12px, env(safe-area-inset-top))', paddingBottom: 10,
@@ -453,24 +387,21 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       </div>
 
       {/* ── Scroll area — grid row 2 (1fr), only this scrolls ───────────────── */}
-      <div ref={scrollAreaRef} style={{ overflowY: 'auto', minHeight: 0, WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
+      <div style={{ overflowY: 'auto', minHeight: 0, WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
 
         {/* Text content */}
-        <div className="px-5 pt-4 pb-3 border-b border-white/10">
+        <div className="px-5 md:px-10 pt-4 md:pt-8 pb-3 border-b border-white/10">
           <textarea
             ref={bodyRef}
             value={body}
             onChange={handleBodyChange}
-            onFocus={handleBodyFocus}
-            onBlur={handleBodyBlur}
-            onClick={handleBodyClick}
             placeholder="Start writing…"
             autoComplete="off"
             autoCorrect="on"
             autoCapitalize="sentences"
             spellCheck={true}
-            className="w-full text-[16px] text-gray-200 placeholder-gray-700 outline-none resize-none bg-transparent leading-relaxed"
-            style={{ display: 'block', overflowY: 'auto', overscrollBehavior: 'contain', userSelect: 'text', WebkitUserSelect: 'text' }}
+            className="w-full text-[16px] md:text-[17px] text-gray-200 placeholder-gray-700 outline-none resize-none bg-transparent leading-relaxed"
+            style={{ height: '60vh', overflowY: 'auto', overscrollBehavior: 'contain', userSelect: 'text', WebkitUserSelect: 'text' }}
           />
           <div className="flex items-end justify-between pt-2">
             <p className="text-[11px] text-gray-700">
@@ -484,7 +415,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         </div>
 
         {/* ── Metadata (scrolls with content) ───────────────────────────────── */}
-        <div ref={metadataRef} className="px-4 pt-5 pb-8 space-y-6">
+        <div className="px-4 md:px-10 pt-5 space-y-6" style={{ paddingBottom: 'calc(2rem + env(safe-area-inset-bottom))' }}>
 
           {/* Tags — all in one wrapping row */}
           <div className="flex flex-wrap gap-x-3 gap-y-1.5 items-center">

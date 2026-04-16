@@ -1080,7 +1080,7 @@ export default function BubbleVisualization({
         className="absolute top-0 left-0 right-0 z-10"
         style={{ height: SUB_BAR_H }}
       >
-        <div className="max-w-2xl mx-auto px-4 h-full flex items-center justify-between">
+        <div className="px-4 md:px-6 h-full flex items-center justify-between">
         {/* Breadcrumb — back arrow + text sit tight to the left edge */}
         <div className="flex items-center gap-0.5 min-w-0 flex-1 mr-3">
           <button

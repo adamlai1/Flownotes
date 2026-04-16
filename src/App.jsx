@@ -25,6 +25,7 @@ import Sidebar from './components/Sidebar'
 import MainView from './components/MainView'
 import NoteEditor from './components/NoteEditor'
 import Settings from './components/Settings'
+import Onboarding from './components/Onboarding'
 import { ThemeProvider } from './contexts/ThemeContext'
 
 function initializeData() {
@@ -47,10 +48,24 @@ export default function App() {
   const [navigateBubbleId, setNavigateBubbleId] = useState(null)
   const [currentBubbleId, setCurrentBubbleId] = useState(null) // tracks where user is in bubble nav
   const [viewMode, setViewMode] = useState('bubble') // 'bubble' | 'chronological'
-  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [isDesktop, setIsDesktop] = useState(() => window.matchMedia('(min-width: 768px)').matches)
+  const [sidebarOpen, setSidebarOpen] = useState(() => window.matchMedia('(min-width: 768px)').matches)
+
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 768px)')
+    const handler = e => {
+      setIsDesktop(e.matches)
+      if (e.matches) setSidebarOpen(true)
+    }
+    mq.addEventListener('change', handler)
+    return () => mq.removeEventListener('change', handler)
+  }, [])
   // Stack of note IDs open in the editor (last = topmost/active)
   const [noteStack, setNoteStack] = useState([])
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [showOnboarding, setShowOnboarding] = useState(() =>
+    !localStorage.getItem('hasSeenOnboarding')
+  )
   const saveTimerRef = useRef(null)
   // Always-current ref so deferred callbacks (debounced saves) never read stale state
   const activeProjectRef = useRef(null)
@@ -280,11 +295,13 @@ export default function App() {
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen(o => !o)}
         onOpenSettings={() => setSettingsOpen(true)}
+        isDesktop={isDesktop}
       />
 
       <div className="flex flex-1 overflow-hidden">
         <Sidebar
           open={sidebarOpen}
+          isDesktop={isDesktop}
           project={activeProject}
           selectedBubbleId={selectedBubbleId}
           activeBubbleId={currentBubbleId}
@@ -292,7 +309,7 @@ export default function App() {
             setSelectedBubbleId(id)
             setViewMode('bubble')
             setNavigateBubbleId(id !== null ? id : 'root:' + Date.now())
-            setSidebarOpen(false)
+            if (!isDesktop) setSidebarOpen(false)
           }}
           onAddBubble={addBubble}
           onRenameBubble={renameBubble}
@@ -361,6 +378,19 @@ export default function App() {
             />
           )
         })}
+      </AnimatePresence>
+
+      {/* Onboarding overlay — first visit only */}
+      <AnimatePresence>
+        {showOnboarding && (
+          <Onboarding
+            key="onboarding"
+            onDismiss={() => {
+              localStorage.setItem('hasSeenOnboarding', '1')
+              setShowOnboarding(false)
+            }}
+          />
+        )}
       </AnimatePresence>
     </div>
     </ThemeProvider>

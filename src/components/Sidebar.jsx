@@ -6,6 +6,7 @@ import { generateId } from '../utils/helpers'
 
 export default function Sidebar({
   open,
+  isDesktop,
   project,
   selectedBubbleId,
   activeBubbleId,
@@ -55,6 +56,7 @@ export default function Sidebar({
 
   // iOS-safe body lock: position:fixed prevents rubber-band scroll behind the sidebar
   useEffect(() => {
+    if (isDesktop) return // no body lock on desktop — sidebar is in-flow
     if (open) {
       const scrollY = window.scrollY
       document.body.style.position = 'fixed'
@@ -75,7 +77,7 @@ export default function Sidebar({
       document.body.style.width = ''
       document.body.style.overflow = ''
     }
-  }, [open])
+  }, [open, isDesktop])
 
   // Dismiss contextTag on outside click
   useEffect(() => {
@@ -130,8 +132,8 @@ export default function Sidebar({
 
   return (
     <>
-      {/* Backdrop */}
-      {open && (
+      {/* Backdrop — mobile only */}
+      {!isDesktop && open && (
         <div
           style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.3)', zIndex: 30 }}
           onClick={onClose}
@@ -139,14 +141,22 @@ export default function Sidebar({
       )}
 
       {/*
-        Sidebar: fully isolated fixed panel.
-        All critical scroll properties in inline styles so nothing overrides them.
-        top+bottom instead of height:100vh avoids iOS URL-bar issues.
-        overflow-y:scroll + -webkit-overflow-scrolling:touch = native momentum scroll on iOS.
-        paddingBottom:300px gives room to scroll the input above the keyboard.
+        Desktop: in-flow sidebar, width collapses when closed.
+        Mobile: fixed overlay panel that slides in/out.
       */}
       <aside
-        style={{
+        style={isDesktop ? {
+          position: 'relative',
+          width: open ? '17rem' : '0',
+          flexShrink: 0,
+          backgroundColor: 'var(--sidebar)',
+          borderRight: open ? '1px solid var(--border-hard)' : 'none',
+          overflow: 'hidden',
+          display: 'flex',
+          flexDirection: 'column',
+          transition: 'width 200ms ease-in-out',
+          zIndex: 20,
+        } : {
           position: 'fixed',
           top: 0,
           left: 0,
@@ -162,21 +172,24 @@ export default function Sidebar({
           transition: 'transform 200ms ease-in-out',
         }}
       >
-        {/* Fixed top row: X close button + All Notes — mirrors the TopNav hamburger position */}
+        {/* Fixed top row: X close button (mobile) + All Notes — mirrors the TopNav hamburger position */}
         <div
           className="flex-shrink-0 flex items-center border-b border-gray-800"
           style={{ backgroundColor: 'var(--sidebar)', paddingTop: 'max(8px, env(safe-area-inset-top))' }}
         >
-          <button
-            onClick={onClose}
-            className="flex p-2 ml-1 text-gray-400 flex-shrink-0"
-            style={{ WebkitTapHighlightColor: 'transparent', outline: 'none', background: 'none' }}
-            aria-label="Close sidebar"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </button>
+          {!isDesktop && (
+            <button
+              onClick={onClose}
+              className="flex p-2 ml-1 text-gray-400 flex-shrink-0"
+              style={{ WebkitTapHighlightColor: 'transparent', outline: 'none', background: 'none' }}
+              aria-label="Close sidebar"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
+            </button>
+          )}
+          {isDesktop && <div className="w-3" />}
           <button
             onClick={() => { onSelectBubble(null); onClose() }}
             className={`flex-1 text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 mr-2 ${
