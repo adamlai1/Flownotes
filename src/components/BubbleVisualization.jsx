@@ -1,7 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'react'
 import { flushSync } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { getNoteCountForBubble, getBubbleDescendantIds, getNoteTitle } from '../utils/helpers'
+import { getNoteCountForBubble, getBubbleDescendantIds, getNoteTitle, contrastColor } from '../utils/helpers'
 import { TAG_COLORS, ROOT_BUBBLE_ID } from '../data/defaultData'
 import { useTheme } from '../contexts/ThemeContext'
 
@@ -30,6 +30,18 @@ function hexToRgb(hex) {
     : hex.slice(1)
   const n = parseInt(h, 16)
   return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`
+}
+
+function solidMutedColor(hex) {
+  if (!hex || hex[0] !== '#') return '#9ca3af'
+  const h = hex.length === 4
+    ? hex[1] + hex[1] + hex[2] + hex[2] + hex[3] + hex[3]
+    : hex.slice(1)
+  const n = parseInt(h, 16)
+  const r = Math.round(((n >> 16) & 255) * 0.82 + 255 * 0.18)
+  const g = Math.round(((n >> 8) & 255) * 0.82 + 255 * 0.18)
+  const b = Math.round((n & 255) * 0.82 + 255 * 0.18)
+  return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`
 }
 
 
@@ -145,6 +157,8 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
   const { theme } = useTheme()
   const isLight = theme === 'light'
   const rgb = hexToRgb(item.color)
+  const solidBg = isLight ? solidMutedColor(item.color) : null
+  const solidText = isLight ? contrastColor(solidBg) : null
   const fontSize = Math.max(Math.min(item.r * 0.22, 17), 10)
   const subSize = Math.max(Math.min(item.r * 0.17, 12), 9)
   const floatAmt = 5 + (index % 3) * 3
@@ -183,16 +197,16 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
           height: '100%',
           borderRadius: '50%',
           background: isLight
-            ? `radial-gradient(135deg, rgba(${rgb},0.28) 0%, rgba(${rgb},0.16) 55%, rgba(${rgb},0.08) 100%)`
+            ? solidBg
             : `radial-gradient(135deg, rgba(255,255,255,0.24) 0%, rgba(${rgb},0.22) 55%, rgba(${rgb},0.07) 100%)`,
-          backdropFilter: 'blur(24px)',
-          WebkitBackdropFilter: 'blur(24px)',
+          backdropFilter: isLight ? 'none' : 'blur(24px)',
+          WebkitBackdropFilter: isLight ? 'none' : 'blur(24px)',
           border: isLight
-            ? `1.5px solid rgba(${rgb},${isDragging ? '0.55' : '0.35'})`
+            ? `1.5px solid rgba(${rgb},${isDragging ? '0.7' : '0.5'})`
             : `1.5px solid ${isDragging ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.28)'}`,
           boxShadow: isDragging
-            ? `0 20px 60px rgba(${rgb},${isLight ? '0.45' : '0.7'}), 0 6px 20px rgba(0,0,0,${isLight ? '0.12' : '0.5'}), inset 0 1.5px 0 rgba(255,255,255,${isLight ? '0.5' : '0.55'})`
-            : `0 8px 32px rgba(${rgb},${isLight ? '0.35' : '0.42'}), 0 2px 10px rgba(0,0,0,${isLight ? '0.08' : '0.3'}), 0 0 0 1px rgba(${rgb},${isLight ? '0.15' : '0'}), inset 0 1.5px 0 rgba(255,255,255,${isLight ? '0.45' : '0.42'})`,
+            ? `0 20px 60px rgba(${rgb},${isLight ? '0.45' : '0.7'}), 0 6px 20px rgba(0,0,0,${isLight ? '0.12' : '0.5'})`
+            : `0 8px 32px rgba(${rgb},${isLight ? '0.35' : '0.42'}), 0 2px 10px rgba(0,0,0,${isLight ? '0.08' : '0.3'})`,
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'center',
@@ -214,7 +228,7 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
         <span style={{
           fontSize,
           fontWeight: 600,
-          color: isLight ? '#2C2C2E' : 'rgba(255,255,255,0.93)',
+          color: isLight ? solidText : 'rgba(255,255,255,0.93)',
           textAlign: 'center',
           textShadow: isLight ? 'none' : '0 1px 4px rgba(0,0,0,0.55)',
           padding: '0 10px',
@@ -228,7 +242,7 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
         {(item.childBubbleCount > 0 || item.noteCount > 0) && (
           <span style={{
             fontSize: subSize,
-            color: isLight ? 'rgba(44,44,46,0.55)' : 'rgba(255,255,255,0.48)',
+            color: isLight ? (solidText === '#ffffff' ? 'rgba(255,255,255,0.65)' : 'rgba(31,41,55,0.55)') : 'rgba(255,255,255,0.48)',
             marginTop: 4,
             fontWeight: 500,
             pointerEvents: 'none',
@@ -252,6 +266,8 @@ function NoteCard({ item, index, customTagColors = {}, isDragging }) {
   const { theme } = useTheme()
   const isLight = theme === 'light'
   const rgb = hexToRgb(item.color)
+  const solidBg = isLight ? solidMutedColor(item.color) : null
+  const solidText = isLight ? contrastColor(solidBg) : null
   const r = item.r
   const W = Math.round(r * 1.55)
   const H = Math.round(r * 1.15)
@@ -295,16 +311,16 @@ function NoteCard({ item, index, customTagColors = {}, isDragging }) {
           height: '100%',
           borderRadius: '22%',
           background: isLight
-            ? `linear-gradient(145deg, #F2F2EE 0%, #EAEAE4 100%)`
+            ? solidBg
             : `radial-gradient(135deg, rgba(255,255,255,0.24) 0%, rgba(${rgb},0.22) 55%, rgba(${rgb},0.07) 100%)`,
-          backdropFilter: 'blur(24px)',
-          WebkitBackdropFilter: 'blur(24px)',
+          backdropFilter: isLight ? 'none' : 'blur(24px)',
+          WebkitBackdropFilter: isLight ? 'none' : 'blur(24px)',
           border: isLight
-            ? `1.5px solid rgba(0,0,0,${isDragging ? '0.18' : '0.1'})`
+            ? `1.5px solid rgba(${rgb},${isDragging ? '0.7' : '0.5'})`
             : `1.5px solid ${isDragging ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.28)'}`,
           boxShadow: isDragging
-            ? `0 16px 40px rgba(0,0,0,${isLight ? '0.16' : '0.5'}), inset 0 1.5px 0 rgba(255,255,255,${isLight ? '0.9' : '0.6'})`
-            : `0 4px 14px rgba(0,0,0,${isLight ? '0.1' : '0.3'}), 0 1px 4px rgba(0,0,0,${isLight ? '0.07' : '0.2'}), inset 0 1.5px 0 rgba(255,255,255,${isLight ? '0.8' : '0.42'})`,
+            ? `0 16px 40px rgba(0,0,0,${isLight ? '0.16' : '0.5'})`
+            : `0 4px 14px rgba(0,0,0,${isLight ? '0.1' : '0.3'}), 0 1px 4px rgba(0,0,0,${isLight ? '0.07' : '0.2'})`,
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'center',
@@ -327,7 +343,7 @@ function NoteCard({ item, index, customTagColors = {}, isDragging }) {
         <span style={{
           fontSize,
           fontWeight: 600,
-          color: isLight ? '#2C2C2E' : 'rgba(255,255,255,0.93)',
+          color: isLight ? solidText : 'rgba(255,255,255,0.93)',
           textAlign: 'center',
           textShadow: isLight ? 'none' : '0 1px 4px rgba(0,0,0,0.55)',
           padding: '0 5px',
@@ -345,7 +361,7 @@ function NoteCard({ item, index, customTagColors = {}, isDragging }) {
         {hasBody && (
           <span style={{
             fontSize: subSize,
-            color: isLight ? 'rgba(44,44,46,0.55)' : 'rgba(255,255,255,0.48)',
+            color: isLight ? (solidText === '#ffffff' ? 'rgba(255,255,255,0.65)' : 'rgba(31,41,55,0.55)') : 'rgba(255,255,255,0.48)',
             marginTop: 2,
             fontWeight: 500,
             pointerEvents: 'none',
@@ -1064,14 +1080,15 @@ export default function BubbleVisualization({
         position: 'relative',
         width: '100%',
         height: '100%',
+        minHeight: '100dvh',
         overflow: 'hidden',
         touchAction: 'none',
         userSelect: 'none',
         WebkitUserSelect: 'none',
         WebkitTouchCallout: 'none',
         background: isLight
-          ? `radial-gradient(ellipse at 50% 35%, rgba(${rgb},0.12) 0%, #F5F5F0 45%, #E8E8E2 100%)`
-          : `radial-gradient(ellipse at 55% 40%, rgba(${rgb},0.22) 0%, #0a0a0a 55%, #000000 100%)`,
+          ? `radial-gradient(ellipse at 50% 30%, rgba(${rgb},0.10) 0%, #F5F5F0 40%, #E8E8E2 100%)`
+          : `radial-gradient(ellipse at 55% 30%, rgba(${rgb},0.18) 0%, #141414 45%, #1C1C1E 100%)`,
         transition: 'background 0.6s ease-in-out',
       }}
     >

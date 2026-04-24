@@ -1,14 +1,12 @@
 import { createContext, useContext, useState, useEffect } from 'react'
 
-const THEME_COLORS = { dark: '#1C1C1E', light: '#F2F2F7' }
+const ThemeContext = createContext({ theme: 'dark', toggleTheme: () => {} })
 
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme)
-  const meta = document.getElementById('theme-color-dynamic')
-  if (meta) meta.setAttribute('content', THEME_COLORS[theme])
 }
 
-const ThemeContext = createContext({ theme: 'dark', toggleTheme: () => {} })
+// ── Provider ──────────────────────────────────────────────────────────────────
 
 export function ThemeProvider({ children }) {
   const [theme, setTheme] = useState(() => {

@@ -91,7 +91,7 @@ export default function Settings({ onClose, zIndex = 50 }) {
 
       {/* Content */}
       <div className="flex-1 overflow-y-auto">
-        <div className="max-w-lg mx-auto px-4 pt-8 pb-12 space-y-8">
+        <div className="max-w-lg mx-auto px-4 pt-8 space-y-8" style={{ paddingBottom: 'calc(3rem + env(safe-area-inset-bottom))' }}>
 
           {/* APPEARANCE */}
           <div>
@@ -168,6 +168,17 @@ export default function Settings({ onClose, zIndex = 50 }) {
                     <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(99,102,241,0.18)', color: '#818cf8' }}>Coming soon</span>
                   </div>
                   <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>Suggest related notes</p>
+                </div>
+                <DisabledToggle />
+              </div>
+              <Divider />
+              <div className="flex items-center justify-between px-4 py-3.5 opacity-60">
+                <div className="flex-1 min-w-0 mr-4">
+                  <div className="flex items-center gap-2">
+                    <p className="text-sm font-medium" style={{ color: 'var(--text)' }}>AI Bubble Suggestions</p>
+                    <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(99,102,241,0.18)', color: '#818cf8' }}>Coming soon</span>
+                  </div>
+                  <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>Suggest which bubble to place your notes in</p>
                 </div>
                 <DisabledToggle />
               </div>

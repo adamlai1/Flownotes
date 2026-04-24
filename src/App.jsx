@@ -284,7 +284,7 @@ export default function App() {
 
   return (
     <ThemeProvider>
-    <div className="flex flex-col h-full overflow-hidden bg-black">
+    <div className="flex flex-col h-dvh overflow-hidden">
       <TopNav
         projectList={projectList}
         activeProject={activeProject}
