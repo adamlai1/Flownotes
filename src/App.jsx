@@ -419,7 +419,7 @@ export default function App() {
         syncStatus={syncStatus}
       />
 
-      <div className="flex flex-1 overflow-hidden">
+      <div className="relative flex flex-1 overflow-hidden">
         <Sidebar
           open={sidebarOpen}
           isDesktop={isDesktop}

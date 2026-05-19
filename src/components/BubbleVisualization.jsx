@@ -1077,9 +1077,8 @@ export default function BubbleVisualization({
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
       style={{
-        position: 'relative',
-        width: '100%',
-        height: '100%',
+        position: 'absolute',
+        inset: 0,
         overflow: 'hidden',
         touchAction: 'none',
         userSelect: 'none',
