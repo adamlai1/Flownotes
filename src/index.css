@@ -123,14 +123,14 @@
     -webkit-user-select: none;
   }
   html {
-    background-color: #111827;
+    background-color: #1C1C1E;
     overscroll-behavior: none;
   }
   html[data-theme="light"] {
     background-color: #FAFAF7;
   }
   body {
-    background-color: #111827;
+    background-color: #1C1C1E;
     color: var(--text);
     touch-action: manipulation;
     overscroll-behavior: none;
