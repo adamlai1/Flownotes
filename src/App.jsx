@@ -8,7 +8,14 @@ import {
   loadProject,
   saveProject,
   deleteProject as deleteProjectFromStorage,
+  loadAllProjects,
 } from './utils/storage'
+import {
+  loadAllFromCloud,
+  syncProjectToCloud,
+  syncAllToCloud,
+  deleteProjectFromCloud,
+} from './lib/syncService'
 import { TAG_COLORS } from './data/defaultData'
 
 // Ensure default tag colors exist in customTagColors for projects created before they were unified
@@ -68,6 +75,11 @@ function LoginScreen() {
 
 export default function App() {
   const { user, loading } = useAuth()
+  const [syncStatus, setSyncStatus] = useState('idle') // 'idle' | 'syncing' | 'synced' | 'error'
+  const syncedUserRef = useRef(null)
+  const cloudSaveTimerRef = useRef(null)
+  const userRef = useRef(user)
+  userRef.current = user
   const [projectList, setProjectList] = useState([])
   const [activeProject, setActiveProject] = useState(null)
   const [selectedBubbleId, setSelectedBubbleId] = useState(null)
@@ -110,9 +122,64 @@ export default function App() {
     }, 400)
   }, [])
 
+  function scheduleCloudSync(project) {
+    if (!userRef.current) return
+    setSyncStatus('syncing')
+    if (cloudSaveTimerRef.current) clearTimeout(cloudSaveTimerRef.current)
+    cloudSaveTimerRef.current = setTimeout(async () => {
+      try {
+        await syncProjectToCloud(userRef.current.id, project)
+        setSyncStatus('synced')
+      } catch (e) {
+        console.error('Cloud sync error:', e)
+        setSyncStatus('error')
+      }
+    }, 2000)
+  }
+
+  // Initial sync: run once per user sign-in, after local data is loaded
+  useEffect(() => {
+    if (!user) {
+      setSyncStatus('idle')
+      syncedUserRef.current = null
+      return
+    }
+    if (!projectList.length) return
+    if (syncedUserRef.current === user.id) return
+    syncedUserRef.current = user.id
+
+    async function doInitialSync() {
+      setSyncStatus('syncing')
+      try {
+        const cloudData = await loadAllFromCloud(user.id)
+        if (cloudData) {
+          // Cloud has data — use it as source of truth
+          saveProjectList(cloudData.projectList)
+          for (const p of cloudData.projects) saveProject(p)
+          setProjectList(cloudData.projectList)
+          setActiveProject(migrateTagColors(cloudData.projects[0]))
+          setSelectedBubbleId(null)
+          setNoteStack([])
+          setCurrentBubbleId(null)
+        } else {
+          // First-time sync — upload all local data
+          const allLocal = loadAllProjects(projectList)
+          await syncAllToCloud(user.id, allLocal)
+        }
+        setSyncStatus('synced')
+      } catch (e) {
+        console.error('Initial sync error:', e)
+        setSyncStatus('error')
+      }
+    }
+
+    doInitialSync()
+  }, [user, projectList])
+
   function updateProject(updatedProject) {
     setActiveProject(updatedProject)
     scheduleSave(updatedProject)
+    scheduleCloudSync(updatedProject)
   }
 
   function switchProject(id) {
@@ -140,6 +207,7 @@ export default function App() {
     saveProjectList(newList)
     saveProject(newProject)
     switchProject(newProject.id)
+    scheduleCloudSync(newProject)
   }
 
   function renameProject(id, newName) {
@@ -161,6 +229,9 @@ export default function App() {
     deleteProjectFromStorage(id)
     if (activeProject?.id === id) {
       switchProject(newList[0].id)
+    }
+    if (userRef.current) {
+      deleteProjectFromCloud(userRef.current.id, id).catch(e => console.error('Cloud delete error:', e))
     }
   }
 
@@ -332,6 +403,7 @@ export default function App() {
         onToggleSidebar={() => setSidebarOpen(o => !o)}
         onOpenSettings={() => setSettingsOpen(true)}
         isDesktop={isDesktop}
+        syncStatus={syncStatus}
       />
 
       <div className="flex flex-1 overflow-hidden">
