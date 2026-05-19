@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
+import { useAuth } from '../contexts/AuthContext'
 
 export default function TopNav({
   projectList,
@@ -12,6 +13,23 @@ export default function TopNav({
   onOpenSettings,
   isDesktop,
 }) {
+  const { user, signOut } = useAuth()
+  const [userMenuOpen, setUserMenuOpen] = useState(false)
+  const userMenuRef = useRef(null)
+
+  useEffect(() => {
+    function handleClick(e) {
+      if (userMenuRef.current && !userMenuRef.current.contains(e.target)) {
+        setUserMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClick)
+    document.addEventListener('touchstart', handleClick)
+    return () => {
+      document.removeEventListener('mousedown', handleClick)
+      document.removeEventListener('touchstart', handleClick)
+    }
+  }, [])
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [creatingProject, setCreatingProject] = useState(false)
@@ -193,8 +211,8 @@ export default function TopNav({
         )}
       </div>
 
-      {/* Right: Settings */}
-      <div className="flex items-center flex-1 justify-end">
+      {/* Right: Settings + User */}
+      <div className="flex items-center flex-1 justify-end gap-1">
         <button onClick={onOpenSettings} className="p-2 rounded-md text-gray-600 hover:bg-gray-800 transition-colors" aria-label="Settings">
           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
@@ -202,6 +220,41 @@ export default function TopNav({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
           </svg>
         </button>
+
+        {user && (
+          <div className="relative" ref={userMenuRef}>
+            <button
+              onClick={() => setUserMenuOpen(o => !o)}
+              className="flex items-center justify-center w-8 h-8 rounded-full overflow-hidden border-2 border-gray-700 hover:border-indigo-500 transition-colors"
+              aria-label="User menu"
+            >
+              {user.user_metadata?.avatar_url ? (
+                <img src={user.user_metadata.avatar_url} alt="avatar" className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full bg-indigo-700 flex items-center justify-center text-white text-xs font-bold">
+                  {(user.user_metadata?.full_name || user.email || '?')[0].toUpperCase()}
+                </div>
+              )}
+            </button>
+
+            {userMenuOpen && (
+              <div className="absolute top-full right-0 mt-1 w-52 bg-gray-900 rounded-xl shadow-xl border border-gray-800 z-50 py-1">
+                <div className="px-3 py-2 border-b border-gray-800">
+                  <div className="text-sm font-medium text-white truncate">
+                    {user.user_metadata?.full_name || 'User'}
+                  </div>
+                  <div className="text-xs text-gray-500 truncate">{user.email}</div>
+                </div>
+                <button
+                  onClick={() => { signOut(); setUserMenuOpen(false) }}
+                  className="w-full text-left px-3 py-2 text-sm text-red-400 hover:bg-gray-800 transition-colors"
+                >
+                  Sign out
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
     </nav>
   )
