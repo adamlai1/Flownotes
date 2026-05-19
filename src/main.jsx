@@ -96,6 +96,14 @@ class ErrorBoundary extends Component {
   }
 }
 
+// ── Service worker ────────────────────────────────────────────────────────────
+
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js')
+  })
+}
+
 // ── Mount ─────────────────────────────────────────────────────────────────────
 
 createRoot(document.getElementById('root')).render(
