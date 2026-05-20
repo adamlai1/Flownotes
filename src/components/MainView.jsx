@@ -151,11 +151,11 @@ export default function MainView({
 
   return (
     <main
-      className="flex-1 overflow-y-auto scrollbar-thin bg-black"
+      className="absolute inset-0 overflow-y-auto scrollbar-thin bg-[#1C1C1E]"
       style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
     >
       {/* Sticky header + filters */}
-      <div className="sticky top-0 z-10 bg-black">
+      <div className="sticky top-0 z-10 bg-[#1C1C1E]">
         <div className="px-4 md:px-6">
           {/* Title row — h-[52px] matches bubble view sub-bar height exactly */}
           <div className="flex items-center justify-between" style={{ height: 52 }}>
