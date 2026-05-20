@@ -132,27 +132,24 @@ export default function MainView({
     setSearchQuery('')
   }
 
-  // Bubble view takes over the entire panel — must come after all hooks
-  if (viewMode === 'bubble') {
-    return (
-      <BubbleVisualization
-        project={project}
-        onSelectNote={onSelectNote}
-        viewMode={viewMode}
-        onSetViewMode={onSetViewMode}
-        onCurrentBubbleChange={onCurrentBubbleChange}
-        navigateToBubbleId={navigateBubbleId}
-        onRefresh={onRefresh}
-      />
-    )
-  }
-
   const selectedBubble = project.bubbles.find(b => b.id === activeBubbleId)
 
   return (
+    <div style={{ position: 'absolute', inset: 0, background: 'var(--bg)' }}>
+      {viewMode === 'bubble' ? (
+        <BubbleVisualization
+          project={project}
+          onSelectNote={onSelectNote}
+          viewMode={viewMode}
+          onSetViewMode={onSetViewMode}
+          onCurrentBubbleChange={onCurrentBubbleChange}
+          navigateToBubbleId={navigateBubbleId}
+          onRefresh={onRefresh}
+        />
+      ) : (
     <main
-      className="absolute inset-0 overflow-y-auto scrollbar-thin bg-[#1C1C1E]"
-      style={{ WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
+      className="absolute inset-0 overflow-y-auto scrollbar-thin"
+      style={{ background: 'var(--bg)', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
     >
       {/* Sticky header + filters */}
       <div className="sticky top-0 z-10 bg-[#1C1C1E]">
@@ -452,5 +449,7 @@ export default function MainView({
         )}
       </div>
     </main>
+      )}
+    </div>
   )
 }
