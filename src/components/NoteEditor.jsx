@@ -16,7 +16,7 @@ function splitContent(content) {
   return { title: content.slice(0, idx), body: content.slice(idx + 1) }
 }
 
-export default function NoteEditor({ note, project, onClose, onUpdateNote, onDeleteNote, onUpdateCustomTagColors, onNavigateToNote, backLabel = 'Notes', zIndex = 50 }) {
+export default function NoteEditor({ note, project, onClose, onUpdateNote, onDeleteNote, onUpdateCustomTagColors, onNavigateToNote, onSwipeProgress, backLabel = 'Notes', zIndex = 50 }) {
   const [isDesktop, setIsDesktop] = useState(() => window.matchMedia('(min-width: 768px)').matches)
   useEffect(() => {
     const mq = window.matchMedia('(min-width: 768px)')
@@ -218,10 +218,16 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     onNavigateToNote(targetNote)
   }
 
+  // Edge-swipe back gesture. Tracking is 1:1 with the finger (no lag): swipeOffset
+  // is local state so only this panel re-renders. onSwipeProgress lets the parent
+  // drive a parallax on the view beneath (revealed as the panel slides away).
   function handleTouchStart(e) {
     const touch = e.touches[0]
     if (touch.clientX < 28) {
       swipeRef.current = { active: true, startX: touch.clientX, currentX: touch.clientX }
+      // Move the layer beneath to its parallax start position while it's still fully
+      // hidden behind this panel, so there's no visible jump when the reveal begins.
+      onSwipeProgress?.(0, true)
     }
   }
 
@@ -229,15 +235,25 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     if (!swipeRef.current.active) return
     const dx = e.touches[0].clientX - swipeRef.current.startX
     swipeRef.current.currentX = e.touches[0].clientX
-    if (dx > 0) setSwipeOffset(dx)
+    if (dx > 0) {
+      setSwipeOffset(dx)
+      onSwipeProgress?.(Math.min(1, dx / window.innerWidth), true)
+    }
   }
 
   function handleTouchEnd() {
     if (!swipeRef.current.active) return
     swipeRef.current.active = false
     const dx = swipeRef.current.currentX - swipeRef.current.startX
-    if (dx > window.innerWidth * 0.3) handleClose()
-    else setSwipeOffset(0)
+    // Past 40% of the screen width → complete the back navigation; otherwise cancel
+    // and snap the panel back to full screen.
+    if (dx > window.innerWidth * 0.4) {
+      onSwipeProgress?.(1, false) // let the layer beneath settle to its resting position
+      handleClose()
+    } else {
+      setSwipeOffset(0)
+      onSwipeProgress?.(0, false)
+    }
   }
 
   function renderBubbleChips(parentId = null, depth = 0) {
@@ -288,7 +304,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       className="fixed inset-0"
       style={{
         zIndex,
-        background: isDesktop ? 'rgba(0,0,0,0.6)' : 'var(--surface)',
+        // Mobile: transparent so the view beneath (bubble/all-notes/previous note)
+        // shows through as this panel slides away during a swipe-back.
+        background: isDesktop ? 'rgba(0,0,0,0.6)' : 'transparent',
         display: isDesktop ? 'flex' : 'block',
         alignItems: isDesktop ? 'stretch' : undefined,
         justifyContent: isDesktop ? 'center' : undefined,
@@ -314,6 +332,8 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         background: 'var(--surface)',
         display: 'grid', gridTemplateRows: 'auto 1fr', overflow: 'hidden',
         transform: `translateX(${swipeOffset}px)`, transition: swipeTransition,
+        // Left-edge shadow gives the sliding panel depth over the revealed layer.
+        boxShadow: '-8px 0 24px rgba(0,0,0,0.35)',
       }}
       onTouchStart={!isDesktop ? handleTouchStart : undefined}
       onTouchMove={!isDesktop ? handleTouchMove : undefined}

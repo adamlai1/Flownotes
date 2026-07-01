@@ -156,6 +156,17 @@
   }
 }
 
+/* ── Bubble drag-and-drop ──────────────────────────────────────────────────── */
+/* While reparenting a bubble, force the grabbing cursor everywhere and keep text
+   unselectable (text is already unselectable globally, but this makes it explicit
+   for all sidebar items during the drag). */
+body.bubble-dragging,
+body.bubble-dragging * {
+  cursor: grabbing !important;
+  user-select: none !important;
+  -webkit-user-select: none !important;
+}
+
 /* ── NoteEditor landscape: text area + metadata side-by-side ─────────────── */
 .note-body-wrapper {
   flex: 1;

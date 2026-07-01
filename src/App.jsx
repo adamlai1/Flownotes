@@ -139,6 +139,9 @@ export default function App() {
   // Always-current ref so deferred callbacks (debounced saves) never read stale state
   const activeProjectRef = useRef(null)
   activeProjectRef.current = activeProject
+  // Wrapper around MainView; the swipe-back gesture drives a parallax transform on
+  // it imperatively (via this ref) so MainView isn't re-rendered on every frame.
+  const beneathWrapRef = useRef(null)
 
   useEffect(() => {
     const { projectList: pl, activeProject: ap } = initializeData()
@@ -354,6 +357,30 @@ export default function App() {
     commitDelete(updated, (uid) => deleteBubblesFromCloud(uid, [...toRemove]))
   }
 
+  // Move a bubble to a new parent (drag-and-drop reparenting). newParentId === null
+  // moves it to the root level. Persists to localStorage and syncs to Supabase via
+  // updateProject, and the change is reflected immediately in the bubble view.
+  function moveBubble(bubbleId, newParentId) {
+    const current = activeProjectRef.current
+    const target = current.bubbles.find(b => b.id === bubbleId)
+    if (!target) return
+    if ((target.parent_id ?? null) === (newParentId ?? null)) return // no-op
+    // Guard against cycles: a bubble can't become a child of itself or its own descendants.
+    const descendants = new Set()
+    ;(function collect(id) {
+      descendants.add(id)
+      current.bubbles.filter(b => b.parent_id === id).forEach(c => collect(c.id))
+    })(bubbleId)
+    if (newParentId != null && descendants.has(newParentId)) return
+    const updated = {
+      ...current,
+      bubbles: current.bubbles.map(b =>
+        b.id === bubbleId ? { ...b, parent_id: newParentId } : b
+      ),
+    }
+    updateProject(updated)
+  }
+
   // Note operations
   function createNote(noteData) {
     const now = new Date().toISOString()
@@ -471,6 +498,26 @@ export default function App() {
     setNoteStack(prev => prev.slice(0, -1))
   }
 
+  // Drive the parallax on the view beneath the note editor during a swipe-back.
+  // Only applies when a single note is open (MainView is the layer beneath); for
+  // note→note the panel beneath is another editor that reveals itself directly.
+  // Updated imperatively to avoid re-rendering MainView on every touch move.
+  const applyBeneathParallax = useCallback((progress, active) => {
+    const el = beneathWrapRef.current
+    if (!el || isDesktop || noteStack.length !== 1) return
+    const offset = active ? -(1 - progress) * 0.3 * window.innerWidth : 0
+    el.style.transition = active ? 'none' : 'transform 0.25s cubic-bezier(0.25,0.46,0.45,0.94)'
+    el.style.transform = `translateX(${offset}px)`
+  }, [isDesktop, noteStack.length])
+
+  // When the editor fully closes, make sure the beneath layer is back at rest.
+  useEffect(() => {
+    if (noteStack.length === 0 && beneathWrapRef.current) {
+      beneathWrapRef.current.style.transition = 'none'
+      beneathWrapRef.current.style.transform = 'translateX(0)'
+    }
+  }, [noteStack.length])
+
   // Create an empty note at current bubble context and open editor
   function handleCreateNote() {
     const bubbleIds = currentBubbleId ? [currentBubbleId] : []
@@ -529,24 +576,30 @@ export default function App() {
           onAddBubble={addBubble}
           onRenameBubble={renameBubble}
           onDeleteBubble={deleteBubble}
+          onMoveBubble={moveBubble}
           onUpdateCustomTagColors={updateCustomTagColors}
           onDeleteCustomTag={deleteCustomTag}
           onRenameCustomTag={renameCustomTag}
           onClose={() => setSidebarOpen(false)}
         />
 
-        <MainView
-          project={activeProject}
-          viewMode={viewMode}
-          onSetViewMode={setViewMode}
-          onSelectNote={openNote}
-          onDeleteNote={deleteNote}
-          onCurrentBubbleChange={setCurrentBubbleId}
-          navigateBubbleId={navigateBubbleId}
-          onRefresh={handleRefresh}
-          sidebarOpen={sidebarOpen}
-          onToggleSidebar={() => setSidebarOpen(o => !o)}
-        />
+        <div
+          ref={beneathWrapRef}
+          style={{ position: 'relative', flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', willChange: 'transform' }}
+        >
+          <MainView
+            project={activeProject}
+            viewMode={viewMode}
+            onSetViewMode={setViewMode}
+            onSelectNote={openNote}
+            onDeleteNote={deleteNote}
+            onCurrentBubbleChange={setCurrentBubbleId}
+            navigateBubbleId={navigateBubbleId}
+            onRefresh={handleRefresh}
+            sidebarOpen={sidebarOpen}
+            onToggleSidebar={() => setSidebarOpen(o => !o)}
+          />
+        </div>
       </div>
 
       {/* Floating Create Button */}
@@ -588,6 +641,7 @@ export default function App() {
               onDeleteNote={deleteNote}
               onUpdateCustomTagColors={updateCustomTagColors}
               onNavigateToNote={isTop ? navigateToNote : undefined}
+              onSwipeProgress={isTop ? applyBeneathParallax : undefined}
               backLabel={backLabel}
               zIndex={50 + index}
             />
