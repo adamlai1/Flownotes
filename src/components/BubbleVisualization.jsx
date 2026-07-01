@@ -80,6 +80,10 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 12) {
     return minR + (maxR - minR) * t
   })
 
+  // Tighter circle-packing when crowded: shrink the inter-bubble gap as the
+  // count grows so many bubbles pack closer together.
+  const packGap = n > 16 ? 8 : n > 10 ? 12 : 16
+
   const GA = Math.PI * (3 - Math.sqrt(5))
   let pos = items.map((item, i) => {
     const angle = i * GA
@@ -87,14 +91,14 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 12) {
     return { ...item, x: dist * Math.cos(angle), y: dist * Math.sin(angle), r: radii[i] }
   })
 
-  for (let iter = 0; iter < 200; iter++) {
+  for (let iter = 0; iter < 240; iter++) {
     let any = false
     for (let i = 0; i < pos.length; i++) {
       for (let j = i + 1; j < pos.length; j++) {
         const a = pos[i], b = pos[j]
         const dx = b.x - a.x, dy = b.y - a.y
         const d = Math.sqrt(dx * dx + dy * dy) || 0.001
-        const gap = a.r + b.r + 16
+        const gap = a.r + b.r + packGap
         if (d < gap) {
           const push = (gap - d) / 2
           const nx = dx / d, ny = dy / d
@@ -107,7 +111,8 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 12) {
     if (!any) break
   }
 
-  const pad = 28
+  // Tighter margin around the cluster when crowded so it can scale up to fill more.
+  const pad = n > 10 ? 16 : 28
   const xs = pos.flatMap(p => [p.x - p.r, p.x + p.r])
   const ys = pos.flatMap(p => [p.y - p.r, p.y + p.r])
   const minX = Math.min(...xs), maxX = Math.max(...xs)
@@ -159,8 +164,22 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
   const rgb = hexToRgb(item.color)
   const solidBg = isLight ? solidMutedColor(item.color) : null
   const solidText = isLight ? contrastColor(solidBg) : null
-  const fontSize = Math.max(Math.min(item.r * 0.22, 17), 10)
-  const subSize = Math.max(Math.min(item.r * 0.17, 12), 9)
+  // Font auto-sizing: short names stay large; long names shrink so the longest
+  // word fits on a line, down to a 10px floor. Never breaks mid-word.
+  const name = item.name || ''
+  const longestWord = name.split(/\s+/).reduce((m, w) => Math.max(m, w.length), 1)
+  const availTextW = Math.max(item.r * 2 * 0.82, 1)
+  const fitFont = availTextW / (longestWord * 0.58) // ~0.58em per char for the semibold face
+  const fontSize = Math.round(Math.max(Math.min(item.r * 0.3, 18, fitFont), 10))
+
+  // Count line ("7 notes"): shrinks with the bubble and hides entirely when tiny.
+  const subSize = Math.max(Math.min(item.r * 0.15, 12), 8)
+  const showSub = (item.childBubbleCount > 0 || item.noteCount > 0) && item.r >= 34
+
+  // How many lines of the name fit in the circle (for multi-line ellipsis).
+  const textAreaH = item.r * 2 * 0.72 - (showSub ? subSize + 6 : 0)
+  const nameLines = Math.max(1, Math.min(3, Math.floor(textAreaH / (fontSize * 1.2))))
+
   const floatAmt = 5 + (index % 3) * 3
   const floatDuration = 2.6 + (index % 4) * 0.45
   const floatDelay = (index * 0.22) % 3
@@ -231,23 +250,34 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
           color: isLight ? solidText : 'rgba(255,255,255,0.93)',
           textAlign: 'center',
           textShadow: isLight ? 'none' : '0 1px 4px rgba(0,0,0,0.55)',
-          padding: '0 10px',
-          lineHeight: 1.25,
-          maxWidth: '90%',
-          wordBreak: 'break-word',
+          padding: '0 8px',
+          lineHeight: 1.2,
+          maxWidth: '92%',
+          // Never break mid-word; wrap at spaces, then ellipsis when it can't fit.
+          wordBreak: 'keep-all',
+          overflowWrap: 'normal',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          display: '-webkit-box',
+          WebkitLineClamp: nameLines,
+          WebkitBoxOrient: 'vertical',
           pointerEvents: 'none',
         }}>
           {item.name}
         </span>
-        {(item.childBubbleCount > 0 || item.noteCount > 0) && (
+        {showSub && (
           <span style={{
             fontSize: subSize,
             color: isLight ? (solidText === '#ffffff' ? 'rgba(255,255,255,0.65)' : 'rgba(31,41,55,0.55)') : 'rgba(255,255,255,0.48)',
-            marginTop: 4,
+            marginTop: 3,
             fontWeight: 500,
             pointerEvents: 'none',
             textAlign: 'center',
-            padding: '0 8px',
+            padding: '0 6px',
+            maxWidth: '92%',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
           }}>
             {[
               item.childBubbleCount > 0 && `${item.childBubbleCount} ${item.childBubbleCount === 1 ? 'bubble' : 'bubbles'}`,
