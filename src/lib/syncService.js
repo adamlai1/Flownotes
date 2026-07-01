@@ -1,4 +1,5 @@
 import { supabase } from './supabase'
+import { generateId } from '../utils/helpers'
 
 // ── Save functions ─────────────────────────────────────────────────────────────
 
@@ -57,11 +58,28 @@ export async function saveConnectionsToCloud(userId, notes) {
   }
 }
 
-export async function saveCustomTagsToCloud(userId, customTagColors) {
+export async function saveCustomTagsToCloud(userId, customTagColors, customTagIds = {}) {
   const entries = Object.entries(customTagColors ?? {})
   if (!entries.length) return
-  const rows = entries.map(([name, color]) => ({ user_id: userId, name, color }))
-  const { error } = await supabase.from('custom_tags').upsert(rows, { onConflict: 'user_id,name' })
+  const rows = entries.map(([name, color]) => {
+    // Every row needs a non-null id (the column is NOT NULL). Prefer the stable
+    // id we already have for this tag; generate one if it's missing/null/empty.
+    // Use || (not ??) so an empty string is also treated as "no id".
+    const id = customTagIds?.[name] || generateId()
+    return { id, user_id: userId, name, color }
+  })
+
+  // Log every row being sent to Supabase so a bad id is visible in the console.
+  console.log('[custom_tags] rows to upsert:', JSON.stringify(rows, null, 2))
+
+  // Guaranteed fix: never send a row with a null/undefined/empty id.
+  const validRows = rows.filter(row => row.id && row.id !== null && row.id !== undefined)
+  if (validRows.length !== rows.length) {
+    console.error('FILTERED OUT TAGS WITH NULL IDS:', rows.filter(r => !r.id))
+  }
+  if (!validRows.length) return
+
+  const { error } = await supabase.from('custom_tags').upsert(validRows, { onConflict: 'user_id,name' })
   if (error) throw error
 }
 
@@ -119,13 +137,18 @@ export async function loadAllFromCloud(userId) {
   }
 
   const customTagColors = {}
-  for (const t of customTags ?? []) customTagColors[t.name] = t.color
+  const customTagIds = {}
+  for (const t of customTags ?? []) {
+    customTagColors[t.name] = t.color
+    customTagIds[t.name] = t.id
+  }
 
   const fullProjects = projects.map(p => ({
     id: p.id, name: p.name, created_at: p.created_at,
     bubbles: bubblesByProject[p.id] ?? [],
     notes: notesByProject[p.id] ?? [],
     customTagColors: Object.keys(customTagColors).length ? customTagColors : undefined,
+    customTagIds: Object.keys(customTagIds).length ? customTagIds : undefined,
   }))
 
   return {
@@ -141,7 +164,7 @@ export async function syncProjectToCloud(userId, project) {
   await saveBubblesToCloud(userId, project.id, project.bubbles ?? [])
   await saveNotesToCloud(userId, project.notes ?? [])
   await saveConnectionsToCloud(userId, project.notes ?? [])
-  await saveCustomTagsToCloud(userId, project.customTagColors ?? {})
+  await saveCustomTagsToCloud(userId, project.customTagColors ?? {}, project.customTagIds ?? {})
 }
 
 export async function syncAllToCloud(userId, projects) {
@@ -150,9 +173,50 @@ export async function syncAllToCloud(userId, projects) {
   }
 }
 
-export async function deleteProjectFromCloud(userId, projectId) {
-  await Promise.all([
+export async function deleteProjectFromCloud(userId, projectId, noteIds = []) {
+  const ops = [
     supabase.from('bubbles').delete().eq('project_id', projectId).eq('user_id', userId),
     supabase.from('projects').delete().eq('id', projectId).eq('user_id', userId),
+  ]
+  if (noteIds.length) {
+    ops.push(supabase.from('connections').delete().eq('user_id', userId).in('from_note_id', noteIds))
+    ops.push(supabase.from('connections').delete().eq('user_id', userId).in('to_note_id', noteIds))
+    ops.push(supabase.from('notes').delete().eq('user_id', userId).in('id', noteIds))
+  }
+  const results = await Promise.all(ops)
+  const failed = results.find(r => r.error)
+  if (failed) throw failed.error
+}
+
+// ── Immediate deletes ───────────────────────────────────────────────────────────
+// Deletes must hit the cloud right away (not via the debounced upsert sync), since
+// the upsert-based sync only ever writes rows that still exist locally and can never
+// remove ones that were deleted — so a deleted item would reappear on the next load.
+
+export async function deleteNotesFromCloud(userId, noteIds) {
+  if (!noteIds.length) return
+  // Remove connections referencing these notes in either direction first.
+  const connResults = await Promise.all([
+    supabase.from('connections').delete().eq('user_id', userId).in('from_note_id', noteIds),
+    supabase.from('connections').delete().eq('user_id', userId).in('to_note_id', noteIds),
   ])
+  const connFailed = connResults.find(r => r.error)
+  if (connFailed) throw connFailed.error
+  // .select() returns the rows actually deleted. If this comes back empty while
+  // the note exists in the table, either user_id didn't match or RLS blocked it.
+  const { data, error } = await supabase
+    .from('notes').delete().eq('user_id', userId).in('id', noteIds).select('id')
+  if (error) throw error
+  console.log(`[delete] notes deleted from cloud: ${data?.length ?? 0}/${noteIds.length}`, { userId, noteIds })
+}
+
+export async function deleteBubblesFromCloud(userId, bubbleIds) {
+  if (!bubbleIds.length) return
+  const { error } = await supabase.from('bubbles').delete().eq('user_id', userId).in('id', bubbleIds)
+  if (error) throw error
+}
+
+export async function deleteCustomTagFromCloud(userId, tagName) {
+  const { error } = await supabase.from('custom_tags').delete().eq('user_id', userId).eq('name', tagName)
+  if (error) throw error
 }

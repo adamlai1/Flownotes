@@ -670,7 +670,12 @@ export default function BubbleVisualization({
   useLayoutEffect(() => {
     const el = containerRef.current
     if (!el) return
-    const update = () => setSize({ width: el.clientWidth, height: el.clientHeight })
+    // clientHeight includes the safe-area paddingBottom (border-box); subtract it so
+    // bubbles lay out in the visible area while the gradient still paints the safe area.
+    const update = () => {
+      const padBottom = parseFloat(getComputedStyle(el).paddingBottom) || 0
+      setSize({ width: el.clientWidth, height: el.clientHeight - padBottom })
+    }
     update()
     const ro = new ResizeObserver(update)
     ro.observe(el)
@@ -1077,8 +1082,12 @@ export default function BubbleVisualization({
       onPointerUp={handlePointerUp}
       onPointerCancel={handlePointerUp}
       style={{
-        position: 'absolute',
-        inset: 0,
+        position: 'relative',
+        flex: 1,
+        minHeight: 0,
+        // Background bleeds through the bottom safe area (border-box padding);
+        // the layout subtracts this padding so bubbles stay above the home indicator.
+        paddingBottom: 'env(safe-area-inset-bottom)',
         overflow: 'hidden',
         touchAction: 'none',
         userSelect: 'none',

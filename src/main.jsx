@@ -74,7 +74,7 @@ class ErrorBoundary extends Component {
       return (
         <div style={{
           padding: 24, fontFamily: 'monospace', background: '#7f1d1d',
-          color: '#fecaca', minHeight: '100vh', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+          color: '#fecaca', minHeight: '100dvh', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
         }}>
           <strong style={{ fontSize: 16 }}>⚠ React Error</strong>
           {'\n\n'}
@@ -99,9 +99,19 @@ class ErrorBoundary extends Component {
 // ── Service worker ────────────────────────────────────────────────────────────
 
 if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js')
-  })
+  if (import.meta.env.PROD) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/sw.js')
+    })
+  } else {
+    // In development the service worker only gets in the way — its cache serves
+    // stale bundles so code changes never reach the browser. Unregister any
+    // existing worker and wipe its caches so HMR/reloads always run fresh code.
+    navigator.serviceWorker.getRegistrations().then(regs => regs.forEach(r => r.unregister()))
+    if (window.caches) {
+      caches.keys().then(keys => keys.forEach(k => caches.delete(k)))
+    }
+  }
 }
 
 // ── Mount ─────────────────────────────────────────────────────────────────────

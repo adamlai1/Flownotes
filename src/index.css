@@ -123,7 +123,9 @@
     -webkit-user-select: none;
   }
   html {
-    height: 100%;
+    min-height: 100dvh;
+    margin: 0;
+    padding: 0;
     background-color: #1C1C1E;
     overscroll-behavior: none;
   }
@@ -131,7 +133,9 @@
     background-color: #FAFAF7;
   }
   body {
-    height: 100%;
+    min-height: 100dvh;
+    margin: 0;
+    padding: 0;
     background-color: #1C1C1E;
     color: var(--text);
     touch-action: manipulation;
@@ -141,8 +145,14 @@
     background-color: #FAFAF7;
   }
   #root {
-    height: 100%;
+    min-height: 100dvh;
+    margin: 0;
+    padding: 0;
+    background-color: #1C1C1E;
     touch-action: manipulation;
+  }
+  [data-theme="light"] #root {
+    background-color: #FAFAF7;
   }
 }
 

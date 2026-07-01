@@ -15,16 +15,34 @@ import {
   syncProjectToCloud,
   syncAllToCloud,
   deleteProjectFromCloud,
+  deleteNotesFromCloud,
+  deleteBubblesFromCloud,
+  deleteCustomTagFromCloud,
 } from './lib/syncService'
 import { TAG_COLORS } from './data/defaultData'
 
-// Ensure default tag colors exist in customTagColors for projects created before they were unified
+// Ensure default tag colors exist in customTagColors for projects created before they were unified,
+// and ensure every tag has a stable id (older projects were stored without tag ids).
 function migrateTagColors(project) {
   if (!project) return project
+  let result = project
   const existing = project.customTagColors || {}
-  const needsAny = Object.keys(TAG_COLORS).some(t => !(t in existing))
-  if (!needsAny) return project
-  return { ...project, customTagColors: { ...TAG_COLORS, ...existing } }
+  const needsColors = Object.keys(TAG_COLORS).some(t => !(t in existing))
+  if (needsColors) {
+    result = { ...result, customTagColors: { ...TAG_COLORS, ...existing } }
+  }
+  // Backfill an id for every tag name, and drop ids for tags that no longer exist.
+  const colors = result.customTagColors || {}
+  const ids = { ...(result.customTagIds || {}) }
+  let idsChanged = false
+  for (const name of Object.keys(colors)) {
+    if (!ids[name]) { ids[name] = generateId(); idsChanged = true }
+  }
+  for (const name of Object.keys(ids)) {
+    if (!(name in colors)) { delete ids[name]; idsChanged = true }
+  }
+  if (idsChanged) result = { ...result, customTagIds: ids }
+  return result
 }
 import { getNoteTitle } from './utils/helpers'
 import TopNav from './components/TopNav'
@@ -150,6 +168,50 @@ export default function App() {
     }, 2000)
   }
 
+  // Cancel any queued debounced saves. A pending save was scheduled with the
+  // pre-delete project (which still contains the item being removed); if it fired
+  // after the cloud delete it would re-upload the deleted item. Cancel it first.
+  function cancelPendingSaves() {
+    if (saveTimerRef.current) { clearTimeout(saveTimerRef.current); saveTimerRef.current = null }
+    if (cloudSaveTimerRef.current) { clearTimeout(cloudSaveTimerRef.current); cloudSaveTimerRef.current = null }
+  }
+
+  // Commit a deletion. Order matters to avoid the deleted item coming back:
+  //   1. delete from the cloud FIRST (awaited) so the row is gone,
+  //   2. THEN remove it from local state / localStorage,
+  //   3. THEN cancel any pending debounced sync so it can't re-upload old data.
+  // Queued saves are also cancelled up front so a stale sync can't fire mid-await.
+  function commitDelete(updatedProject, cloudDelete) {
+    cancelPendingSaves()
+    const currentUser = userRef.current
+    if (!currentUser) {
+      // Guest mode — localStorage only.
+      setActiveProject(updatedProject)
+      saveProject(updatedProject)
+      return
+    }
+    setSyncStatus('syncing')
+    ;(async () => {
+      try {
+        console.log('[delete] deleting from cloud for userId:', currentUser.id)
+        // 1. Delete from the cloud first, and wait for it to complete.
+        await cloudDelete(currentUser.id)
+        // 2. Remove from local state / localStorage.
+        setActiveProject(updatedProject)
+        saveProject(updatedProject)
+        // 3. Cancel any pending debounced sync so it can't re-upload the old data,
+        //    then persist the remaining data (e.g. connection/tag cleanup on
+        //    surviving notes) in one explicit, non-debounced write.
+        cancelPendingSaves()
+        await syncProjectToCloud(currentUser.id, updatedProject)
+        setSyncStatus('synced')
+      } catch (e) {
+        console.error('Cloud delete error:', e)
+        setSyncStatus('error')
+      }
+    })()
+  }
+
   // Initial sync: run once per user sign-in, after local data is loaded
   useEffect(() => {
     if (!user) {
@@ -236,6 +298,12 @@ export default function App() {
 
   function deleteProject(id) {
     if (projectList.length <= 1) return
+    // Grab the project's notes before removing it from storage so we can delete
+    // them (and their connections) from the cloud too.
+    const projectToDelete = activeProject?.id === id ? activeProject : loadProject(id)
+    // If the active project is being deleted, cancel its queued debounced saves so
+    // they can't re-upsert its notes/bubbles after the cloud delete runs.
+    if (activeProject?.id === id) cancelPendingSaves()
     const newList = projectList.filter(p => p.id !== id)
     setProjectList(newList)
     saveProjectList(newList)
@@ -244,7 +312,9 @@ export default function App() {
       switchProject(newList[0].id)
     }
     if (userRef.current) {
-      deleteProjectFromCloud(userRef.current.id, id).catch(e => console.error('Cloud delete error:', e))
+      const noteIds = (projectToDelete?.notes ?? []).map(n => n.id)
+      console.log('[delete] deleting project from cloud for userId:', userRef.current.id)
+      deleteProjectFromCloud(userRef.current.id, id, noteIds).catch(e => console.error('Cloud delete error:', e))
     }
   }
 
@@ -281,7 +351,7 @@ export default function App() {
     if (selectedBubbleId && toRemove.has(selectedBubbleId)) {
       setSelectedBubbleId(null)
     }
-    updateProject(updated)
+    commitDelete(updated, (uid) => deleteBubblesFromCloud(uid, [...toRemove]))
   }
 
   // Note operations
@@ -323,24 +393,38 @@ export default function App() {
           connections: n.connections.filter(c => c.note_id !== noteId),
         })),
     }
-    updateProject(updated)
+    commitDelete(updated, (uid) => deleteNotesFromCloud(uid, [noteId]))
     setNoteStack(prev => prev.filter(id => id !== noteId))
   }
 
   function updateCustomTagColors(colors) {
     const current = activeProjectRef.current
-    const updated = { ...current, customTagColors: colors }
+    // Assign an id to any newly-added tag and drop ids for removed tags, so a tag
+    // never reaches the cloud sync without one.
+    const ids = { ...(current.customTagIds || {}) }
+    for (const name of Object.keys(colors)) {
+      if (!ids[name]) ids[name] = generateId()
+    }
+    for (const name of Object.keys(ids)) {
+      if (!(name in colors)) delete ids[name]
+    }
+    const updated = { ...current, customTagColors: colors, customTagIds: ids }
     updateProject(updated)
   }
 
   function deleteCustomTag(tagName) {
     const updatedColors = { ...(activeProject.customTagColors || {}) }
     delete updatedColors[tagName]
+    const updatedIds = { ...(activeProject.customTagIds || {}) }
+    delete updatedIds[tagName]
     const updatedNotes = activeProject.notes.map(n => ({
       ...n,
       tags: n.tags.filter(t => t !== tagName),
     }))
-    updateProject({ ...activeProject, customTagColors: updatedColors, notes: updatedNotes })
+    commitDelete(
+      { ...activeProject, customTagColors: updatedColors, customTagIds: updatedIds, notes: updatedNotes },
+      (uid) => deleteCustomTagFromCloud(uid, tagName),
+    )
   }
 
   function renameCustomTag(oldName, newName) {
@@ -349,11 +433,21 @@ export default function App() {
     const color = existingColors[oldName]
     delete existingColors[oldName]
     existingColors[newName] = color
+    // The cloud row is keyed by (user_id, name), so a rename is really a new row.
+    // Give the new name a fresh id (reusing the old id would collide with the
+    // still-present old row's primary key on upsert).
+    const existingIds = { ...(activeProject.customTagIds || {}) }
+    delete existingIds[oldName]
+    existingIds[newName] = generateId()
     const updatedNotes = activeProject.notes.map(n => ({
       ...n,
       tags: n.tags.map(t => t === oldName ? newName : t),
     }))
-    updateProject({ ...activeProject, customTagColors: existingColors, notes: updatedNotes })
+    updateProject({ ...activeProject, customTagColors: existingColors, customTagIds: existingIds, notes: updatedNotes })
+    // Remove the old-name row from the cloud so it doesn't reappear on reload.
+    if (userRef.current) {
+      deleteCustomTagFromCloud(userRef.current.id, oldName).catch(e => console.error('Cloud delete error:', e))
+    }
   }
 
   function handleRefresh() {
@@ -386,7 +480,7 @@ export default function App() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center h-screen bg-gray-950">
+      <div className="flex items-center justify-center h-dvh bg-gray-950">
         <div className="text-gray-600 text-lg">Loading…</div>
       </div>
     )
@@ -396,7 +490,7 @@ export default function App() {
 
   if (!activeProject) {
     return (
-      <div className="flex items-center justify-center h-screen bg-gray-950">
+      <div className="flex items-center justify-center h-dvh bg-gray-950">
         <div className="text-gray-600 text-lg">Loading…</div>
       </div>
     )
@@ -404,7 +498,7 @@ export default function App() {
 
   return (
     <ThemeProvider>
-    <div className="flex flex-col h-full overflow-hidden">
+    <div className="flex flex-col h-dvh overflow-hidden" style={{ background: 'var(--bg)' }}>
       <TopNav
         projectList={projectList}
         activeProject={activeProject}
@@ -419,7 +513,7 @@ export default function App() {
         syncStatus={syncStatus}
       />
 
-      <div className="relative flex flex-1 overflow-hidden" style={{ background: 'var(--bg)' }}>
+      <div className="relative flex flex-1 min-h-0 overflow-hidden" style={{ background: 'var(--bg)' }}>
         <Sidebar
           open={sidebarOpen}
           isDesktop={isDesktop}
@@ -458,8 +552,8 @@ export default function App() {
       {/* Floating Create Button */}
       <button
         onClick={handleCreateNote}
-        className="flex fixed bottom-6 right-6 w-14 h-14 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full shadow-lg items-center justify-center text-2xl z-40 transition-colors"
-        style={{ marginBottom: 'env(safe-area-inset-bottom)' }}
+        className="flex fixed right-6 w-14 h-14 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full shadow-lg items-center justify-center text-2xl z-40 transition-colors"
+        style={{ bottom: 'calc(1.5rem + env(safe-area-inset-bottom))' }}
         aria-label="Create note"
       >
         +

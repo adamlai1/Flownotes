@@ -135,7 +135,7 @@ export default function MainView({
   const selectedBubble = project.bubbles.find(b => b.id === activeBubbleId)
 
   return (
-    <div style={{ position: 'absolute', inset: 0, background: 'var(--bg)' }}>
+    <div style={{ position: 'relative', flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
       {viewMode === 'bubble' ? (
         <BubbleVisualization
           project={project}
@@ -148,7 +148,7 @@ export default function MainView({
         />
       ) : (
     <main
-      className="absolute inset-0 overflow-y-auto scrollbar-thin"
+      className="flex-1 min-h-0 overflow-y-auto scrollbar-thin"
       style={{ background: 'var(--bg)', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
     >
       {/* Sticky header + filters */}

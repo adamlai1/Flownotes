@@ -401,7 +401,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             autoCapitalize="sentences"
             spellCheck={true}
             className="w-full text-[16px] md:text-[17px] text-gray-200 placeholder-gray-700 outline-none resize-none bg-transparent leading-relaxed"
-            style={{ height: '60vh', overflowY: 'auto', overscrollBehavior: 'contain', userSelect: 'text', WebkitUserSelect: 'text' }}
+            style={{ height: '60dvh', overflowY: 'auto', overscrollBehavior: 'contain', userSelect: 'text', WebkitUserSelect: 'text' }}
           />
           <div className="flex items-end justify-between pt-2">
             <p className="text-[11px] text-gray-700">

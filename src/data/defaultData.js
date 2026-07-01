@@ -103,6 +103,10 @@ export function createDefaultProject() {
     ],
     notes: [],
     customTagColors: { ...TAG_COLORS },
+    // Every default tag gets a stable id so cloud sync never inserts a null id.
+    customTagIds: Object.fromEntries(
+      Object.keys(TAG_COLORS).map(name => [name, generateId()])
+    ),
   }
 }
 
