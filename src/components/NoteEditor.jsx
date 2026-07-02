@@ -10,11 +10,6 @@ function formatNoteDate(isoStr) {
     ' at ' + d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })
 }
 
-function splitContent(content) {
-  const idx = content.indexOf('\n')
-  if (idx === -1) return { title: content, body: '' }
-  return { title: content.slice(0, idx), body: content.slice(idx + 1) }
-}
 
 export default function NoteEditor({ note, project, onClose, onUpdateNote, onDeleteNote, onUpdateCustomTagColors, onNavigateToNote, onSwipeProgress, backLabel = 'Notes', zIndex = 50 }) {
   const [isDesktop, setIsDesktop] = useState(() => window.matchMedia('(min-width: 768px)').matches)
@@ -24,9 +19,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     mq.addEventListener('change', handler)
     return () => mq.removeEventListener('change', handler)
   }, [])
-  const { title: initTitle, body: initBody } = splitContent(note.content)
-  const [title, setTitle] = useState(initTitle)
-  const [body, setBody] = useState(initBody)
+  // Single source of truth: the full note text. The title shown in the header is
+  // DERIVED from the first non-empty line, so the first line stays in the text and
+  // is never pulled out / hidden.
+  const [text, setText] = useState(note.content || '')
   const [selectedBubbleIds, setSelectedBubbleIds] = useState(note.bubble_ids)
   const [tags, setTags] = useState(note.tags)
   const [tagInput, setTagInput] = useState('')
@@ -46,19 +42,17 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   const saveTimerRef = useRef(null)
   const swipeRef = useRef({ active: false, startX: 0, currentX: 0 })
 
-  const buildContent = useCallback((t, b) => b ? `${t}\n${b}` : t, [])
-
-  const scheduleSave = useCallback((t, b, bubbleIds, tagsArr, connsArr) => {
+  const scheduleSave = useCallback((content, bubbleIds, tagsArr, connsArr) => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     saveTimerRef.current = setTimeout(() => {
       onUpdateNote(note.id, {
-        content: buildContent(t, b),
+        content,
         bubble_ids: bubbleIds,
         tags: tagsArr,
         connections: connsArr,
       })
     }, 500)
-  }, [note.id, onUpdateNote, buildContent])
+  }, [note.id, onUpdateNote])
 
   useEffect(() => {
     return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current) }
@@ -89,17 +83,16 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     if (isClosing) return
     setIsClosing(true)
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-    const content = buildContent(title, body)
-    if (!content.trim()) {
+    if (!text.trim()) {
       onDeleteNote(note.id)
     } else {
-      onUpdateNote(note.id, { content, bubble_ids: selectedBubbleIds, tags, connections })
+      onUpdateNote(note.id, { content: text, bubble_ids: selectedBubbleIds, tags, connections })
     }
     onClose()
   }
 
-  function pushHistory(prevTitle, prevBody) {
-    setPast(p => [...p.slice(-49), { title: prevTitle, body: prevBody }])
+  function pushHistory(prevText) {
+    setPast(p => [...p.slice(-49), prevText])
     setFuture([])
   }
 
@@ -107,34 +100,25 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     if (past.length === 0) return
     const prev = past[past.length - 1]
     setPast(p => p.slice(0, -1))
-    setFuture(f => [{ title, body }, ...f])
-    setTitle(prev.title)
-    setBody(prev.body)
-    scheduleSave(prev.title, prev.body, selectedBubbleIds, tags, connections)
+    setFuture(f => [text, ...f])
+    setText(prev)
+    scheduleSave(prev, selectedBubbleIds, tags, connections)
   }
 
   function redo() {
     if (future.length === 0) return
     const next = future[0]
     setFuture(f => f.slice(1))
-    setPast(p => [...p, { title, body }])
-    setTitle(next.title)
-    setBody(next.body)
-    scheduleSave(next.title, next.body, selectedBubbleIds, tags, connections)
+    setPast(p => [...p, text])
+    setText(next)
+    scheduleSave(next, selectedBubbleIds, tags, connections)
   }
 
-  function handleTitleChange(e) {
-    const val = e.target.value.replace(/\n/g, '')
-    pushHistory(title, body)
-    setTitle(val)
-    scheduleSave(val, body, selectedBubbleIds, tags, connections)
-  }
-
-  function handleBodyChange(e) {
+  function handleTextChange(e) {
     const val = e.target.value
-    pushHistory(title, body)
-    setBody(val)
-    scheduleSave(title, val, selectedBubbleIds, tags, connections)
+    pushHistory(text)
+    setText(val)
+    scheduleSave(val, selectedBubbleIds, tags, connections)
   }
 
   function toggleBubble(id) {
@@ -142,7 +126,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       ? selectedBubbleIds.filter(b => b !== id)
       : [...selectedBubbleIds, id]
     setSelectedBubbleIds(updated)
-    scheduleSave(title, body, updated, tags, connections)
+    scheduleSave(text, updated, tags, connections)
   }
 
   function toggleTag(tag) {
@@ -150,7 +134,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       ? tags.filter(t => t !== tag)
       : [...tags, tag]
     setTags(updated)
-    scheduleSave(title, body, selectedBubbleIds, updated, connections)
+    scheduleSave(text, selectedBubbleIds, updated, connections)
   }
 
   function addCustomTag() {
@@ -166,7 +150,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           CUSTOM_TAG_PALETTE[Object.keys(existingColors).length % CUSTOM_TAG_PALETTE.length]
         onUpdateCustomTagColors?.({ ...existingColors, [tag]: nextColor })
       }
-      scheduleSave(title, body, selectedBubbleIds, updated, connections)
+      scheduleSave(text, selectedBubbleIds, updated, connections)
     }
     setTagInput('')
     setAddingTag(false)
@@ -175,7 +159,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   function removeTag(tag) {
     const updated = tags.filter(t => t !== tag)
     setTags(updated)
-    scheduleSave(title, body, selectedBubbleIds, updated, connections)
+    scheduleSave(text, selectedBubbleIds, updated, connections)
   }
 
   function addConnection() {
@@ -211,9 +195,8 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   function handleNavigateToConnectedNote(targetNote) {
     if (!onNavigateToNote) return
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
-    const content = buildContent(title, body)
-    if (content.trim()) {
-      onUpdateNote(note.id, { content, bubble_ids: selectedBubbleIds, tags, connections })
+    if (text.trim()) {
+      onUpdateNote(note.id, { content: text, bubble_ids: selectedBubbleIds, tags, connections })
     }
     onNavigateToNote(targetNote)
   }
@@ -289,7 +272,8 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     })
   }
 
-  const wordCount = body.trim() ? body.trim().split(/\s+/).length : 0
+  const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0
+  const displayTitle = getNoteTitle(text) // first non-empty line, for the header label
   const connectableNotes = project.notes.filter(n => n.id !== note.id)
   const swipeTransition = swipeRef.current.active
     ? 'none'
@@ -357,16 +341,14 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           <span className="truncate">{backLabel}</span>
         </button>
 
-        <input
-          type="text"
-          value={title}
-          onChange={handleTitleChange}
-          onKeyDown={e => e.key === 'Enter' && bodyRef.current?.focus()}
-          placeholder="Untitled"
-          autoComplete="off"
-          className="absolute inset-x-0 mx-auto w-1/2 text-center text-[15px] font-semibold text-white placeholder-gray-600 outline-none bg-transparent pointer-events-auto"
-          style={{ userSelect: 'text', WebkitUserSelect: 'text' }}
-        />
+        {/* Derived title (first non-empty line). Read-only — editing happens in the
+            note body below, so the first line is never removed from the text. */}
+        <div
+          className="absolute inset-x-0 mx-auto w-1/2 text-center text-[15px] font-semibold truncate pointer-events-none px-2"
+          style={{ color: displayTitle ? 'var(--text)' : '#6b7280' }}
+        >
+          {displayTitle || 'Untitled'}
+        </div>
 
         <div className="flex-1" />
 
@@ -413,8 +395,8 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         <div className="px-5 md:px-10 pt-4 md:pt-8 pb-3 border-b border-white/10">
           <textarea
             ref={bodyRef}
-            value={body}
-            onChange={handleBodyChange}
+            value={text}
+            onChange={handleTextChange}
             placeholder="Start writing…"
             autoComplete="off"
             autoCorrect="on"

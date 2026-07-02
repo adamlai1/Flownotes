@@ -198,7 +198,7 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
   const showSub = (item.childBubbleCount > 0 || item.noteCount > 0) && item.r >= 34
 
   // Horizontal padding inside the bubble so text never touches the edges.
-  const TEXT_PAD = 10 // px each side (>= 8)
+  const TEXT_PAD = 5 // px each side
 
   // Font auto-sizing: shrink the font until the WHOLE name fits inside the circle —
   // both the longest word on the widest (center) line and the total text across the
@@ -307,9 +307,11 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
             textShadow: isLight ? 'none' : '0 1px 4px rgba(0,0,0,0.55)',
             lineHeight: LINE_H,
             maxWidth: '100%',
-            // Never break mid-word; wrap at spaces, then ellipsis when it can't fit.
-            wordBreak: 'keep-all',
-            overflowWrap: 'normal',
+            // Wrap at spaces first (and the font shrinks to fit whole words); if a
+            // single word is still too long, break it onto the next line rather than
+            // letting it overflow/clip. Ellipsis only if it still can't fit.
+            wordBreak: 'normal',
+            overflowWrap: 'anywhere',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             display: '-webkit-box',
@@ -368,10 +370,22 @@ function NoteCard({ item, index, customTagColors = {}, isDragging }) {
 
   const label    = getNoteTitle(item.content) || 'New note'
   const lines    = (item.content || '').split('\n').filter(l => l.trim())
-  const hasBody  = lines.length > 1 || (lines[0]?.length > label.length)
+  const bodyText = lines.slice(1).join(' ').trim() // content after the first (title) line
   const fontSize = Math.max(Math.min(r * 0.17, 13), 8)
   const subSize  = Math.max(Math.min(r * 0.13, 10), 7)
   const iconSize = Math.max(Math.min(r * 0.18, 12), 8)
+
+  // The body preview (line 2+) is shown ONLY when the whole first line (the title)
+  // fits fully. Estimate how many lines the title needs vs. how many the card shows.
+  const CHAR_W = 0.55
+  const usableW = Math.max(W * 0.86, 1)
+  const charsPerLine = Math.max(1, Math.floor(usableW / (fontSize * CHAR_W)))
+  const titleLinesNeeded = Math.max(1, Math.ceil(label.length / charsPerLine))
+  const totalLineCapacity = Math.max(1, Math.floor((H * 0.9) / (fontSize * 1.25)))
+  const showBody = bodyText.length > 0 && titleLinesNeeded + 1 <= totalLineCapacity
+  // Title is shown fully when there's a body; otherwise it uses all available lines.
+  const titleClamp = showBody ? titleLinesNeeded : totalLineCapacity
+  const bodyLines = showBody ? Math.min(2, totalLineCapacity - titleLinesNeeded) : 0
 
   return (
     <motion.div
@@ -442,12 +456,12 @@ function NoteCard({ item, index, customTagColors = {}, isDragging }) {
           pointerEvents: 'none',
           overflow: 'hidden',
           display: '-webkit-box',
-          WebkitLineClamp: hasBody ? 3 : 4,
+          WebkitLineClamp: titleClamp,
           WebkitBoxOrient: 'vertical',
         }}>
           {label}
         </span>
-        {hasBody && (
+        {showBody && (
           <span style={{
             fontSize: subSize,
             color: isLight ? (solidText === '#ffffff' ? 'rgba(255,255,255,0.65)' : 'rgba(31,41,55,0.55)') : 'rgba(255,255,255,0.48)',
@@ -458,11 +472,11 @@ function NoteCard({ item, index, customTagColors = {}, isDragging }) {
             padding: '0 5px',
             overflow: 'hidden',
             display: '-webkit-box',
-            WebkitLineClamp: 2,
+            WebkitLineClamp: bodyLines,
             WebkitBoxOrient: 'vertical',
             maxWidth: '92%',
           }}>
-            {lines.slice(1).filter(Boolean).join(' ')}
+            {bodyText}
           </span>
         )}
         {tagDots.length > 0 && (
