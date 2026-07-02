@@ -324,15 +324,19 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
             <span style={{
               position: 'absolute',
               top: '100%',       // directly below the title text
-              left: 0,
-              right: 0,
+              // Match the title's horizontal padding (aligns with the title content box).
+              left: TEXT_PAD,
+              right: TEXT_PAD,
               marginTop: 3,
               fontSize: subSize,
               color: isLight ? (solidText === '#ffffff' ? 'rgba(255,255,255,0.65)' : 'rgba(31,41,55,0.55)') : 'rgba(255,255,255,0.48)',
               fontWeight: 500,
               textAlign: 'center',
               lineHeight: 1.15,
-              // Allow up to two lines, then ellipsis.
+              // Wrap onto a second line if too long (breaking a long token if needed),
+              // then ellipsis.
+              wordBreak: 'normal',
+              overflowWrap: 'anywhere',
               overflow: 'hidden',
               textOverflow: 'ellipsis',
               display: '-webkit-box',
