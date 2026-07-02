@@ -47,7 +47,7 @@ function solidMutedColor(hex) {
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
 
-function computeLayout(items, width, height, headerH = 56, bottomPad = 12) {
+function computeLayout(items, width, height, headerH = 56, bottomPad = 0) {
   const n = items.length
   if (n === 0) return []
 
@@ -58,20 +58,25 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 12) {
   const cy0 = headerH + availH / 2
   const base = Math.min(width, availH) * 0.4
 
+  // Minimum bubble size — every other size floor derives from this.
+  const MIN_D = 80           // 80px minimum diameter
+  const MIN_R = MIN_D / 2    // → 40px minimum radius
+
   if (n === 1) {
     const r = items[0].type === 'note'
-      ? Math.max(base * 0.14, 36)
-      : Math.min(width, availH) * 0.27
+      ? Math.max(base * 0.14, MIN_R)
+      : Math.max(Math.min(width, availH) * 0.27, MIN_R)
     return [{ ...items[0], cx: cx0, cy: cy0, r }]
   }
 
   const bubbleItems = items.filter(i => i.type !== 'note')
-  // Log-scale bubble sizes by total nested content (notes + descendant bubbles)
+  // Log-scale bubble sizes by total nested content (notes + descendant bubbles),
+  // relative to the busiest bubble in this view.
   const maxContent = Math.max(...bubbleItems.map(i => i.contentCount || 0), 1)
-  const minR = Math.max(base * 0.15, 36)
-  const maxR = Math.min(base * 0.42, 124)
+  const minR = Math.max(base * 0.15, MIN_R)
+  const maxR = Math.max(Math.min(base * 0.42, 124), minR)
   // Note cards are a fixed consistent size — only category bubbles scale
-  const noteR = Math.max(base * 0.14, 36)
+  const noteR = Math.max(base * 0.14, MIN_R)
 
   const radii = items.map(item => {
     if (item.type === 'note') return noteR
@@ -125,21 +130,43 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 12) {
     ...p,
     cx: cx0 + (p.x - lcx) * scale,
     cy: cy0 + (p.y - lcy) * scale,
-    r: p.r * scale,
+    // Enforce the minimum ON SCREEN — the fit-scale above must not shrink a
+    // bubble below MIN_R, otherwise the minimum has no visible effect.
+    r: Math.max(p.r * scale, MIN_R),
   }))
 
-  // Push any item that landed inside the + button exclusion zone clear of it
-  const btnCx = width - 52, btnCy = height - 52
-  result.forEach(item => {
-    const dx = item.cx - btnCx, dy = item.cy - btnCy
-    const dist = Math.sqrt(dx * dx + dy * dy) || 0.001
-    const minDist = PLUS_BTN_EXCL_R + item.r
-    if (dist < minDist) {
-      const nx = dx / dist, ny = dy / dist
-      item.cx = Math.max(item.r + 12, Math.min(width - item.r - 12, item.cx + nx * (minDist - dist)))
-      item.cy = Math.max(headerH + item.r + 12, Math.min(height - bottomPad - item.r - 12, item.cy + ny * (minDist - dist)))
+  // Flooring the radius can re-introduce overlaps; relax in screen space with a
+  // tight gap, clamping every bubble fully on-screen each pass so nothing ends up
+  // off the viewport. (When bubbles can't all fit at the minimum size they will
+  // pack tightly / overlap rather than shrink below it.)
+  const clampXY = (p) => {
+    p.cx = Math.max(p.r + 8, Math.min(width - p.r - 8, p.cx))
+    p.cy = Math.max(headerH + p.r + 8, Math.min(height - bottomPad - p.r, p.cy))
+  }
+  const tightGap = Math.min(packGap, 10)
+  for (let iter = 0; iter < 160; iter++) {
+    let any = false
+    for (let i = 0; i < result.length; i++) {
+      for (let j = i + 1; j < result.length; j++) {
+        const a = result[i], b = result[j]
+        const dx = b.cx - a.cx, dy = b.cy - a.cy
+        const d = Math.sqrt(dx * dx + dy * dy) || 0.001
+        const need = a.r + b.r + tightGap
+        if (d < need) {
+          const push = (need - d) / 2
+          const nx = dx / d, ny = dy / d
+          a.cx -= nx * push; a.cy -= ny * push
+          b.cx += nx * push; b.cy += ny * push
+          any = true
+        }
+      }
     }
-  })
+    result.forEach(clampXY)
+    if (!any) break
+  }
+
+  // Keep every bubble fully clear of the + button (full-circle barrier, all sides).
+  result.forEach(item => keepClearOfPlusButton(item, width, height, headerH, height - bottomPad))
 
   return result
 }
@@ -164,21 +191,34 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
   const rgb = hexToRgb(item.color)
   const solidBg = isLight ? solidMutedColor(item.color) : null
   const solidText = isLight ? contrastColor(solidBg) : null
-  // Font auto-sizing: short names stay large; long names shrink so the longest
-  // word fits on a line, down to a 10px floor. Never breaks mid-word.
   const name = item.name || ''
-  const longestWord = name.split(/\s+/).reduce((m, w) => Math.max(m, w.length), 1)
-  const availTextW = Math.max(item.r * 2 * 0.82, 1)
-  const fitFont = availTextW / (longestWord * 0.58) // ~0.58em per char for the semibold face
-  const fontSize = Math.round(Math.max(Math.min(item.r * 0.3, 18, fitFont), 10))
 
   // Count line ("7 notes"): shrinks with the bubble and hides entirely when tiny.
   const subSize = Math.max(Math.min(item.r * 0.15, 12), 8)
   const showSub = (item.childBubbleCount > 0 || item.noteCount > 0) && item.r >= 34
 
-  // How many lines of the name fit in the circle (for multi-line ellipsis).
-  const textAreaH = item.r * 2 * 0.72 - (showSub ? subSize + 6 : 0)
-  const nameLines = Math.max(1, Math.min(3, Math.floor(textAreaH / (fontSize * 1.2))))
+  // Horizontal padding inside the bubble so text never touches the edges.
+  const TEXT_PAD = 10 // px each side (>= 8)
+
+  // Font auto-sizing: shrink the font until the WHOLE name fits inside the circle —
+  // both the longest word on the widest (center) line and the total text across the
+  // available lines — down to an 8px floor. Only if it still doesn't fit at 8px is it
+  // truncated with an ellipsis. Never breaks mid-word.
+  const CHAR_W = 0.62, LINE_H = 1.2 // conservative glyph width so words aren't clipped
+  const longestWord = name.split(/\s+/).reduce((m, w) => Math.max(m, w.length), 1)
+  const chars = Math.max(name.length, 1)
+  const centerW = Math.max(item.r * 2 - TEXT_PAD * 2 - 4, 1)   // widest usable line
+  const avgW = Math.max(item.r * 2 * 0.8 - TEXT_PAD * 2, 1)    // average line width across the circle
+  // Reserve room for the count line, which sits on the very next line below the
+  // title. The title + count are centered together as a group (both axes).
+  const availH = Math.max(item.r * 2 * 0.66 - (showSub ? subSize + 6 : 0), 1)
+  const baseFont = Math.min(item.r * 0.34, 20)                 // upper bound (short names stay large)
+  const wordFont = centerW / (CHAR_W * longestWord)            // longest word fits the center line
+  const areaFont = Math.sqrt((avgW * availH) / (CHAR_W * LINE_H * chars * 1.2)) // whole name fits the area
+  const fontSize = Math.max(Math.min(baseFont, wordFont, areaFont), 8)
+
+  // Lines available at this font; text only overflows (→ ellipsis) at the 8px floor.
+  const nameLines = Math.max(1, Math.floor(availH / (fontSize * LINE_H)))
 
   const floatAmt = 5 + (index % 3) * 3
   const floatDuration = 2.6 + (index % 4) * 0.45
@@ -212,6 +252,7 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
       {/* Inner: framer owns transform here (scale mount + scale+y float/drag) */}
       <motion.div
         style={{
+          position: 'relative',
           width: '100%',
           height: '100%',
           borderRadius: '50%',
@@ -244,47 +285,65 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
             }
         }
       >
-        <span style={{
-          fontSize,
-          fontWeight: 600,
-          color: isLight ? solidText : 'rgba(255,255,255,0.93)',
+        {/* Text container: the title is centered (both axes) in the bubble on its own.
+            The count is anchored right below the title text (top: 100%) so it hugs it
+            without pushing the title off-center, and can wrap onto a second line. */}
+        <div style={{
+          position: 'relative',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
           textAlign: 'center',
-          textShadow: isLight ? 'none' : '0 1px 4px rgba(0,0,0,0.55)',
-          padding: '0 8px',
-          lineHeight: 1.2,
-          maxWidth: '92%',
-          // Never break mid-word; wrap at spaces, then ellipsis when it can't fit.
-          wordBreak: 'keep-all',
-          overflowWrap: 'normal',
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-          display: '-webkit-box',
-          WebkitLineClamp: nameLines,
-          WebkitBoxOrient: 'vertical',
+          width: '100%',
+          padding: `0 ${TEXT_PAD}px`,
+          boxSizing: 'border-box',
           pointerEvents: 'none',
         }}>
-          {item.name}
-        </span>
-        {showSub && (
           <span style={{
-            fontSize: subSize,
-            color: isLight ? (solidText === '#ffffff' ? 'rgba(255,255,255,0.65)' : 'rgba(31,41,55,0.55)') : 'rgba(255,255,255,0.48)',
-            marginTop: 3,
-            fontWeight: 500,
-            pointerEvents: 'none',
+            fontSize,
+            fontWeight: 600,
+            color: isLight ? solidText : 'rgba(255,255,255,0.93)',
             textAlign: 'center',
-            padding: '0 6px',
-            maxWidth: '92%',
-            whiteSpace: 'nowrap',
+            textShadow: isLight ? 'none' : '0 1px 4px rgba(0,0,0,0.55)',
+            lineHeight: LINE_H,
+            maxWidth: '100%',
+            // Never break mid-word; wrap at spaces, then ellipsis when it can't fit.
+            wordBreak: 'keep-all',
+            overflowWrap: 'normal',
             overflow: 'hidden',
             textOverflow: 'ellipsis',
+            display: '-webkit-box',
+            WebkitLineClamp: nameLines,
+            WebkitBoxOrient: 'vertical',
           }}>
-            {[
-              item.childBubbleCount > 0 && `${item.childBubbleCount} ${item.childBubbleCount === 1 ? 'bubble' : 'bubbles'}`,
-              item.noteCount > 0 && `${item.noteCount} ${item.noteCount === 1 ? 'note' : 'notes'}`,
-            ].filter(Boolean).join(', ')}
+            {item.name}
           </span>
-        )}
+          {showSub && (
+            <span style={{
+              position: 'absolute',
+              top: '100%',       // directly below the title text
+              left: 0,
+              right: 0,
+              marginTop: 3,
+              fontSize: subSize,
+              color: isLight ? (solidText === '#ffffff' ? 'rgba(255,255,255,0.65)' : 'rgba(31,41,55,0.55)') : 'rgba(255,255,255,0.48)',
+              fontWeight: 500,
+              textAlign: 'center',
+              lineHeight: 1.15,
+              // Allow up to two lines, then ellipsis.
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              display: '-webkit-box',
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: 'vertical',
+            }}>
+              {[
+                item.childBubbleCount > 0 && `${item.childBubbleCount} ${item.childBubbleCount === 1 ? 'bubble' : 'bubbles'}`,
+                item.noteCount > 0 && `${item.noteCount} ${item.noteCount === 1 ? 'note' : 'notes'}`,
+              ].filter(Boolean).join(', ')}
+            </span>
+          )}
+        </div>
       </motion.div>
     </motion.div>
   )
@@ -470,29 +529,79 @@ function ZoomExpand({ anim, size, onDone }) {
 // ─── Layout constants & shared helpers ────────────────────────────────────────
 
 const SUB_BAR_H = 52
-const BOTTOM_PAD = 12          // small margin — + button is handled by exclusion zone
-const PLUS_BTN_EXCL_R = 80    // no-go radius around the floating + button
+const BOTTOM_PAD = 0           // no bottom barrier — bubbles reach the bottom edge
+// Just clear the + button itself: button is 56px (radius 28) + a small ~8px margin.
+const PLUS_BTN_EXCL_R = 36    // no-go radius around the floating + button
 
 // Effective collision radius (notes are rectangular; approximate as slightly smaller circle)
 function cr(item) { return item.type === 'note' ? item.r * 0.97 : item.r }
 
-// Clamp an item to screen bounds then push it clear of the + button exclusion zone.
+// Keep an item's center outside a FULL circle around the + button (bottom-right),
+// blocking overlap from ANY direction. The button hugs the bottom-right corner, so
+// the always-open escape directions are left and up: we slide the center to the
+// nearest point on the exclusion circle along whichever axis fits in bounds. This
+// works even when the bubble is dragged in from the side or from directly below.
+// Mutates p.cx / p.cy in place.
+function keepClearOfPlusButton(p, width, height, topLimit, botLimit) {
+  const r = p.r
+  const btnCx = width - 52, btnCy = height - 52
+  const minDist = PLUS_BTN_EXCL_R + r
+  const ddx = p.cx - btnCx, ddy = p.cy - btnCy
+  const dist = Math.sqrt(ddx * ddx + ddy * ddy)
+  if (dist >= minDist) return
+  // Single-axis exits that land exactly on the exclusion circle.
+  const leftX = btnCx - Math.sqrt(Math.max(minDist * minDist - ddy * ddy, 0))
+  const upY = btnCy - Math.sqrt(Math.max(minDist * minDist - ddx * ddx, 0))
+  const leftOk = leftX >= r + 12
+  const upOk = upY >= topLimit + r + 12
+  if (leftOk && (!upOk || (p.cx - leftX) <= (p.cy - upY))) {
+    p.cx = leftX
+  } else if (upOk) {
+    p.cy = upY
+  } else {
+    // Extremely tight space — push radially toward the interior as a fallback.
+    const nx = ddx / (dist || 1), ny = ddy / (dist || 1)
+    p.cx = Math.max(r + 12, Math.min(width - r - 12, p.cx + nx * (minDist - dist)))
+    p.cy = Math.max(topLimit + r + 12, Math.min(botLimit - r, p.cy + ny * (minDist - dist)))
+  }
+}
+
+// Clamp an item to screen bounds then push it clear of the + button (all sides).
 // Mutates p.cx / p.cy in place.
 function clampToBounds(p, width, height) {
   const r = p.r
   p.cx = Math.max(r + 12, Math.min(width - r - 12, p.cx))
-  p.cy = Math.max(SUB_BAR_H + r + 12, Math.min(height - BOTTOM_PAD - r - 12, p.cy))
-  // + button sits at bottom-6 right-6 (24px each edge), w-14 h-14 (56px) → center 52px from each edge
-  const btnCx = width - 52
-  const btnCy = height - 52
-  const dx = p.cx - btnCx, dy = p.cy - btnCy
-  const dist = Math.sqrt(dx * dx + dy * dy) || 0.001
-  const minDist = PLUS_BTN_EXCL_R + r
-  if (dist < minDist) {
-    const nx = dx / dist, ny = dy / dist
-    p.cx = Math.max(r + 12, Math.min(width - r - 12, p.cx + nx * (minDist - dist)))
-    p.cy = Math.max(SUB_BAR_H + r + 12, Math.min(height - BOTTOM_PAD - r - 12, p.cy + ny * (minDist - dist)))
+  p.cy = Math.max(SUB_BAR_H + r + 12, Math.min(height - BOTTOM_PAD - r, p.cy))
+  keepClearOfPlusButton(p, width, height, SUB_BAR_H, height - BOTTOM_PAD)
+}
+
+// Safety pass: after any data change / re-render, push apart any bubbles that
+// overlap (e.g. a bubble grew, or saved positions no longer fit), leaving a small
+// visual buffer so they never touch. Re-applies bounds + the + button barrier too.
+function separateOverlaps(items, width, height) {
+  const BUFFER = 3 // px gap so bubbles never visually touch
+  const pos = items.map(i => ({ ...i }))
+  for (let iter = 0; iter < 60; iter++) {
+    let moved = false
+    for (let i = 0; i < pos.length; i++) {
+      for (let j = i + 1; j < pos.length; j++) {
+        const a = pos[i], b = pos[j]
+        const dx = b.cx - a.cx, dy = b.cy - a.cy
+        const d = Math.sqrt(dx * dx + dy * dy) || 0.001
+        const need = cr(a) + cr(b) + BUFFER
+        if (d < need) {
+          const push = (need - d) / 2
+          const nx = dx / d, ny = dy / d
+          a.cx -= nx * push; a.cy -= ny * push
+          b.cx += nx * push; b.cy += ny * push
+          moved = true
+        }
+      }
+    }
+    pos.forEach(p => clampToBounds(p, width, height))
+    if (!moved) break
   }
+  return pos
 }
 
 // ─── Settle new (unplaced) items away from anchored (saved-position) items ─────
@@ -827,9 +936,15 @@ export default function BubbleVisualization({
   const anchoredIds = new Set(
     laidMapped.filter(item => savedPositions[posKey(project.id, currentId, item.id)]).map(i => i.id)
   )
-  const laidWithOverrides = (anchoredIds.size > 0 && anchoredIds.size < laidMapped.length && size.width > 0)
+  const laidSettled = (anchoredIds.size > 0 && anchoredIds.size < laidMapped.length && size.width > 0)
     ? settleItems(laidMapped, anchoredIds, size.width, size.height)
     : laidMapped
+
+  // Final safety pass every render: separate any overlapping bubbles (with a small
+  // buffer so they never touch) and re-apply the + button barrier and bounds.
+  const laidWithOverrides = size.width > 0
+    ? separateOverlaps(laidSettled, size.width, size.height)
+    : laidSettled
 
   // Keep refs current (used in pointer handlers and RAF loop)
   laidWithOverridesRef.current = laidWithOverrides
@@ -1007,7 +1122,7 @@ export default function BubbleVisualization({
     dragInfoRef.current = {
       ...drag,
       cx: Math.max(drag.r + 12, Math.min(width - drag.r - 12, e.clientX - rect.left)),
-      cy: Math.max(SUB_BAR_H + drag.r + 12, Math.min(height - BOTTOM_PAD - drag.r - 12, e.clientY - rect.top)),
+      cy: Math.max(SUB_BAR_H + drag.r + 12, Math.min(height - BOTTOM_PAD - drag.r, e.clientY - rect.top)),
     }
   }
 
