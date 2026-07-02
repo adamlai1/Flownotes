@@ -54,6 +54,35 @@ import Onboarding from './components/Onboarding'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { useAuth } from './contexts/AuthContext'
 
+// ── One-time "leading newline" bug migration ────────────────────────────────
+// The old title/body editor stored a note whose title line was empty as
+// "\n<body>", adding a single leading newline. Remove exactly one leading newline
+// (only when it's a lone one — never touch "\n\n…", which is intentional spacing).
+// Guarded by the localStorage flag below so it runs at most once per device.
+const NEWLINE_FLAG = 'newlineBugFixed'
+
+function stripBugNewline(content) {
+  const c = content || ''
+  return (c.startsWith('\n') && !c.startsWith('\n\n')) ? c.slice(1) : c
+}
+
+function migrateProjectsNewline(projects) {
+  let changed = false
+  const out = projects.map(p => {
+    if (!p?.notes?.length) return p
+    let pChanged = false
+    const notes = p.notes.map(n => {
+      const fixed = stripBugNewline(n.content)
+      if (fixed !== (n.content || '')) { pChanged = true; return { ...n, content: fixed } }
+      return n
+    })
+    if (!pChanged) return p
+    changed = true
+    return { ...p, notes }
+  })
+  return { projects: out, changed }
+}
+
 function initializeData() {
   let projectList = loadProjectList()
   if (!projectList) {
@@ -149,6 +178,23 @@ export default function App() {
     setActiveProject(ap)
   }, [])
 
+  // One-time newline-bug migration for guest data. Signed-in users are migrated
+  // inside the initial cloud sync (the source of truth for them); we require actual
+  // guest mode here so the flag isn't set prematurely while on the login screen.
+  useEffect(() => {
+    if (loading || user || !guestMode) return
+    if (localStorage.getItem(NEWLINE_FLAG)) return
+    const list = loadProjectList()
+    if (list?.length) {
+      const { projects, changed } = migrateProjectsNewline(loadAllProjects(list))
+      if (changed) {
+        for (const p of projects) saveProject(p)
+        setActiveProject(prev => (prev ? migrateTagColors(loadProject(prev.id)) : prev))
+      }
+    }
+    localStorage.setItem(NEWLINE_FLAG, '1')
+  }, [loading, user, guestMode])
+
   const scheduleSave = useCallback((project) => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
     saveTimerRef.current = setTimeout(() => {
@@ -230,18 +276,32 @@ export default function App() {
       setSyncStatus('syncing')
       try {
         const cloudData = await loadAllFromCloud(user.id)
+        const needNewlineFix = !localStorage.getItem(NEWLINE_FLAG)
         if (cloudData) {
-          // Cloud has data — use it as source of truth
+          // Cloud has data — use it as source of truth. One-time: strip the leading
+          // newline bug from cloud notes and push the fixed content back up.
+          let projects = cloudData.projects
+          if (needNewlineFix) {
+            const res = migrateProjectsNewline(projects)
+            projects = res.projects
+            if (res.changed) await syncAllToCloud(user.id, projects)
+            localStorage.setItem(NEWLINE_FLAG, '1')
+          }
           saveProjectList(cloudData.projectList)
-          for (const p of cloudData.projects) saveProject(p)
+          for (const p of projects) saveProject(p)
           setProjectList(cloudData.projectList)
-          setActiveProject(migrateTagColors(cloudData.projects[0]))
+          setActiveProject(migrateTagColors(projects[0]))
           setSelectedBubbleId(null)
           setNoteStack([])
           setCurrentBubbleId(null)
         } else {
-          // First-time sync — upload all local data
-          const allLocal = loadAllProjects(projectList)
+          // First-time sync — migrate then upload all local data
+          let allLocal = loadAllProjects(projectList)
+          if (needNewlineFix) {
+            allLocal = migrateProjectsNewline(allLocal).projects
+            for (const p of allLocal) saveProject(p)
+            localStorage.setItem(NEWLINE_FLAG, '1')
+          }
           await syncAllToCloud(user.id, allLocal)
         }
         setSyncStatus('synced')
@@ -505,9 +565,20 @@ export default function App() {
   const applyBeneathParallax = useCallback((progress, active) => {
     const el = beneathWrapRef.current
     if (!el || isDesktop || noteStack.length !== 1) return
-    const offset = active ? -(1 - progress) * 0.3 * window.innerWidth : 0
-    el.style.transition = active ? 'none' : 'transform 0.25s cubic-bezier(0.25,0.46,0.45,0.94)'
-    el.style.transform = `translateX(${offset}px)`
+    if (active) {
+      // 1:1 tracking during the drag — no animation.
+      el.style.transition = 'none'
+      el.style.transform = `translateX(${-(1 - progress) * 0.3 * window.innerWidth}px)`
+    } else {
+      // Released: animate back to rest IN SYNC with the note panel, using the exact
+      // same duration & easing. Force a reflow so iOS Safari registers the current
+      // drag position as the animation's start instead of snapping straight to 0
+      // (changing transition none→value and transform in one update otherwise jumps).
+      el.style.transition = 'none'
+      void el.offsetWidth // force reflow
+      el.style.transition = 'transform 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94)'
+      el.style.transform = 'translateX(0)'
+    }
   }, [isDesktop, noteStack.length])
 
   // When the editor fully closes, make sure the beneath layer is back at rest.

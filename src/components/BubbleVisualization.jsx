@@ -193,9 +193,11 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
   const solidText = isLight ? contrastColor(solidBg) : null
   const name = item.name || ''
 
-  // Count line ("7 notes"): shrinks with the bubble and hides entirely when tiny.
+  // Count lines ("N bubbles" / "N notes" on separate lines): shrink with the bubble
+  // and hide entirely when it's tiny.
   const subSize = Math.max(Math.min(item.r * 0.15, 12), 8)
-  const showSub = (item.childBubbleCount > 0 || item.noteCount > 0) && item.r >= 34
+  const countLines = (item.childBubbleCount > 0 ? 1 : 0) + (item.noteCount > 0 ? 1 : 0)
+  const showSub = countLines > 0 && item.r >= 34
 
   // Horizontal padding inside the bubble so text never touches the edges.
   const TEXT_PAD = 5 // px each side
@@ -209,9 +211,9 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
   const chars = Math.max(name.length, 1)
   const centerW = Math.max(item.r * 2 - TEXT_PAD * 2 - 4, 1)   // widest usable line
   const avgW = Math.max(item.r * 2 * 0.8 - TEXT_PAD * 2, 1)    // average line width across the circle
-  // Reserve room for the count line, which sits on the very next line below the
-  // title. The title + count are centered together as a group (both axes).
-  const availH = Math.max(item.r * 2 * 0.66 - (showSub ? subSize + 6 : 0), 1)
+  // Reserve room for the count lines (one per non-zero count), which sit directly
+  // below the centered title.
+  const availH = Math.max(item.r * 2 * 0.66 - (showSub ? countLines * subSize * 1.2 + 4 : 0), 1)
   const baseFont = Math.min(item.r * 0.34, 20)                 // upper bound (short names stay large)
   const wordFont = centerW / (CHAR_W * longestWord)            // longest word fits the center line
   const areaFont = Math.sqrt((avgW * availH) / (CHAR_W * LINE_H * chars * 1.2)) // whole name fits the area
@@ -321,7 +323,7 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
             {item.name}
           </span>
           {showSub && (
-            <span style={{
+            <div style={{
               position: 'absolute',
               top: '100%',       // directly below the title text
               // Match the title's horizontal padding (aligns with the title content box).
@@ -333,21 +335,18 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
               fontWeight: 500,
               textAlign: 'center',
               lineHeight: 1.15,
-              // Wrap onto a second line if too long (breaking a long token if needed),
-              // then ellipsis.
+              // Each count on its own line; wrap a long line if needed.
               wordBreak: 'normal',
               overflowWrap: 'anywhere',
               overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              display: '-webkit-box',
-              WebkitLineClamp: 2,
-              WebkitBoxOrient: 'vertical',
             }}>
-              {[
-                item.childBubbleCount > 0 && `${item.childBubbleCount} ${item.childBubbleCount === 1 ? 'bubble' : 'bubbles'}`,
-                item.noteCount > 0 && `${item.noteCount} ${item.noteCount === 1 ? 'note' : 'notes'}`,
-              ].filter(Boolean).join(', ')}
-            </span>
+              {item.childBubbleCount > 0 && (
+                <div>{item.childBubbleCount} {item.childBubbleCount === 1 ? 'bubble' : 'bubbles'}</div>
+              )}
+              {item.noteCount > 0 && (
+                <div>{item.noteCount} {item.noteCount === 1 ? 'note' : 'notes'}</div>
+              )}
+            </div>
           )}
         </div>
       </motion.div>
