@@ -1,6 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'react'
 import { flushSync } from 'react-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion, AnimatePresence, useMotionValue, animate } from 'framer-motion'
 import { getNoteCountForBubble, getBubbleDescendantIds, getNoteTitle, contrastColor } from '../utils/helpers'
 import { TAG_COLORS, ROOT_BUBBLE_ID } from '../data/defaultData'
 import { useTheme } from '../contexts/ThemeContext'
@@ -19,6 +19,59 @@ function loadSavedPositions(projectId) {
 function saveSavedPositions(projectId, positions) {
   try { localStorage.setItem(`mindmap-pos-${projectId}`, JSON.stringify(positions)) }
   catch {}
+}
+
+// ─── Paged assignment persistence ──────────────────────────────────────────────
+// Which page each bubble lives on: { [posKey]: pageIndex }. Positions within a page
+// reuse the normal per-item saved x/y (an item is only ever on one page at a time),
+// so every page keeps the same free-form layout + physics as the single-page view.
+
+function loadSavedPages(projectId) {
+  try { return JSON.parse(localStorage.getItem(`mindmap-pages-${projectId}`)) || {} }
+  catch { return {} }
+}
+
+function saveSavedPagesMap(projectId, map) {
+  try { localStorage.setItem(`mindmap-pages-${projectId}`, JSON.stringify(map)) }
+  catch {}
+}
+
+// Assign each item to a page: honour saved assignments, then bin-pack the rest into
+// the first page that still has room (so overflow naturally spills to a new page).
+function assignPages(items, savedPages, projectId, contextId, perPage) {
+  const pageOf = {}
+  const counts = {}
+  const unassigned = []
+  for (const it of items) {
+    const p = savedPages[posKey(projectId, contextId, it.id)]
+    if (Number.isInteger(p) && p >= 0) { pageOf[it.id] = p; counts[p] = (counts[p] || 0) + 1 }
+    else unassigned.push(it)
+  }
+  let cursor = 0
+  for (const it of unassigned) {
+    while ((counts[cursor] || 0) >= perPage) cursor++
+    pageOf[it.id] = cursor
+    counts[cursor] = (counts[cursor] || 0) + 1
+  }
+  return pageOf
+}
+
+// Lay out ONE page's items exactly like the single-page view: organic scatter from
+// computeLayout, overridden by saved positions, new items settled, overlaps cleared.
+function layoutPage(pageItems, savedPositions, projectId, contextId, width, height) {
+  if (width <= 0) return []
+  const laid = computeLayout(pageItems, width, height, SUB_BAR_H, BOTTOM_PAD)
+  const laidMapped = laid.map(item => {
+    const saved = savedPositions[posKey(projectId, contextId, item.id)]
+    return saved ? { ...item, cx: saved.xFrac * width, cy: saved.yFrac * height } : item
+  })
+  const anchored = new Set(
+    laidMapped.filter(item => savedPositions[posKey(projectId, contextId, item.id)]).map(i => i.id)
+  )
+  const settled = (anchored.size > 0 && anchored.size < laidMapped.length)
+    ? settleItems(laidMapped, anchored, width, height)
+    : laidMapped
+  return separateOverlaps(settled, width, height)
 }
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
@@ -185,7 +238,7 @@ const pageVariants = {
 
 // ─── BubbleCircle ─────────────────────────────────────────────────────────────
 
-function BubbleCircle({ item, index, hidden, isDragging }) {
+function BubbleCircle({ item, index, hidden, isDragging, animateLayout }) {
   const { theme } = useTheme()
   const isLight = theme === 'light'
   const rgb = hexToRgb(item.color)
@@ -245,6 +298,12 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
         userSelect: 'none',
         WebkitUserSelect: 'none',
         WebkitTouchCallout: 'none',
+        // Smoothly resize/reposition when a page re-layouts (e.g. after a bubble is
+        // moved to/from another page). Only enabled briefly so it never interferes
+        // with the transform-based drag.
+        transition: animateLayout
+          ? 'left 0.35s ease, top 0.35s ease, width 0.35s ease, height 0.35s ease'
+          : undefined,
       }}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
@@ -356,7 +415,7 @@ function BubbleCircle({ item, index, hidden, isDragging }) {
 
 // ─── NoteCard ─────────────────────────────────────────────────────────────────
 
-function NoteCard({ item, index, customTagColors = {}, isDragging }) {
+function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout }) {
   const { theme } = useTheme()
   const isLight = theme === 'light'
   const rgb = hexToRgb(item.color)
@@ -378,17 +437,34 @@ function NoteCard({ item, index, customTagColors = {}, isDragging }) {
   const subSize  = Math.max(Math.min(r * 0.13, 10), 7)
   const iconSize = Math.max(Math.min(r * 0.18, 12), 8)
 
-  // The body preview (line 2+) is shown ONLY when the whole first line (the title)
-  // fits fully. Estimate how many lines the title needs vs. how many the card shows.
+  // The body preview (line 2+) is shown ONLY when the whole first line (the title) is
+  // fully visible without truncation. We reserve room for the body, clamp the title to
+  // that region, then MEASURE whether the title actually fits — if it's truncated, the
+  // body is hidden entirely.
   const CHAR_W = 0.55
   const usableW = Math.max(W * 0.86, 1)
   const charsPerLine = Math.max(1, Math.floor(usableW / (fontSize * CHAR_W)))
-  const titleLinesNeeded = Math.max(1, Math.ceil(label.length / charsPerLine))
   const totalLineCapacity = Math.max(1, Math.floor((H * 0.9) / (fontSize * 1.25)))
-  const showBody = bodyText.length > 0 && titleLinesNeeded + 1 <= totalLineCapacity
-  // Title is shown fully when there's a body; otherwise it uses all available lines.
-  const titleClamp = showBody ? titleLinesNeeded : totalLineCapacity
-  const bodyLines = showBody ? Math.min(2, totalLineCapacity - titleLinesNeeded) : 0
+  const hasBodyText = bodyText.length > 0
+  // Lines the title may use: full card when there's no body, else reserve up to 2 for it.
+  const titleClamp = hasBodyText ? Math.max(1, totalLineCapacity - 2) : totalLineCapacity
+
+  const titleRef = useRef(null)
+  // Initial guess from the char estimate (avoids a first-frame flash); the measurement
+  // below corrects it.
+  const [titleTruncated, setTitleTruncated] = useState(
+    () => hasBodyText && Math.ceil(label.length / charsPerLine) > titleClamp
+  )
+  useLayoutEffect(() => {
+    const el = titleRef.current
+    if (!el) return
+    // With -webkit-line-clamp, the title is truncated iff its full content is taller
+    // than the clamped box.
+    setTitleTruncated(el.scrollHeight > el.clientHeight + 1)
+  }, [label, W, H, fontSize, titleClamp])
+
+  const showBody = hasBodyText && !titleTruncated
+  const bodyLines = showBody ? Math.min(2, totalLineCapacity - titleClamp) : 0
 
   return (
     <motion.div
@@ -405,6 +481,9 @@ function NoteCard({ item, index, customTagColors = {}, isDragging }) {
         userSelect: 'none',
         WebkitUserSelect: 'none',
         WebkitTouchCallout: 'none',
+        transition: animateLayout
+          ? 'left 0.35s ease, top 0.35s ease, width 0.35s ease, height 0.35s ease'
+          : undefined,
       }}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
@@ -446,7 +525,7 @@ function NoteCard({ item, index, customTagColors = {}, isDragging }) {
             }
         }
       >
-        <span style={{
+        <span ref={titleRef} style={{
           fontSize,
           fontWeight: 600,
           color: isLight ? solidText : 'rgba(255,255,255,0.93)',
@@ -771,6 +850,24 @@ export default function BubbleVisualization({
   const longPressTimerRef = useRef(null)
   const pendingPointerRef = useRef(null) // { item, startClientX, startClientY }
   const dragActivatedRef = useRef(false)
+  // ── Paged mode state ──────────────────────────────────────────────────────────
+  const [pageIndex, setPageIndex] = useState(0)
+  const pageIndexRef = useRef(0)
+  pageIndexRef.current = pageIndex
+  const pageX = useMotionValue(0)
+  const [savedPages, setSavedPages] = useState({}) // { [posKey]: pageIndex }
+  const savedPagesRef = useRef({})
+  savedPagesRef.current = savedPages
+  const pagesRef = useRef([])         // current pages (arrays of laid items)
+  const perPageRef = useRef(1)
+  const paginatedRef = useRef(false)
+  const pagedRef = useRef(null)       // active paged gesture state
+  // Briefly true after a cross-page move so affected pages animate their re-layout.
+  const [layoutAnim, setLayoutAnim] = useState(false)
+  const layoutAnimTimerRef = useRef(null)
+  // Highlights the edge a dragged bubble is hovering over (will move to that page on drop).
+  const [edgeGlow, setEdgeGlow] = useState(null) // 'left' | 'right' | null
+
   // Keep refs current each render
   savedPositionsRef.current = savedPositions
   sizeRef.current = size
@@ -780,12 +877,18 @@ export default function BubbleVisualization({
     setNavStack([])
     setExpandAnim(null)
     setSavedPositions(loadSavedPositions(project.id))
+    setSavedPages(loadSavedPages(project.id))
+    setPageIndex(0)
     setDraggingId(null)
     dragInfoRef.current = null
     resolvedDragPosRef.current = null
     resolvedAllPosRef.current = []
     dragActivatedRef.current = false
     pendingPointerRef.current = null
+    pagedRef.current = null
+    if (layoutAnimTimerRef.current) { clearTimeout(layoutAnimTimerRef.current); layoutAnimTimerRef.current = null }
+    setLayoutAnim(false)
+    setEdgeGlow(null)
   }, [project.id])
 
   useEffect(() => {
@@ -817,10 +920,14 @@ export default function BubbleVisualization({
   useEffect(() => {
     const currentId = navStack.length > 0 ? navStack[navStack.length - 1].id : null
     onCurrentBubbleChange?.(currentId)
+    setPageIndex(0) // start each level on its first page
   }, [navStack, onCurrentBubbleChange])
 
   useEffect(() => {
-    return () => { if (navTimerRef.current) clearTimeout(navTimerRef.current) }
+    return () => {
+      if (navTimerRef.current) clearTimeout(navTimerRef.current)
+      if (layoutAnimTimerRef.current) clearTimeout(layoutAnimTimerRef.current)
+    }
   }, [])
 
   useLayoutEffect(() => {
@@ -934,7 +1041,18 @@ export default function BubbleVisualization({
     })),
   ]
 
-  const laid = size.width > 0
+  // Pagination trigger (computed before the single-page layout so it can be skipped
+  // when paged). More items than fit one screen at the minimum size → paginate.
+  const PAGE_MIN_D = 80
+  const PAGE_GAP = 18
+  const pageAvailH = size.height - SUB_BAR_H - BOTTOM_PAD
+  const colsCap = Math.max(1, Math.floor(size.width / (PAGE_MIN_D + PAGE_GAP)))
+  const rowsCap = Math.max(1, Math.floor(pageAvailH / (PAGE_MIN_D + PAGE_GAP)))
+  const perPage = Math.max(1, colsCap * rowsCap)
+  const paginated = size.width > 0 && layoutItems.length > perPage
+
+  // Single-page organic layout (skipped when paginated — each page lays out its own).
+  const laid = (!paginated && size.width > 0)
     ? computeLayout(layoutItems, size.width, size.height, SUB_BAR_H, BOTTOM_PAD)
     : []
 
@@ -963,9 +1081,40 @@ export default function BubbleVisualization({
     ? separateOverlaps(laidSettled, size.width, size.height)
     : laidSettled
 
-  // Keep refs current (used in pointer handlers and RAF loop)
-  laidWithOverridesRef.current = laidWithOverrides
+  // ── Pagination ────────────────────────────────────────────────────────────────
+  // Each page keeps the SAME free-form organic layout + physics as the single-page
+  // view — pagination only decides which page a bubble is on.
+  let pages = []
+  if (paginated) {
+    const pageOf = assignPages(layoutItems, savedPages, project.id, currentId, perPage)
+    const numPages = Math.max(
+      Math.ceil(layoutItems.length / perPage),
+      ...layoutItems.map(it => (pageOf[it.id] ?? 0) + 1),
+      1,
+    )
+    const groups = Array.from({ length: numPages }, () => [])
+    for (const it of layoutItems) groups[pageOf[it.id] ?? 0].push(it)
+    pages = groups.map(group => layoutPage(group, savedPositions, project.id, currentId, size.width, size.height))
+  }
+  const clampedPageIndex = pages.length > 0 ? Math.min(pageIndex, pages.length - 1) : 0
+
+  // Keep refs current (used in pointer handlers and RAF loop). In paged mode the
+  // "current layout" is the visible page's items (drag physics operate on these).
+  laidWithOverridesRef.current = paginated ? (pages[clampedPageIndex] || []) : laidWithOverrides
   currentIdRef.current = currentId
+  pagesRef.current = pages
+  perPageRef.current = perPage
+  paginatedRef.current = paginated
+
+  // Snap the page track on structural changes (resize, page count, entering paged mode).
+  useLayoutEffect(() => {
+    pageX.set(-pageIndexRef.current * size.width)
+  }, [size.width, pages.length, paginated]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Clamp the current page if the number of pages shrinks.
+  useEffect(() => {
+    if (pages.length > 0 && pageIndex > pages.length - 1) setPageIndex(pages.length - 1)
+  }, [pages.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Navigation ────────────────────────────────────────────────────────────────
 
@@ -1035,6 +1184,162 @@ export default function BubbleVisualization({
   // Keep ref current so the native touch handler can call the latest zoomOut
   zoomOutRef.current = zoomOut
 
+  // ── Paged interactions (swipe between pages + drag with cross-page move) ───────
+  function animateToPage(idx) {
+    const clamped = Math.max(0, Math.min(idx, pagesRef.current.length - 1))
+    pageIndexRef.current = clamped
+    setPageIndex(clamped)
+    animate(pageX, -clamped * sizeRef.current.width, { type: 'spring', stiffness: 320, damping: 34 })
+  }
+
+  const clearAllDragTransforms = () => {
+    containerRef.current?.querySelectorAll('[data-item-id]').forEach(el => {
+      el.style.transition = ''; el.style.transform = ''; el.style.zIndex = ''
+    })
+  }
+
+  function onPagedPointerDown(e) {
+    if (!paginatedRef.current || expandAnim || navTimerRef.current) return
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const localX = e.clientX - rect.left
+    const localY = e.clientY - rect.top
+    if (localX < 28 && navStackRef.current.length > 0) return // leave edge for back-swipe
+    e.stopPropagation()
+    e.currentTarget.setPointerCapture?.(e.pointerId)
+    const pageItems = pagesRef.current[pageIndexRef.current] || []
+    const hit = pageItems.find(item => item.type === 'note'
+      ? (Math.abs(localX - item.cx) <= item.r * 0.775 && Math.abs(localY - item.cy) <= item.r * 0.575)
+      : Math.hypot(localX - item.cx, localY - item.cy) <= item.r)
+    const st = { mode: 'pending', startX: e.clientX, startY: e.clientY, itemId: hit?.id ?? null, lpTimer: null }
+    pagedRef.current = st
+    pageX.stop()
+    if (hit) {
+      // Press-and-hold to pick a bubble up — it then drags with the SAME free-form
+      // physics (collision resolution, pushing, saving) as the single-page view.
+      st.lpTimer = setTimeout(() => {
+        if (pagedRef.current !== st || st.mode !== 'pending') return
+        st.mode = 'drag'
+        navigator.vibrate?.(40)
+        const slot = (pagesRef.current[pageIndexRef.current] || []).find(it => it.id === hit.id) || hit
+        dragInfoRef.current = { id: slot.id, type: slot.type, cx: slot.cx, cy: slot.cy, r: slot.r }
+        setDraggingId(hit.id)
+        dragRafRef.current = requestAnimationFrame(runDragFrame)
+      }, 220)
+    }
+  }
+
+  function onPagedPointerMove(e) {
+    const st = pagedRef.current
+    if (!st) return
+    const rect = containerRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const dx = e.clientX - st.startX
+    const dy = e.clientY - st.startY
+    const localX = e.clientX - rect.left
+    const localY = e.clientY - rect.top
+    const { width: W, height: H } = sizeRef.current
+    if (st.mode === 'pending') {
+      if (Math.hypot(dx, dy) <= 8) return
+      if (st.lpTimer) { clearTimeout(st.lpTimer); st.lpTimer = null }
+      st.mode = 'swipe' // moved before the long-press fired → treat as a page swipe
+    }
+    if (st.mode === 'swipe') {
+      let base = -pageIndexRef.current * W + dx
+      const min = -(pagesRef.current.length - 1) * W, max = 0
+      if (base > max) base = max + (base - max) * 0.35
+      if (base < min) base = min + (base - min) * 0.35
+      pageX.set(base)
+    } else if (st.mode === 'drag') {
+      // Feed the pointer into the RAF physics loop (same as single-page dragging).
+      const drag = dragInfoRef.current
+      if (!drag) return
+      dragInfoRef.current = {
+        ...drag,
+        cx: Math.max(drag.r + 12, Math.min(W - drag.r - 12, localX)),
+        cy: Math.max(SUB_BAR_H + drag.r + 12, Math.min(H - BOTTOM_PAD - drag.r, localY)),
+      }
+      // Highlight the edge when hovering over one that has an adjacent page to move to.
+      const cur = pageIndexRef.current
+      const side = (localX < 44 && cur > 0) ? 'left'
+        : (localX > W - 44 && cur < pagesRef.current.length - 1) ? 'right' : null
+      if (side !== st.edgeSide) { st.edgeSide = side; setEdgeGlow(side) } // only re-render on change
+    }
+  }
+
+  function onPagedPointerUp(e) {
+    const st = pagedRef.current
+    if (!st) return
+    pagedRef.current = null
+    if (st.lpTimer) { clearTimeout(st.lpTimer); st.lpTimer = null }
+    if (st.edgeSide) setEdgeGlow(null)
+    const rect = containerRef.current?.getBoundingClientRect()
+    const localX = rect ? e.clientX - rect.left : 0
+    const dx = e.clientX - st.startX
+    const dy = e.clientY - st.startY
+    const { width: W, height: H } = sizeRef.current
+
+    if (st.mode === 'drag') {
+      if (dragRafRef.current) { cancelAnimationFrame(dragRafRef.current); dragRafRef.current = null }
+      const draggedId = st.itemId
+      const curPage = pageIndexRef.current
+      let targetPage = curPage
+      if (localX < 44 && curPage > 0) targetPage = curPage - 1
+      else if (localX > W - 44 && curPage < pagesRef.current.length - 1) targetPage = curPage + 1
+      const lastResolved = resolvedAllPosRef.current
+      const cId = currentIdRef.current
+
+      if (targetPage !== curPage && W > 0) {
+        // Cross-page move: reassign the bubble's page, then clear the saved positions
+        // of both the source and destination pages so each recalculates from scratch.
+        const key = posKey(project.id, cId, draggedId)
+        const newPages = { ...savedPagesRef.current, [key]: targetPage }
+        const newPositions = { ...savedPositionsRef.current }
+        delete newPositions[key]
+        for (const it of (pagesRef.current[curPage] || [])) if (it.id !== draggedId) delete newPositions[posKey(project.id, cId, it.id)]
+        for (const it of (pagesRef.current[targetPage] || [])) delete newPositions[posKey(project.id, cId, it.id)]
+        if (layoutAnimTimerRef.current) clearTimeout(layoutAnimTimerRef.current)
+        flushSync(() => {
+          setSavedPages(newPages)
+          setSavedPositions(newPositions)
+          setDraggingId(null)
+          setLayoutAnim(true)
+        })
+        containerRef.current?.querySelectorAll('[data-item-id]').forEach(el => { el.style.transform = ''; el.style.zIndex = '' })
+        saveSavedPagesMap(project.id, newPages)
+        saveSavedPositions(project.id, newPositions)
+        animateToPage(targetPage)
+        layoutAnimTimerRef.current = setTimeout(() => setLayoutAnim(false), 420)
+      } else if (W > 0 && lastResolved.length) {
+        // Same-page drop: save every current-page item where it settled (jump-free).
+        const final = resolveCollisions(lastResolved, '__none__', 0, 0, W, H)
+        const newPositions = { ...savedPositionsRef.current }
+        final.forEach(p => { newPositions[posKey(project.id, cId, p.id)] = { xFrac: p.cx / W, yFrac: p.cy / H } })
+        flushSync(() => { setSavedPositions(newPositions); setDraggingId(null); setLayoutAnim(false) })
+        clearAllDragTransforms()
+        saveSavedPositions(project.id, newPositions)
+      } else {
+        clearAllDragTransforms()
+        setDraggingId(null)
+      }
+      dragInfoRef.current = null
+      resolvedDragPosRef.current = null
+      resolvedAllPosRef.current = []
+      return
+    }
+    if (st.mode === 'swipe') {
+      if (dx < -0.3 * W) animateToPage(pageIndexRef.current + 1)
+      else if (dx > 0.3 * W) animateToPage(pageIndexRef.current - 1)
+      else animateToPage(pageIndexRef.current)
+      return
+    }
+    // Tap (no significant move) → navigate / open.
+    if (st.itemId != null && Math.abs(dx) < 10 && Math.abs(dy) < 10) {
+      const item = (pagesRef.current[pageIndexRef.current] || []).find(it => it.id === st.itemId)
+      if (item) { item.type === 'bubble' ? handleBubbleClick(item) : onSelectNote(item) }
+    }
+  }
+
   // ── RAF drag loop — mutates DOM directly, zero React re-renders per frame ──────
 
   function runDragFrame() {
@@ -1084,6 +1389,7 @@ export default function BubbleVisualization({
   function handlePointerDown(e) {
     if (e.pointerType === 'touch' && e.isPrimary === false) return
     if (expandAnim || navTimerRef.current) return
+    if (paginatedRef.current) return // paged mode uses its own pointer handlers
 
     const rect = containerRef.current?.getBoundingClientRect()
     if (!rect) return
@@ -1378,8 +1684,8 @@ export default function BubbleVisualization({
                 </div>
               )}
 
-              {/* Empty state */}
-              {laid.length === 0 && !expandAnim && (
+              {/* Empty state (paged mode always has items) */}
+              {!paginated && laid.length === 0 && !expandAnim && (
                 <div
                   className="absolute inset-0 flex items-center justify-center"
                   style={{ paddingTop: SUB_BAR_H }}
@@ -1398,32 +1704,107 @@ export default function BubbleVisualization({
                 </div>
               )}
 
-              {/* Bubbles and note cards */}
-              <AnimatePresence>
-                {laidWithOverrides.map((item, i) =>
-                  item.type === 'note' ? (
-                    <NoteCard
-                      key={`${item.id}-${theme}`}
-                      item={item}
-                      index={i}
-                      customTagColors={project.customTagColors || {}}
-                      isDragging={draggingId === item.id}
-                    />
-                  ) : (
-                    <BubbleCircle
-                      key={`${item.id}-${theme}`}
-                      item={item}
-                      index={i}
-                      hidden={expandAnim?.id === item.id}
-                      isDragging={draggingId === item.id}
-                    />
-                  )
-                )}
-              </AnimatePresence>
+              {paginated ? (
+                /* ── Paged bubbles: horizontal swipe between full pages ────────── */
+                <div
+                  className="absolute inset-0"
+                  style={{ overflow: 'hidden', touchAction: 'none' }}
+                  onPointerDown={onPagedPointerDown}
+                  onPointerMove={onPagedPointerMove}
+                  onPointerUp={onPagedPointerUp}
+                  onPointerCancel={onPagedPointerUp}
+                >
+                  <motion.div style={{ x: pageX, display: 'flex', height: '100%', width: pages.length * size.width }}>
+                    {pages.map((pageItems, pi) => (
+                      <div key={pi} style={{ position: 'relative', width: size.width, height: '100%', flexShrink: 0 }}>
+                        {pageItems.map((item, i) =>
+                          item.type === 'note' ? (
+                            <NoteCard
+                              key={`${item.id}-${theme}`}
+                              item={item}
+                              index={i % 6}
+                              customTagColors={project.customTagColors || {}}
+                              isDragging={draggingId === item.id}
+                              animateLayout={layoutAnim && draggingId !== item.id}
+                            />
+                          ) : (
+                            <BubbleCircle
+                              key={`${item.id}-${theme}`}
+                              item={item}
+                              index={i % 6}
+                              hidden={expandAnim?.id === item.id}
+                              isDragging={draggingId === item.id}
+                              animateLayout={layoutAnim && draggingId !== item.id}
+                            />
+                          )
+                        )}
+                      </div>
+                    ))}
+                  </motion.div>
+                </div>
+              ) : (
+                /* ── Single-page organic layout (free drag + saved positions) ──── */
+                <AnimatePresence>
+                  {laidWithOverrides.map((item, i) =>
+                    item.type === 'note' ? (
+                      <NoteCard
+                        key={`${item.id}-${theme}`}
+                        item={item}
+                        index={i}
+                        customTagColors={project.customTagColors || {}}
+                        isDragging={draggingId === item.id}
+                      />
+                    ) : (
+                      <BubbleCircle
+                        key={`${item.id}-${theme}`}
+                        item={item}
+                        index={i}
+                        hidden={expandAnim?.id === item.id}
+                        isDragging={draggingId === item.id}
+                      />
+                    )
+                  )}
+                </AnimatePresence>
+              )}
             </div>
           </motion.div>
         </AnimatePresence>
       </div>
+
+      {/* ── Page indicator dots — fixed, above the + button ───────────────────── */}
+      {paginated && pages.length > 1 && (
+        <div
+          className="absolute left-0 right-0 flex items-center justify-center gap-2 pointer-events-none z-10"
+          style={{ bottom: 'calc(20px + env(safe-area-inset-bottom))' }}
+        >
+          {pages.map((_, i) => (
+            <span
+              key={i}
+              style={{
+                width: i === clampedPageIndex ? 9 : 6,
+                height: i === clampedPageIndex ? 9 : 6,
+                borderRadius: '50%',
+                background: i === clampedPageIndex
+                  ? (isLight ? 'rgba(0,0,0,0.6)' : 'rgba(255,255,255,0.9)')
+                  : (isLight ? 'rgba(0,0,0,0.22)' : 'rgba(255,255,255,0.3)'),
+                transition: 'width 0.2s, height 0.2s, background 0.2s',
+              }}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* ── Edge highlight while dragging a bubble toward an adjacent page ─────── */}
+      {edgeGlow && (
+        <div
+          className="absolute top-0 bottom-0 pointer-events-none z-40"
+          style={{
+            [edgeGlow]: 0,
+            width: 64,
+            background: `linear-gradient(to ${edgeGlow === 'left' ? 'right' : 'left'}, rgba(99,102,241,0.45), rgba(99,102,241,0))`,
+          }}
+        />
+      )}
 
       {/* ── ZoomExpand — outside swipe wrapper so it covers the header too ───── */}
       <ZoomExpand anim={expandAnim} size={size} onDone={handleExpandDone} />
