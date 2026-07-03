@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTheme } from '../contexts/ThemeContext'
 import { useAuth } from '../contexts/AuthContext'
+import ImportNotes from './ImportNotes'
 
 function Toast({ message }) {
   return (
@@ -49,11 +50,12 @@ const Divider = () => (
   <div style={{ height: 1, background: 'var(--border)', marginLeft: 16 }} />
 )
 
-export default function Settings({ onClose, zIndex = 50 }) {
+export default function Settings({ onClose, zIndex = 50, project, onImportNotes }) {
   const { theme, toggleTheme } = useTheme()
   const { user, guestMode, signInWithGoogle, signOut } = useAuth()
   const isLight = theme === 'light'
   const [toast, setToast] = useState('')
+  const [importOpen, setImportOpen] = useState(false)
   const toastTimer = useState(null)
 
   function showToast(msg) {
@@ -236,7 +238,7 @@ export default function Settings({ onClose, zIndex = 50 }) {
               </button>
               <Divider />
               <button
-                onClick={() => showToast('Coming soon!')}
+                onClick={() => setImportOpen(true)}
                 className="w-full flex items-center justify-between px-4 py-3.5 active:opacity-70 transition-opacity"
               >
                 <div className="text-left">
@@ -252,6 +254,18 @@ export default function Settings({ onClose, zIndex = 50 }) {
 
         </div>
       </div>
+
+      <AnimatePresence>
+        {importOpen && project && (
+          <ImportNotes
+            key="import"
+            project={project}
+            onImportNotes={onImportNotes}
+            onClose={() => setImportOpen(false)}
+            showToast={showToast}
+          />
+        )}
+      </AnimatePresence>
 
       <Toast message={toast} />
     </motion.div>

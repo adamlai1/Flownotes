@@ -441,6 +441,25 @@ export default function App() {
     updateProject(updated)
   }
 
+  // Bulk-create notes (used by the Import flow). Adds them all in one update so it's
+  // saved to localStorage and synced to Supabase in a single pass. Returns the count.
+  function importNotes(notesData) {
+    if (!notesData?.length) return 0
+    const now = new Date().toISOString()
+    const newNotes = notesData.map(nd => ({
+      id: generateId(),
+      content: nd.content || '',
+      created_at: now,
+      updated_at: now,
+      bubble_ids: nd.bubble_ids || [],
+      tags: [],
+      connections: [],
+    }))
+    const current = activeProjectRef.current
+    updateProject({ ...current, notes: [...newNotes, ...current.notes] })
+    return newNotes.length
+  }
+
   // Note operations
   function createNote(noteData) {
     const now = new Date().toISOString()
@@ -686,7 +705,7 @@ export default function App() {
       {/* Settings panel */}
       <AnimatePresence>
         {settingsOpen && (
-          <Settings key="settings" onClose={() => setSettingsOpen(false)} zIndex={45} />
+          <Settings key="settings" onClose={() => setSettingsOpen(false)} zIndex={45} project={activeProject} onImportNotes={importNotes} />
         )}
       </AnimatePresence>
 
