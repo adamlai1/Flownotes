@@ -1746,7 +1746,6 @@ export default function BubbleVisualization({
   // Pagination trigger (computed before the single-page layout so it can be skipped
   // when paged). More items than fit one screen at the minimum size → paginate.
   const PAGE_MIN_D = 80
-  const PAGE_GAP = 18
   const pageAvailH = size.height - SUB_BAR_H - BOTTOM_PAD
   // Capacity from each type's REAL footprint, not a one-size bubble grid: notes render as
   // small rectangles (W = r*1.55 ≈ 62px, H = r*1.15 ≈ 46px) packed ~5px apart, so counting
@@ -1764,7 +1763,20 @@ export default function BubbleVisualization({
   const notesPerPage = size.width > 0
     ? noteGridCapacity(size.width, size.height, SUB_BAR_H, BOTTOM_PAD)
     : 1
-  const bubblesPerPage = gridCap(PAGE_MIN_D + PAGE_GAP, PAGE_MIN_D + PAGE_GAP)
+  // Bubbles pack organically (golden-angle spiral + relaxation) into a roughly HEXAGONAL
+  // arrangement at the crowded gap — not the square 98px grid this used to assume, which
+  // under-counted capacity by about 2x and spilled bubbles onto a new page long before
+  // one was full. Estimate from the hex-packing area of the region the packer can place
+  // centers in, bounded by the hex row/column count so narrow pages stay sane. Measured
+  // saturation (first visible overlap) is ~37 bubbles on a 400x780 phone and ~100 on a
+  // 1100x720 desktop; this lands ~20% below that, leaving headroom for the size
+  // variation of content-scaled bubbles.
+  const BUBBLE_PITCH = PAGE_MIN_D + 6
+  const hexRowPitch = BUBBLE_PITCH * Math.sqrt(3) / 2
+  const bubblesPerPage = Math.max(1, Math.min(
+    Math.floor((usablePageW * usablePageH) / (BUBBLE_PITCH * hexRowPitch)),
+    (Math.floor(usablePageW / BUBBLE_PITCH) + 1) * (Math.floor(usablePageH / hexRowPitch) + 1),
+  ))
   // Blend the two capacities by the current item mix into one count (assignPages is
   // count-based): pageLoad = how many pages this mix needs; perPage = items per page
   // at that blended density.
