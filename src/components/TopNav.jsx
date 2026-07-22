@@ -238,6 +238,20 @@ export default function TopNav({
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
           </svg>
         )}
+        {/* Offline is a normal resting state, not a failure: changes are safe locally
+            and will upload on reconnect, so it gets a muted cloud-off rather than red. */}
+        {syncStatus === 'offline' && (
+          <svg
+            className="w-4 h-4"
+            style={{ color: 'var(--text-muted)' }}
+            fill="none" stroke="currentColor" viewBox="0 0 24 24"
+            aria-label="Offline — changes saved on this device"
+          >
+            <title>Offline — changes saved on this device</title>
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 3l18 18" />
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6.34 8.04A5 5 0 007 18h10a4 4 0 001.9-7.52M9.5 5.2A5.5 5.5 0 0117.6 9.3" />
+          </svg>
+        )}
 
         {user && (
           <div className="relative" ref={userMenuRef}>

@@ -12,13 +12,15 @@ import {
 } from './utils/storage'
 import {
   loadAllFromCloud,
-  syncProjectToCloud,
   syncAllToCloud,
-  deleteProjectFromCloud,
-  deleteNotesFromCloud,
-  deleteBubblesFromCloud,
-  deleteCustomTagFromCloud,
 } from './lib/syncService'
+import {
+  enqueueDelete,
+  markProjectDirty,
+  clearProjectDirty,
+  hasPending,
+  flushOutbox,
+} from './lib/outbox'
 import { TAG_COLORS } from './data/defaultData'
 
 // Ensure default tag colors exist in customTagColors for projects created before they were unified,
@@ -135,9 +137,13 @@ function LoginScreen() {
 
 export default function App() {
   const { user, loading, guestMode } = useAuth()
-  const [syncStatus, setSyncStatus] = useState('idle') // 'idle' | 'syncing' | 'synced' | 'error'
+  // 'offline' = we have unsent work and no connection; it's a normal resting state,
+  // not a failure, so it reads differently from 'error' in the UI.
+  const [syncStatus, setSyncStatus] = useState('idle') // 'idle' | 'syncing' | 'synced' | 'error' | 'offline'
   const syncedUserRef = useRef(null)
   const cloudSaveTimerRef = useRef(null)
+  const flushingRef = useRef(false)
+  const flushAgainRef = useRef(false)
   const userRef = useRef(user)
   userRef.current = user
   const [projectList, setProjectList] = useState([])
@@ -202,19 +208,42 @@ export default function App() {
     }, 400)
   }, [])
 
-  function scheduleCloudSync(project) {
-    if (!userRef.current) return
+  // Drain the offline queue. Serialised: a flush already in flight just sets a flag so
+  // one more runs afterwards, so overlapping triggers (online + focus + timer) can't
+  // race each other into duplicate uploads.
+  const runFlush = useCallback(async () => {
+    const uid = userRef.current?.id
+    if (!uid) return
+    if (!navigator.onLine) {
+      setSyncStatus(hasPending(uid) ? 'offline' : 'synced')
+      return
+    }
+    if (flushingRef.current) { flushAgainRef.current = true; return }
+    flushingRef.current = true
     setSyncStatus('syncing')
+    try {
+      await flushOutbox(uid)
+      setSyncStatus(hasPending(uid) ? 'error' : 'synced')
+    } catch (e) {
+      console.error('Sync flush error:', e)
+      // A failure while offline is expected — the work stays queued for reconnect.
+      setSyncStatus(navigator.onLine ? 'error' : 'offline')
+    } finally {
+      flushingRef.current = false
+      if (flushAgainRef.current) { flushAgainRef.current = false; runFlush() }
+    }
+  }, [])
+
+  // Record the intent to upload BEFORE attempting it, so a failed (or never-attempted,
+  // e.g. tab closed) sync is retried later instead of being lost. The flush re-reads the
+  // project's current local state, so this doesn't need to capture `project`.
+  function scheduleCloudSync(project) {
+    const uid = userRef.current?.id
+    if (!uid) return
+    markProjectDirty(uid, project.id)
+    setSyncStatus(navigator.onLine ? 'syncing' : 'offline')
     if (cloudSaveTimerRef.current) clearTimeout(cloudSaveTimerRef.current)
-    cloudSaveTimerRef.current = setTimeout(async () => {
-      try {
-        await syncProjectToCloud(userRef.current.id, project)
-        setSyncStatus('synced')
-      } catch (e) {
-        console.error('Cloud sync error:', e)
-        setSyncStatus('error')
-      }
-    }, 2000)
+    cloudSaveTimerRef.current = setTimeout(() => { runFlush() }, 2000)
   }
 
   // Cancel any queued debounced saves. A pending save was scheduled with the
@@ -225,40 +254,23 @@ export default function App() {
     if (cloudSaveTimerRef.current) { clearTimeout(cloudSaveTimerRef.current); cloudSaveTimerRef.current = null }
   }
 
-  // Commit a deletion. Order matters to avoid the deleted item coming back:
-  //   1. delete from the cloud FIRST (awaited) so the row is gone,
-  //   2. THEN remove it from local state / localStorage,
-  //   3. THEN cancel any pending debounced sync so it can't re-upload old data.
-  // Queued saves are also cancelled up front so a stale sync can't fire mid-await.
-  function commitDelete(updatedProject, cloudDelete) {
+  // Commit a deletion, local-first: the UI and localStorage are updated immediately and
+  // never wait on the network (previously the local delete sat behind an awaited cloud
+  // call, so deleting while offline silently did nothing at all).
+  //
+  // `op` is a tombstone descriptor for the outbox — see lib/outbox.js. Because the
+  // regular sync is upsert-only it can never remove a row, so the tombstone is what
+  // actually stops a deleted item reappearing from the cloud later. Marking the project
+  // dirty covers the leftover cleanup on surviving items (connections, tags).
+  function commitDelete(updatedProject, op) {
     cancelPendingSaves()
-    const currentUser = userRef.current
-    if (!currentUser) {
-      // Guest mode — localStorage only.
-      setActiveProject(updatedProject)
-      saveProject(updatedProject)
-      return
-    }
-    setSyncStatus('syncing')
-    ;(async () => {
-      try {
-        console.log('[delete] deleting from cloud for userId:', currentUser.id)
-        // 1. Delete from the cloud first, and wait for it to complete.
-        await cloudDelete(currentUser.id)
-        // 2. Remove from local state / localStorage.
-        setActiveProject(updatedProject)
-        saveProject(updatedProject)
-        // 3. Cancel any pending debounced sync so it can't re-upload the old data,
-        //    then persist the remaining data (e.g. connection/tag cleanup on
-        //    surviving notes) in one explicit, non-debounced write.
-        cancelPendingSaves()
-        await syncProjectToCloud(currentUser.id, updatedProject)
-        setSyncStatus('synced')
-      } catch (e) {
-        console.error('Cloud delete error:', e)
-        setSyncStatus('error')
-      }
-    })()
+    setActiveProject(updatedProject)
+    saveProject(updatedProject)
+    const uid = userRef.current?.id
+    if (!uid) return // Guest mode — localStorage only.
+    enqueueDelete(uid, op)
+    markProjectDirty(uid, updatedProject.id)
+    runFlush()
   }
 
   // Initial sync: run once per user sign-in, after local data is loaded
@@ -273,8 +285,20 @@ export default function App() {
     syncedUserRef.current = user.id
 
     async function doInitialSync() {
+      // Offline at startup: keep the local data as-is and don't touch the cloud. Pulling
+      // is impossible anyway, and marking this user as synced would skip the real pull
+      // once we reconnect — so leave that flag clear.
+      if (!navigator.onLine) {
+        syncedUserRef.current = null
+        setSyncStatus(hasPending(user.id) ? 'offline' : 'idle')
+        return
+      }
       setSyncStatus('syncing')
       try {
+        // Push anything queued from a previous offline session BEFORE pulling. The pull
+        // below overwrites local storage with cloud state, so flushing second would
+        // discard offline edits and resurrect offline deletes.
+        await flushOutbox(user.id)
         const cloudData = await loadAllFromCloud(user.id)
         const needNewlineFix = !localStorage.getItem(NEWLINE_FLAG)
         if (cloudData) {
@@ -307,12 +331,36 @@ export default function App() {
         setSyncStatus('synced')
       } catch (e) {
         console.error('Initial sync error:', e)
-        setSyncStatus('error')
+        // Let a later reconnect retry the whole thing rather than leaving this user
+        // permanently marked as synced after a failed first attempt.
+        syncedUserRef.current = null
+        setSyncStatus(navigator.onLine ? 'error' : 'offline')
       }
     }
 
     doInitialSync()
   }, [user, projectList])
+
+  // Reconnect / retry triggers. `online` is the main one; visibility covers the common
+  // mobile case where the tab was backgrounded while offline and the event never fired,
+  // and the slow interval is a backstop for flaky connections that never fire `online`.
+  useEffect(() => {
+    if (!user) return
+    const onOnline = () => runFlush()
+    const onOffline = () => setSyncStatus(hasPending(user.id) ? 'offline' : 'synced')
+    const onVisible = () => { if (document.visibilityState === 'visible') runFlush() }
+    window.addEventListener('online', onOnline)
+    window.addEventListener('offline', onOffline)
+    document.addEventListener('visibilitychange', onVisible)
+    const timer = setInterval(() => { if (hasPending(user.id)) runFlush() }, 30000)
+    if (hasPending(user.id)) runFlush() // catch work left over from a previous session
+    return () => {
+      window.removeEventListener('online', onOnline)
+      window.removeEventListener('offline', onOffline)
+      document.removeEventListener('visibilitychange', onVisible)
+      clearInterval(timer)
+    }
+  }, [user, runFlush])
 
   function updateProject(updatedProject) {
     setActiveProject(updatedProject)
@@ -376,8 +424,11 @@ export default function App() {
     }
     if (userRef.current) {
       const noteIds = (projectToDelete?.notes ?? []).map(n => n.id)
-      console.log('[delete] deleting project from cloud for userId:', userRef.current.id)
-      deleteProjectFromCloud(userRef.current.id, id, noteIds).catch(e => console.error('Cloud delete error:', e))
+      // Drop any queued re-upload of this project first, or the flush would push it
+      // back up after the tombstone removed it.
+      clearProjectDirty(userRef.current.id, id)
+      enqueueDelete(userRef.current.id, { kind: 'project', projectId: id, noteIds })
+      runFlush()
     }
   }
 
@@ -414,7 +465,7 @@ export default function App() {
     if (selectedBubbleId && toRemove.has(selectedBubbleId)) {
       setSelectedBubbleId(null)
     }
-    commitDelete(updated, (uid) => deleteBubblesFromCloud(uid, [...toRemove]))
+    commitDelete(updated, { kind: 'bubbles', bubbleIds: [...toRemove] })
   }
 
   // Move a bubble to a new parent (drag-and-drop reparenting). newParentId === null
@@ -499,7 +550,7 @@ export default function App() {
           connections: n.connections.filter(c => c.note_id !== noteId),
         })),
     }
-    commitDelete(updated, (uid) => deleteNotesFromCloud(uid, [noteId]))
+    commitDelete(updated, { kind: 'notes', noteIds: [noteId] })
     setNoteStack(prev => prev.filter(id => id !== noteId))
   }
 
@@ -529,7 +580,7 @@ export default function App() {
     }))
     commitDelete(
       { ...activeProject, customTagColors: updatedColors, customTagIds: updatedIds, notes: updatedNotes },
-      (uid) => deleteCustomTagFromCloud(uid, tagName),
+      { kind: 'tag', tagName },
     )
   }
 
@@ -550,9 +601,11 @@ export default function App() {
       tags: n.tags.map(t => t === oldName ? newName : t),
     }))
     updateProject({ ...activeProject, customTagColors: existingColors, customTagIds: existingIds, notes: updatedNotes })
-    // Remove the old-name row from the cloud so it doesn't reappear on reload.
+    // Remove the old-name row from the cloud so it doesn't reappear on reload. Queued
+    // rather than fired-and-forgotten, so an offline rename still cleans up on reconnect.
     if (userRef.current) {
-      deleteCustomTagFromCloud(userRef.current.id, oldName).catch(e => console.error('Cloud delete error:', e))
+      enqueueDelete(userRef.current.id, { kind: 'tag', tagName: oldName })
+      runFlush()
     }
   }
 
