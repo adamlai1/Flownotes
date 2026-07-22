@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo } from 'react'
+import { useState, useRef, useMemo, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { getNoteTitle } from '../utils/helpers'
@@ -24,11 +24,15 @@ function buildNoteContent(chunk) {
 function flattenBubbles(bubbles, parentId = null, depth = 0) {
   const out = []
   for (const b of bubbles.filter(x => (x.parent_id ?? null) === parentId)) {
-    out.push({ id: b.id, name: b.name, depth })
+    out.push({ id: b.id, name: b.name, color: b.color, depth })
     out.push(...flattenBubbles(bubbles, b.id, depth + 1))
   }
   return out
 }
+
+// Root level has no bubble colour of its own; a root OVERRIDE still needs to read as
+// "custom", so it borrows the accent.
+const ROOT_ACCENT = '#6366f1'
 
 // ── UI bits ─────────────────────────────────────────────────────────────────────
 
@@ -46,13 +50,64 @@ function Pill({ active, onClick, children }) {
   )
 }
 
+// The list of destinations, shared by every picker (root + every bubble, indented).
+function BubbleOptions({ rootLabel, options }) {
+  return (
+    <>
+      <option value="">{rootLabel}</option>
+      {options.map(b => (
+        <option key={b.id} value={b.id}>{' '.repeat(b.depth * 3)}{b.name}</option>
+      ))}
+    </>
+  )
+}
+
+// A bubble pill with a transparent native <select> laid over it, so tapping the pill
+// opens the platform picker instead of a hand-rolled dropdown (works well on mobile).
+// `custom` styles the pill in the bubble's colour; otherwise it stays grey to show the
+// note is just following the default.
+function BubblePill({ value, custom, color, label, rootLabel, options, onChange }) {
+  const tint = color || ROOT_ACCENT
+  return (
+    <div className="relative flex-shrink-0" onClick={e => e.stopPropagation()}>
+      <span
+        className="flex items-center gap-1 pl-1.5 pr-1 py-0.5 rounded-full text-[10px] font-medium max-w-[132px]"
+        style={custom
+          ? { background: `${tint}22`, color: tint, border: `1px solid ${tint}66` }
+          : { background: 'var(--hover)', color: 'var(--text-muted)', border: '1px solid var(--border)' }}
+      >
+        <span
+          className="w-1.5 h-1.5 rounded-full flex-shrink-0"
+          style={{ background: custom ? tint : 'var(--text-muted)' }}
+        />
+        <span className="truncate">{label}</span>
+        <svg className="w-2.5 h-2.5 flex-shrink-0 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M19 9l-7 7-7-7" />
+        </svg>
+      </span>
+      <select
+        value={value}
+        onChange={e => onChange(e.target.value)}
+        aria-label="Assign bubble"
+        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+      >
+        <BubbleOptions rootLabel={rootLabel} options={options} />
+      </select>
+    </div>
+  )
+}
+
 export default function ImportNotes({ project, onImportNotes, onClose, showToast }) {
   const [stage, setStage] = useState('menu') // 'menu' | 'paste' | 'preview'
   const [rawText, setRawText] = useState('')
   const [pasteValue, setPasteValue] = useState('')
   const [splitMode, setSplitMode] = useState('one') // 'one' | 'blank' | 'custom'
   const [customSep, setCustomSep] = useState('---')
-  const [targetBubble, setTargetBubble] = useState('') // '' = root level
+  const [defaultBubble, setDefaultBubble] = useState('') // '' = root level
+  // Per-note destinations the user set explicitly, keyed by index into `notes`.
+  // Anything absent here follows `defaultBubble`.
+  const [overrides, setOverrides] = useState({})
+  const [selected, setSelected] = useState(() => new Set())
   const [loadingPdf, setLoadingPdf] = useState(false)
   const fileInputRef = useRef(null)
 
@@ -69,6 +124,52 @@ export default function ImportNotes({ project, onImportNotes, onClose, showToast
     [chunks],
   )
   const bubbleOptions = useMemo(() => flattenBubbles(project.bubbles || []), [project.bubbles])
+  const bubbleById = useMemo(() => {
+    const m = new Map()
+    for (const b of bubbleOptions) m.set(b.id, b)
+    return m
+  }, [bubbleOptions])
+  const rootLabel = project.name || 'Root level'
+
+  // Overrides are keyed by position, so any change that re-splits the text invalidates
+  // them (chunk N is no longer the same note). Drop them along with the selection.
+  useEffect(() => {
+    setOverrides({})
+    setSelected(new Set())
+  }, [rawText, splitMode, customSep])
+
+  // Resolved destination for a note, and whether that came from an explicit override.
+  // Comparing against the default (rather than just "is there an override?") keeps a
+  // note grey when its override happens to match the default.
+  const bubbleFor = (i) => (i in overrides ? overrides[i] : defaultBubble)
+  const isCustom = (i) => bubbleFor(i) !== defaultBubble
+
+  function assignOne(i, bubbleId) {
+    setOverrides(prev => ({ ...prev, [i]: bubbleId }))
+  }
+
+  function assignSelected(bubbleId) {
+    setOverrides(prev => {
+      const next = { ...prev }
+      for (const i of selected) next[i] = bubbleId
+      return next
+    })
+    setSelected(new Set())
+  }
+
+  function toggleSelected(i) {
+    setSelected(prev => {
+      const next = new Set(prev)
+      if (next.has(i)) next.delete(i)
+      else next.add(i)
+      return next
+    })
+  }
+
+  const overrideCount = useMemo(
+    () => notes.reduce((acc, _, i) => acc + (isCustom(i) ? 1 : 0), 0),
+    [notes, overrides, defaultBubble], // eslint-disable-line react-hooks/exhaustive-deps
+  )
 
   function handleFile(e) {
     const file = e.target.files?.[0]
@@ -109,14 +210,19 @@ export default function ImportNotes({ project, onImportNotes, onClose, showToast
   }
 
   function doImport() {
-    const bubbleIds = targetBubble ? [targetBubble] : []
-    const count = onImportNotes(notes.map(n => ({ content: n.content, bubble_ids: bubbleIds })))
+    const count = onImportNotes(notes.map((n, i) => {
+      const bubbleId = bubbleFor(i)
+      return { content: n.content, bubble_ids: bubbleId ? [bubbleId] : [] }
+    }))
     showToast(`Imported ${count} note${count === 1 ? '' : 's'}`)
     onClose()
   }
 
   function back() {
-    if (stage === 'preview') { setStage('menu'); setRawText(''); setPasteValue('') }
+    if (stage === 'preview') {
+      setStage('menu'); setRawText(''); setPasteValue('')
+      setOverrides({}); setSelected(new Set()); setDefaultBubble('')
+    }
     else if (stage === 'paste') setStage('menu')
     else onClose()
   }
@@ -235,38 +341,85 @@ export default function ImportNotes({ project, onImportNotes, onClose, showToast
                 )}
               </div>
 
-              {/* Bubble selection */}
+              {/* Default destination for every note */}
               <div>
-                <p className="text-[11px] font-semibold uppercase tracking-wider mb-2 px-1" style={{ color: 'var(--text-muted)' }}>Import into</p>
+                <p className="text-[11px] font-semibold uppercase tracking-wider mb-2 px-1" style={{ color: 'var(--text-muted)' }}>Import all to</p>
                 <select
-                  value={targetBubble}
-                  onChange={e => setTargetBubble(e.target.value)}
+                  value={defaultBubble}
+                  onChange={e => setDefaultBubble(e.target.value)}
                   className="w-full px-3 py-2.5 rounded-lg text-sm outline-none appearance-none"
                   style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }}
                 >
-                  <option value="">Root level</option>
-                  {bubbleOptions.map(b => (
-                    <option key={b.id} value={b.id}>{' '.repeat(b.depth * 3)}{b.name}</option>
-                  ))}
+                  <BubbleOptions rootLabel={rootLabel} options={bubbleOptions} />
                 </select>
+                {overrideCount > 0 && (
+                  <p className="text-[11px] mt-1.5 px-1" style={{ color: 'var(--text-muted)' }}>
+                    {overrideCount} note{overrideCount === 1 ? '' : 's'} assigned separately
+                  </p>
+                )}
               </div>
 
               {/* Preview list */}
               <div>
-                <p className="text-[11px] font-semibold uppercase tracking-wider mb-2 px-1" style={{ color: 'var(--text-muted)' }}>
-                  This will create {notes.length} note{notes.length === 1 ? '' : 's'}
-                </p>
+                <div className="flex items-baseline justify-between mb-2 px-1 gap-2">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider" style={{ color: 'var(--text-muted)' }}>
+                    This will create {notes.length} note{notes.length === 1 ? '' : 's'}
+                  </p>
+                  {notes.length > 0 && (
+                    <p className="text-[11px] flex-shrink-0" style={{ color: 'var(--text-muted)' }}>Tap to select</p>
+                  )}
+                </div>
                 <div className="space-y-2">
-                  {notes.slice(0, 200).map((n, i) => (
-                    <div key={i} className="rounded-xl px-3 py-2.5" style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}>
-                      <p className="text-sm font-semibold truncate" style={{ color: 'var(--text)' }}>{n.title || 'Untitled'}</p>
-                      {n.preview && (
-                        <p className="text-xs mt-0.5 line-clamp-2" style={{ color: 'var(--text-muted)', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
-                          {n.preview}
-                        </p>
-                      )}
-                    </div>
-                  ))}
+                  {notes.slice(0, 200).map((n, i) => {
+                    const bid = bubbleFor(i)
+                    const bubble = bid ? bubbleById.get(bid) : null
+                    const custom = isCustom(i)
+                    const isSel = selected.has(i)
+                    return (
+                      <div
+                        key={i}
+                        onClick={() => toggleSelected(i)}
+                        className="rounded-xl px-3 py-2.5 flex items-start gap-2 cursor-pointer transition-colors"
+                        style={{
+                          background: isSel ? 'rgba(99,102,241,0.12)' : 'var(--surface-2)',
+                          border: `1px solid ${isSel ? 'rgba(99,102,241,0.55)' : 'var(--border)'}`,
+                        }}
+                      >
+                        {/* Selection checkmark */}
+                        <span
+                          className="flex-shrink-0 w-4 h-4 mt-0.5 rounded-full flex items-center justify-center transition-colors"
+                          style={isSel
+                            ? { background: '#6366f1' }
+                            : { border: '1.5px solid var(--border)' }}
+                        >
+                          {isSel && (
+                            <svg className="w-2.5 h-2.5 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={4} d="M5 13l4 4L19 7" />
+                            </svg>
+                          )}
+                        </span>
+
+                        <div className="min-w-0 flex-1">
+                          <p className="text-sm font-semibold truncate" style={{ color: 'var(--text)' }}>{n.title || 'Untitled'}</p>
+                          {n.preview && (
+                            <p className="text-xs mt-0.5 line-clamp-2" style={{ color: 'var(--text-muted)', display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>
+                              {n.preview}
+                            </p>
+                          )}
+                        </div>
+
+                        <BubblePill
+                          value={bid}
+                          custom={custom}
+                          color={bubble?.color}
+                          label={bubble ? bubble.name : rootLabel}
+                          rootLabel={rootLabel}
+                          options={bubbleOptions}
+                          onChange={v => assignOne(i, v)}
+                        />
+                      </div>
+                    )
+                  })}
                   {notes.length > 200 && (
                     <p className="text-xs text-center py-2" style={{ color: 'var(--text-muted)' }}>…and {notes.length - 200} more</p>
                   )}
@@ -278,8 +431,43 @@ export default function ImportNotes({ project, onImportNotes, onClose, showToast
             </div>
           </div>
 
-          {/* Import button */}
+          {/* Bulk reassign + import */}
           <div className="max-w-lg w-full mx-auto px-4 py-4" style={{ paddingBottom: 'calc(1rem + env(safe-area-inset-bottom))', borderTop: '1px solid var(--border)' }}>
+            {selected.size > 0 && (
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-xs flex-shrink-0" style={{ color: 'var(--text-2)' }}>
+                  {selected.size} selected
+                </span>
+                {/* Transparent select over the button, same trick as the pills */}
+                <div className="relative flex-1 min-w-0">
+                  <span
+                    className="flex items-center justify-center gap-1 w-full py-2 rounded-lg text-xs font-medium"
+                    style={{ background: 'var(--hover)', border: '1px solid var(--border)', color: 'var(--text)' }}
+                  >
+                    Move selected to…
+                    <svg className="w-3 h-3 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 9l-7 7-7-7" />
+                    </svg>
+                  </span>
+                  {/* value is a placeholder so picking ANY real option (incl. root) fires change */}
+                  <select
+                    value="__placeholder"
+                    onChange={e => { if (e.target.value !== '__placeholder') assignSelected(e.target.value) }}
+                    aria-label="Move selected notes to bubble"
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                  >
+                    <option value="__placeholder" disabled hidden>Move selected to…</option>
+                    <BubbleOptions rootLabel={rootLabel} options={bubbleOptions} />
+                  </select>
+                </div>
+                <button
+                  onClick={() => setSelected(new Set())}
+                  className="text-xs font-medium flex-shrink-0 px-2 py-2 text-indigo-400 hover:text-indigo-300 transition-colors"
+                >
+                  Clear
+                </button>
+              </div>
+            )}
             <button
               onClick={doImport}
               disabled={notes.length === 0}
