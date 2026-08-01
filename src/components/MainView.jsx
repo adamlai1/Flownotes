@@ -1,6 +1,7 @@
 import { useMemo, useState, useRef, useEffect } from 'react'
 import NoteCard from './NoteCard'
 import BubbleVisualization from './BubbleVisualization'
+import ConfirmDialog from './ConfirmDialog'
 import { formatDateGroup } from '../utils/helpers'
 import { TAG_COLORS } from '../data/defaultData'
 
@@ -17,6 +18,7 @@ export default function MainView({
   onSetViewMode,
   onSelectNote,
   onDeleteNote,
+  onDeleteItems,
   onCurrentBubbleChange,
   navigateBubbleId,
   onRefresh,
@@ -29,6 +31,26 @@ export default function MainView({
   const [sortMode, setSortMode] = useState(() => localStorage.getItem('mindmap-sort') || 'newest')
   const [showSortMenu, setShowSortMenu] = useState(false)
   const sortMenuRef = useRef(null)
+  // Multi-select (chronological view only — bubble view manages its own).
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState(() => new Set())
+  const [confirmDelete, setConfirmDelete] = useState(false)
+
+  function toggleSelect(id) {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  function exitSelect() {
+    setSelectMode(false)
+    setSelectedIds(new Set())
+    setConfirmDelete(false)
+  }
+  // Selection is only meaningful within the current view + project + filter set.
+  useEffect(() => { exitSelect() }, [project.id, viewMode])
   const [pinnedIds, setPinnedIds] = useState(() => {
     try { return new Set(JSON.parse(localStorage.getItem(`mindmap-pins-${project.id}`)) || []) }
     catch { return new Set() }
@@ -140,6 +162,7 @@ export default function MainView({
         <BubbleVisualization
           project={project}
           onSelectNote={onSelectNote}
+          onDeleteItems={onDeleteItems}
           viewMode={viewMode}
           onSetViewMode={onSetViewMode}
           onCurrentBubbleChange={onCurrentBubbleChange}
@@ -156,6 +179,33 @@ export default function MainView({
         <div className="px-4 md:px-6">
           {/* Title row — h-[52px] matches bubble view sub-bar height exactly */}
           <div className="flex items-center justify-between" style={{ height: 52 }}>
+            {selectMode ? (
+              <>
+                <div className="flex items-center gap-2">
+                  <h1 className="text-lg font-semibold text-white">
+                    {selectedIds.size} selected
+                  </h1>
+                </div>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => {
+                      const allShown = filteredNotes.every(n => selectedIds.has(n.id))
+                      setSelectedIds(allShown ? new Set() : new Set(filteredNotes.map(n => n.id)))
+                    }}
+                    className="text-sm font-medium text-indigo-400 hover:text-indigo-300 transition-colors"
+                  >
+                    {filteredNotes.length > 0 && filteredNotes.every(n => selectedIds.has(n.id)) ? 'Deselect all' : 'Select all'}
+                  </button>
+                  <button
+                    onClick={exitSelect}
+                    className="text-sm font-medium text-gray-400 hover:text-white transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </>
+            ) : (
+            <>
             <div className="flex items-center gap-2">
               <h1 className="text-lg font-semibold text-white">All Notes</h1>
               <span className="text-sm text-gray-400">
@@ -164,6 +214,21 @@ export default function MainView({
             </div>
 
             <div className="flex items-center gap-2">
+              {/* Select button */}
+              {project.notes.length > 0 && (
+                <button
+                  onClick={() => setSelectMode(true)}
+                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors"
+                  style={{ background: 'var(--input-bg)', border: '1px solid var(--input-border)', color: 'var(--text-muted)' }}
+                  aria-label="Select notes"
+                >
+                  <svg className="w-3.5 h-3.5 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                  </svg>
+                  <span className="hidden sm:inline">Select</span>
+                </button>
+              )}
+
               {/* Sort button */}
               <div className="relative flex-shrink-0" ref={sortMenuRef}>
                 <button
@@ -251,6 +316,8 @@ export default function MainView({
                 ))}
               </div>
             </div>
+            </>
+            )}
           </div>
 
           {/* Search bar */}
@@ -417,6 +484,9 @@ export default function MainView({
                       onTogglePin={() => togglePin(note.id)}
                       pinned
                       customTagColors={project.customTagColors || {}}
+                      selectMode={selectMode}
+                      selected={selectedIds.has(note.id)}
+                      onToggleSelect={() => toggleSelect(note.id)}
                     />
                   ))}
                 </div>
@@ -440,6 +510,9 @@ export default function MainView({
                       onTogglePin={() => togglePin(note.id)}
                       pinned={pinnedIds.has(note.id)}
                       customTagColors={project.customTagColors || {}}
+                      selectMode={selectMode}
+                      selected={selectedIds.has(note.id)}
+                      onToggleSelect={() => toggleSelect(note.id)}
                     />
                   ))}
                 </div>
@@ -448,6 +521,38 @@ export default function MainView({
           </div>
         )}
       </div>
+
+      {/* Selection action bar — centered pill, clear of the floating + button */}
+      {selectMode && (
+        <div
+          className="fixed left-0 right-0 flex justify-center pointer-events-none z-40"
+          style={{ bottom: 'calc(18px + env(safe-area-inset-bottom))' }}
+        >
+          <button
+            onClick={() => setConfirmDelete(true)}
+            disabled={selectedIds.size === 0}
+            className="pointer-events-auto flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold text-white shadow-lg transition-opacity disabled:opacity-40"
+            style={{ background: '#dc2626' }}
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+            Delete{selectedIds.size > 0 ? ` ${selectedIds.size}` : ''}
+          </button>
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={confirmDelete}
+        title={`Delete ${selectedIds.size} ${selectedIds.size === 1 ? 'note' : 'notes'}?`}
+        message="This can't be undone."
+        confirmLabel="Delete"
+        onCancel={() => setConfirmDelete(false)}
+        onConfirm={() => {
+          onDeleteItems({ noteIds: [...selectedIds] })
+          exitSelect()
+        }}
+      />
     </main>
       )}
     </div>

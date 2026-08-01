@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { formatDate, getNoteTitle, contrastColor } from '../utils/helpers'
 import { TAG_COLORS } from '../data/defaultData'
 
-export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, onTogglePin, pinned = false, customTagColors = {} }) {
+export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, onTogglePin, pinned = false, customTagColors = {}, selectMode = false, selected = false, onToggleSelect }) {
   const [showMenu, setShowMenu] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const title = getNoteTitle(note.content)
@@ -28,30 +28,49 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
 
   return (
     <div
-      onClick={onClick}
-      className="relative bg-gray-900 rounded-xl border border-gray-800 shadow-sm hover:shadow-md hover:border-gray-700 transition-all cursor-pointer group p-4"
+      onClick={selectMode ? onToggleSelect : onClick}
+      className="relative bg-gray-900 rounded-xl shadow-sm hover:shadow-md transition-all cursor-pointer group p-4"
+      style={{
+        border: `1px solid ${selected ? '#6366f1' : 'rgb(31,41,55)'}`,
+        boxShadow: selected ? '0 0 0 1px #6366f1' : undefined,
+      }}
     >
-      {/* Pin icon */}
-      {pinned && (
+      {/* Pin icon — hidden in select mode (menu/checkbox take that corner) */}
+      {pinned && !selectMode && (
         <svg className="absolute top-3 right-9 w-3.5 h-3.5 text-indigo-400" viewBox="0 0 24 24" fill="currentColor">
           <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5v6h2v-6h5v-2l-2-2z" />
         </svg>
       )}
 
-      {/* Menu button */}
-      <button
-        onClick={e => { e.stopPropagation(); setShowMenu(m => !m) }}
-        className="absolute top-3 right-3 p-1 text-gray-600 hover:text-gray-400 rounded"
-        aria-label="Note options"
-      >
-        <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-          <circle cx="5" cy="12" r="1.5" />
-          <circle cx="12" cy="12" r="1.5" />
-          <circle cx="19" cy="12" r="1.5" />
-        </svg>
-      </button>
+      {/* Selection checkbox (select mode) or the options menu (normal) */}
+      {selectMode ? (
+        <span
+          className="absolute top-3 right-3 w-5 h-5 rounded-full flex items-center justify-center transition-colors"
+          style={selected
+            ? { background: '#6366f1' }
+            : { border: '1.5px solid rgb(75,85,99)' }}
+        >
+          {selected && (
+            <svg className="w-3 h-3 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={4} d="M5 13l4 4L19 7" />
+            </svg>
+          )}
+        </span>
+      ) : (
+        <button
+          onClick={e => { e.stopPropagation(); setShowMenu(m => !m) }}
+          className="absolute top-3 right-3 p-1 text-gray-600 hover:text-gray-400 rounded"
+          aria-label="Note options"
+        >
+          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+            <circle cx="5" cy="12" r="1.5" />
+            <circle cx="12" cy="12" r="1.5" />
+            <circle cx="19" cy="12" r="1.5" />
+          </svg>
+        </button>
+      )}
 
-      {showMenu && (
+      {showMenu && !selectMode && (
         <>
           <div className="fixed inset-0 z-10" onClick={e => { e.stopPropagation(); setShowMenu(false) }} />
           <div className="absolute top-8 right-3 bg-gray-900 rounded-lg shadow-lg border border-gray-800 z-20 py-1 min-w-[120px]">
