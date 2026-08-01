@@ -54,6 +54,7 @@ import NoteEditor from './components/NoteEditor'
 import Settings from './components/Settings'
 import Onboarding from './components/Onboarding'
 import { ThemeProvider } from './contexts/ThemeContext'
+import { PreferencesProvider } from './contexts/PreferencesContext'
 import { useAuth } from './contexts/AuthContext'
 
 // ── One-time "leading newline" bug migration ────────────────────────────────
@@ -262,13 +263,13 @@ export default function App() {
   // regular sync is upsert-only it can never remove a row, so the tombstone is what
   // actually stops a deleted item reappearing from the cloud later. Marking the project
   // dirty covers the leftover cleanup on surviving items (connections, tags).
-  function commitDelete(updatedProject, op) {
+  function commitDelete(updatedProject, ops) {
     cancelPendingSaves()
     setActiveProject(updatedProject)
     saveProject(updatedProject)
     const uid = userRef.current?.id
     if (!uid) return // Guest mode — localStorage only.
-    enqueueDelete(uid, op)
+    for (const op of Array.isArray(ops) ? ops : [ops]) enqueueDelete(uid, op)
     markProjectDirty(uid, updatedProject.id)
     runFlush()
   }
@@ -554,6 +555,41 @@ export default function App() {
     setNoteStack(prev => prev.filter(id => id !== noteId))
   }
 
+  // Bulk delete for multi-select: removes any number of notes AND bubbles in one commit.
+  // Bubbles expand to include their descendants (same as deleteBubble); notes and bubble
+  // references on surviving notes are cleaned up together, and both tombstone kinds go
+  // out in a single flush.
+  function deleteItems({ noteIds = [], bubbleIds = [] }) {
+    const current = activeProjectRef.current
+    const bubblesToRemove = new Set()
+    function collect(id) {
+      bubblesToRemove.add(id)
+      current.bubbles.filter(b => b.parent_id === id).forEach(b => collect(b.id))
+    }
+    bubbleIds.forEach(collect)
+    const notesToRemove = new Set(noteIds)
+    if (notesToRemove.size === 0 && bubblesToRemove.size === 0) return
+
+    const updated = {
+      ...current,
+      bubbles: current.bubbles.filter(b => !bubblesToRemove.has(b.id)),
+      notes: current.notes
+        .filter(n => !notesToRemove.has(n.id))
+        .map(n => ({
+          ...n,
+          bubble_ids: n.bubble_ids.filter(bid => !bubblesToRemove.has(bid)),
+          connections: n.connections.filter(c => !notesToRemove.has(c.note_id)),
+        })),
+    }
+    if (selectedBubbleId && bubblesToRemove.has(selectedBubbleId)) setSelectedBubbleId(null)
+    setNoteStack(prev => prev.filter(id => !notesToRemove.has(id)))
+
+    const ops = []
+    if (notesToRemove.size) ops.push({ kind: 'notes', noteIds: [...notesToRemove] })
+    if (bubblesToRemove.size) ops.push({ kind: 'bubbles', bubbleIds: [...bubblesToRemove] })
+    commitDelete(updated, ops)
+  }
+
   function updateCustomTagColors(colors) {
     const current = activeProjectRef.current
     // Assign an id to any newly-added tag and drop ids for removed tags, so a tag
@@ -688,6 +724,7 @@ export default function App() {
 
   return (
     <ThemeProvider>
+    <PreferencesProvider>
     <div className="flex flex-col h-dvh overflow-hidden" style={{ background: 'var(--bg)' }}>
       <TopNav
         projectList={projectList}
@@ -736,6 +773,7 @@ export default function App() {
             onSetViewMode={setViewMode}
             onSelectNote={openNote}
             onDeleteNote={deleteNote}
+            onDeleteItems={deleteItems}
             onCurrentBubbleChange={setCurrentBubbleId}
             navigateBubbleId={navigateBubbleId}
             onRefresh={handleRefresh}
@@ -805,6 +843,7 @@ export default function App() {
         )}
       </AnimatePresence>
     </div>
+    </PreferencesProvider>
     </ThemeProvider>
   )
 }

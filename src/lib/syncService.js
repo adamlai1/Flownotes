@@ -83,6 +83,30 @@ export async function saveCustomTagsToCloud(userId, customTagColors, customTagId
   if (error) throw error
 }
 
+// ── Preferences (per-account display settings) ──────────────────────────────────
+// Stored in the user_preferences table (see supabase/user_preferences.sql). Both
+// helpers stay quiet if the table doesn't exist yet or the network is down — the
+// caller falls back to the localStorage copy.
+
+export async function loadPreferencesFromCloud(userId) {
+  const { data, error } = await supabase
+    .from('user_preferences')
+    .select('note_size')
+    .eq('user_id', userId)
+    .maybeSingle()
+  if (error) throw error
+  return data // null when the user has no saved row yet
+}
+
+export async function savePreferencesToCloud(userId, prefs) {
+  const row = { user_id: userId, updated_at: new Date().toISOString() }
+  if (prefs.note_size !== undefined) row.note_size = prefs.note_size
+  const { error } = await supabase
+    .from('user_preferences')
+    .upsert(row, { onConflict: 'user_id' })
+  if (error) throw error
+}
+
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 export async function loadAllFromCloud(userId) {

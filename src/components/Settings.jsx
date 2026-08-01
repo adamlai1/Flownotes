@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useTheme } from '../contexts/ThemeContext'
+import { usePreferences } from '../contexts/PreferencesContext'
 import { useAuth } from '../contexts/AuthContext'
 import ImportNotes from './ImportNotes'
 
@@ -50,8 +51,15 @@ const Divider = () => (
   <div style={{ height: 1, background: 'var(--border)', marginLeft: 16 }} />
 )
 
+const NOTE_SIZE_OPTIONS = [
+  { value: 'small', label: 'Small' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'large', label: 'Large' },
+]
+
 export default function Settings({ onClose, zIndex = 50, project, onImportNotes }) {
   const { theme, toggleTheme } = useTheme()
+  const { noteSize, setNoteSize } = usePreferences()
   const { user, guestMode, signInWithGoogle, signOut } = useAuth()
   const isLight = theme === 'light'
   const [toast, setToast] = useState('')
@@ -124,6 +132,34 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes 
                     transition: 'left 0.2s ease',
                   }} />
                 </button>
+              </div>
+              <Divider />
+              <div className="px-4 py-3.5">
+                <div className="mb-3">
+                  <p className="text-sm font-medium" style={{ color: 'var(--text)' }}>Note Size</p>
+                  <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>Size of note cards in bubble view</p>
+                </div>
+                <div
+                  className="flex p-0.5 rounded-xl"
+                  style={{ background: 'var(--surface)', border: '1px solid var(--border)' }}
+                >
+                  {NOTE_SIZE_OPTIONS.map(opt => {
+                    const active = noteSize === opt.value
+                    return (
+                      <button
+                        key={opt.value}
+                        onClick={() => setNoteSize(opt.value)}
+                        className="flex-1 text-[13px] font-medium py-1.5 rounded-[10px] transition-colors"
+                        style={{
+                          background: active ? '#6366f1' : 'transparent',
+                          color: active ? '#fff' : 'var(--text-muted)',
+                        }}
+                      >
+                        {opt.label}
+                      </button>
+                    )
+                  })}
+                </div>
               </div>
             </Card>
           </div>

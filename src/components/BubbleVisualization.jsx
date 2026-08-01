@@ -4,6 +4,8 @@ import { motion, AnimatePresence, useMotionValue, animate } from 'framer-motion'
 import { getNoteCountForBubble, getBubbleDescendantIds, getNoteTitle, contrastColor } from '../utils/helpers'
 import { TAG_COLORS, ROOT_BUBBLE_ID } from '../data/defaultData'
 import { useTheme } from '../contexts/ThemeContext'
+import { usePreferences, NOTE_SIZE_SCALE } from '../contexts/PreferencesContext'
+import ConfirmDialog from './ConfirmDialog'
 
 // ─── Position persistence ─────────────────────────────────────────────────────
 
@@ -79,9 +81,9 @@ function assignPages(items, savedPages, projectId, contextId, perPage) {
 
 // Lay out ONE page's items exactly like the single-page view: organic scatter from
 // computeLayout, overridden by saved positions, new items settled, overlaps cleared.
-function layoutPage(pageItems, savedPositions, projectId, contextId, width, height) {
+function layoutPage(pageItems, savedPositions, projectId, contextId, width, height, noteScale = 1) {
   if (width <= 0) return []
-  const laid = computeLayout(pageItems, width, height, SUB_BAR_H, BOTTOM_PAD)
+  const laid = computeLayout(pageItems, width, height, SUB_BAR_H, BOTTOM_PAD, noteScale)
   const laidMapped = laid.map(item => {
     const saved = savedPositions[posKey(projectId, contextId, item.id)]
     return saved ? { ...item, cx: saved.xFrac * width, cy: saved.yFrac * height } : item
@@ -372,8 +374,8 @@ function arrangeNotesAroundBubbles(items, anchoredIds, width, height) {
 // (minimum per-axis gaps), summed per row with the + button losses — the bottom
 // rows lose the cells the button zone covers. Mirrors the grid path's geometry
 // exactly so pagination never assigns a page more notes than the grid can place.
-function noteGridCapacity(width, height, headerH, bottomPad) {
-  const MIN_R = 40
+function noteGridCapacity(width, height, headerH, bottomPad, noteScale = 1) {
+  const MIN_R = 40 * noteScale
   const BOX_W = MIN_R * 2 * NOTE_HW, BOX_H = MIN_R * 2 * NOTE_HH
   // MUST mirror the grid path's margins (incl. reserved jitter) exactly.
   const mX = 14 + 12 + BOX_W / 2
@@ -394,7 +396,7 @@ function noteGridCapacity(width, height, headerH, bottomPad) {
   return Math.max(1, cap)
 }
 
-function computeLayout(items, width, height, headerH = 56, bottomPad = 0) {
+function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteScale = 1) {
   const n = items.length
   if (n === 0) return []
 
@@ -408,10 +410,13 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0) {
   // Minimum bubble size — every other size floor derives from this.
   const MIN_D = 80           // 80px minimum diameter
   const MIN_R = MIN_D / 2    // → 40px minimum radius
+  // Note cards render at a user-chosen size: the base radius scaled by the note-size
+  // preference (small = 1×). Only notes scale; category bubbles stay content-sized.
+  const NOTE_R = MIN_R * noteScale
 
   if (n === 1) {
     const r = items[0].type === 'note'
-      ? MIN_R
+      ? NOTE_R
       : Math.max(Math.min(width, availH) * 0.27, MIN_R)
     return [{ ...items[0], cx: cx0, cy: cy0, r }]
   }
@@ -425,7 +430,7 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0) {
   // (float-bob clearance included). Pages containing bubbles keep the organic scatter
   // below (bubbles scale up to fill, so they don't have this problem).
   if (items.every(i => i.type === 'note')) {
-    const BOX_W = MIN_R * 2 * NOTE_HW, BOX_H = MIN_R * 2 * NOTE_HH   // 62 x 46 rendered box
+    const BOX_W = NOTE_R * 2 * NOTE_HW, BOX_H = NOTE_R * 2 * NOTE_HH   // scaled rendered box
     // Margins reserve the max jitter amplitude (±12 x, ±10 y) on top of the visible
     // margin, so a jittered edge note can never sit closer than ~14px to the screen edge.
     const mX = 14 + 12 + BOX_W / 2
@@ -545,7 +550,7 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0) {
       const s = slots[slots.length - 1 - i] ?? slots[slots.length - 1]
       // Deterministic per-index jitter so the layout is stable across renders.
       const hx = Math.sin(i * 127.1), hy = Math.sin(i * 311.7)
-      return { ...item, cx: s.x + hx * jx, cy: s.y + hy * jy, r: MIN_R }
+      return { ...item, cx: s.x + hx * jx, cy: s.y + hy * jy, r: NOTE_R }
     })
   }
 
@@ -555,8 +560,9 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0) {
   const maxContent = Math.max(...bubbleItems.map(i => i.contentCount || 0), 1)
   const minR = Math.max(base * 0.15, MIN_R)
   const maxR = Math.max(Math.min(base * 0.42, 124), minR)
-  // Note cards are always the fixed minimum size — only category bubbles scale.
-  const noteR = MIN_R
+  // Note cards are the user-chosen size (independent of content) — only category
+  // bubbles scale by content.
+  const noteR = NOTE_R
 
   const radii = items.map(item => {
     if (item.type === 'note') return noteR
@@ -649,7 +655,7 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0) {
     // Notes are always fixed at the minimum size (never scaled). Category bubbles keep the
     // minimum ON SCREEN — scaled by the smaller axis factor so they stay circular (never
     // stretched) and never shrink below MIN_R.
-    r: p.type === 'note' ? MIN_R : Math.max(p.r * Math.min(scaleX, scaleY), MIN_R),
+    r: p.type === 'note' ? NOTE_R : Math.max(p.r * Math.min(scaleX, scaleY), MIN_R),
   }))
 
   // Flooring the radius can re-introduce overlaps; relax in screen space with a
@@ -728,7 +734,7 @@ const pageVariants = {
 
 // ─── BubbleCircle ─────────────────────────────────────────────────────────────
 
-function BubbleCircle({ item, index, hidden, isDragging, animateLayout }) {
+function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectable = false, selected = false }) {
   const { theme } = useTheme()
   const isLight = theme === 'light'
   const rgb = hexToRgb(item.color)
@@ -899,13 +905,49 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout }) {
           )}
         </div>
       </motion.div>
+
+      {/* Selection overlay — ring (when selected) + checkmark badge, in the non-clipped
+          outer wrapper so the corner badge isn't cut off by the bubble's overflow. */}
+      {selectable && <SelectionOverlay selected={selected} radius="50%" />}
     </motion.div>
+  )
+}
+
+// Ring + checkmark badge drawn over a selectable item. `radius` matches the item shape
+// (50% for bubbles, 22% for note cards).
+function SelectionOverlay({ selected, radius }) {
+  return (
+    <>
+      {selected && (
+        <div style={{
+          position: 'absolute', inset: 0, borderRadius: radius,
+          border: '2.5px solid #6366f1',
+          boxShadow: '0 0 0 4px rgba(99,102,241,0.25)',
+          pointerEvents: 'none', zIndex: 5,
+        }} />
+      )}
+      <div style={{
+        position: 'absolute', top: -3, right: -3,
+        width: 20, height: 20, borderRadius: '50%',
+        background: selected ? '#6366f1' : 'rgba(0,0,0,0.55)',
+        border: selected ? 'none' : '1.5px solid rgba(255,255,255,0.7)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        pointerEvents: 'none', zIndex: 6,
+        boxShadow: '0 1px 3px rgba(0,0,0,0.4)',
+      }}>
+        {selected && (
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={4} d="M5 13l4 4L19 7" />
+          </svg>
+        )}
+      </div>
+    </>
   )
 }
 
 // ─── NoteCard ─────────────────────────────────────────────────────────────────
 
-function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout }) {
+function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout, selectable = false, selected = false }) {
   const { theme } = useTheme()
   const isLight = theme === 'light'
   const rgb = hexToRgb(item.color)
@@ -1091,6 +1133,9 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
           </div>
         )}
       </motion.div>
+
+      {/* Selection overlay (rounded-rect to match the note card) */}
+      {selectable && <SelectionOverlay selected={selected} radius="22%" />}
     </motion.div>
   )
 }
@@ -1513,6 +1558,7 @@ function resolveCollisions(items, draggedId, desiredCx, desiredCy, width, height
 export default function BubbleVisualization({
   project,
   onSelectNote,
+  onDeleteItems,
   viewMode,
   onSetViewMode,
   onCurrentBubbleChange,
@@ -1522,9 +1568,41 @@ export default function BubbleVisualization({
   const containerRef = useRef(null)
   const { theme } = useTheme()
   const isLight = theme === 'light'
+  const { noteSize } = usePreferences()
+  const noteScale = NOTE_SIZE_SCALE[noteSize] ?? 1
   const [size, setSize] = useState({ width: 0, height: 0 })
   const [navStack, setNavStack] = useState([])
   const [navDir, setNavDir] = useState('in')
+  // ── Multi-select ──────────────────────────────────────────────────────────────
+  // Selected ids can be notes OR bubbles; the item's own type tells them apart at
+  // delete time. selectModeRef mirrors state so the pointer handlers (whose long-press
+  // timers capture at press time) can gate dragging without a stale closure.
+  const [selectMode, setSelectMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState(() => new Set())
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const selectModeRef = useRef(false)
+  selectModeRef.current = selectMode
+  function toggleSelectItem(id) {
+    setSelectedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
+  function exitSelect() {
+    setSelectMode(false)
+    setSelectedIds(new Set())
+    setConfirmDelete(false)
+  }
+  // Changing project or navigating to another bubble level clears the selection — the
+  // selected items may no longer be on screen. (Page swipes keep it: same level.)
+  useEffect(() => {
+    setSelectMode(false)
+    setSelectedIds(new Set())
+    setConfirmDelete(false)
+  }, [project.id, navStack])
+
   // expandAnim: null | { phase: 'in'|'out', id, cx, cy, r, color }
   const [expandAnim, setExpandAnim] = useState(null)
   const [swipeOffset, setSwipeOffset] = useState(0)
@@ -1761,7 +1839,7 @@ export default function BubbleVisualization({
   // clearance, minus the cells lost to the + button). No derate needed — the grid
   // places cells exactly, unlike the old organic packer this formula used to model.
   const notesPerPage = size.width > 0
-    ? noteGridCapacity(size.width, size.height, SUB_BAR_H, BOTTOM_PAD)
+    ? noteGridCapacity(size.width, size.height, SUB_BAR_H, BOTTOM_PAD, noteScale)
     : 1
   // Bubbles pack organically (golden-angle spiral + relaxation) into a roughly HEXAGONAL
   // arrangement at the crowded gap — not the square 98px grid this used to assume, which
@@ -1788,7 +1866,7 @@ export default function BubbleVisualization({
 
   // Single-page organic layout (skipped when paginated — each page lays out its own).
   const laid = (!paginated && size.width > 0)
-    ? computeLayout(layoutItems, size.width, size.height, SUB_BAR_H, BOTTOM_PAD)
+    ? computeLayout(layoutItems, size.width, size.height, SUB_BAR_H, BOTTOM_PAD, noteScale)
     : []
 
   // Apply saved positions on top of auto-layout
@@ -1835,7 +1913,7 @@ export default function BubbleVisualization({
     )
     const groups = Array.from({ length: numPages }, () => [])
     for (const it of layoutItems) groups[pageOf[it.id] ?? 0].push(it)
-    pages = groups.map(group => layoutPage(group, savedPositions, project.id, currentId, size.width, size.height))
+    pages = groups.map(group => layoutPage(group, savedPositions, project.id, currentId, size.width, size.height, noteScale))
   }
   const clampedPageIndex = pages.length > 0 ? Math.min(pageIndex, pages.length - 1) : 0
 
@@ -1925,6 +2003,35 @@ export default function BubbleVisualization({
   // Keep ref current so the native touch handler can call the latest zoomOut
   zoomOutRef.current = zoomOut
 
+  // ── Reorganize the current level ────────────────────────────────────────────
+  // Drop the saved manual positions + page assignments for THIS level only, so it
+  // re-flows from scratch with the auto-layout at the current note size (bigger notes
+  // cram a hand-arranged page — this un-crams it without touching other levels).
+  function reorganizeLevel() {
+    const cId = currentIdRef.current
+    const prefix = `${project.id}:${cId ?? 'root'}:`
+    const keep = (obj) => Object.fromEntries(
+      Object.entries(obj).filter(([k]) => !k.startsWith(prefix))
+    )
+    const newPositions = keep(savedPositionsRef.current)
+    const newPages = keep(savedPagesRef.current)
+    if (layoutAnimTimerRef.current) clearTimeout(layoutAnimTimerRef.current)
+    setSavedPositions(newPositions)
+    setSavedPages(newPages)
+    setPageIndex(0)
+    pageIndexRef.current = 0
+    pageX.set(0)
+    setLayoutAnim(true)
+    saveSavedPositions(project.id, newPositions)
+    saveSavedPagesMap(project.id, newPages)
+    layoutAnimTimerRef.current = setTimeout(() => setLayoutAnim(false), 420)
+  }
+  // Only meaningful when this level has a hand-arranged layout to reset.
+  const levelPrefix = `${project.id}:${currentId ?? 'root'}:`
+  const hasManualLayout =
+    Object.keys(savedPositions).some(k => k.startsWith(levelPrefix)) ||
+    Object.keys(savedPages).some(k => k.startsWith(levelPrefix))
+
   // ── Paged interactions (swipe between pages + drag with cross-page move) ───────
   function animateToPage(idx) {
     const clamped = Math.max(0, Math.min(idx, pagesRef.current.length - 1))
@@ -1955,7 +2062,7 @@ export default function BubbleVisualization({
     const st = { mode: 'pending', startX: e.clientX, startY: e.clientY, itemId: hit?.id ?? null, lpTimer: null }
     pagedRef.current = st
     pageX.stop()
-    if (hit) {
+    if (hit && !selectModeRef.current) {
       // Press-and-hold to pick a bubble up — it then drags with the SAME free-form
       // physics (collision resolution, pushing, saving) as the single-page view.
       st.lpTimer = setTimeout(() => {
@@ -2074,10 +2181,13 @@ export default function BubbleVisualization({
       else animateToPage(pageIndexRef.current)
       return
     }
-    // Tap (no significant move) → navigate / open.
+    // Tap (no significant move) → toggle in select mode, else navigate / open.
     if (st.itemId != null && Math.abs(dx) < 10 && Math.abs(dy) < 10) {
       const item = (pagesRef.current[pageIndexRef.current] || []).find(it => it.id === st.itemId)
-      if (item) { item.type === 'bubble' ? handleBubbleClick(item) : onSelectNote(item) }
+      if (item) {
+        if (selectModeRef.current) toggleSelectItem(item.id)
+        else item.type === 'bubble' ? handleBubbleClick(item) : onSelectNote(item)
+      }
     }
   }
 
@@ -2150,6 +2260,9 @@ export default function BubbleVisualization({
 
     pendingPointerRef.current = { item: hit, startClientX: e.clientX, startClientY: e.clientY }
     dragActivatedRef.current = false
+
+    // In select mode a press never becomes a drag — pointer-up toggles the item instead.
+    if (selectModeRef.current) return
 
     longPressTimerRef.current = setTimeout(() => {
       longPressTimerRef.current = null
@@ -2266,9 +2379,11 @@ export default function BubbleVisualization({
       resolvedDragPosRef.current = null
       resolvedAllPosRef.current = []
     } else if (pending) {
-      // Was a tap — fire the appropriate action
+      // Was a tap — toggle selection in select mode, otherwise open/navigate.
       const { item } = pending
-      if (item.type === 'bubble') {
+      if (selectModeRef.current) {
+        toggleSelectItem(item.id)
+      } else if (item.type === 'bubble') {
         handleBubbleClick(item)
       } else {
         onSelectNote(item)
@@ -2314,6 +2429,20 @@ export default function BubbleVisualization({
         style={{ height: SUB_BAR_H }}
       >
         <div className="px-4 md:px-6 h-full flex items-center justify-between">
+        {selectMode ? (
+          <>
+            <span className="text-sm font-semibold text-white/90">
+              {selectedIds.size} selected
+            </span>
+            <button
+              onClick={exitSelect}
+              className="text-sm font-medium text-white/50 hover:text-white/90 transition-colors flex-shrink-0"
+            >
+              Cancel
+            </button>
+          </>
+        ) : (
+        <>
         {/* Breadcrumb — back arrow + text sit tight to the left edge */}
         <div className="flex items-center gap-0.5 min-w-0 flex-1 mr-3">
           <button
@@ -2353,9 +2482,35 @@ export default function BubbleVisualization({
           ))}
         </div>
 
+        {/* Right cluster: reorganize + select + view toggle */}
+        <div className="flex items-center gap-2 flex-shrink-0">
+        {hasManualLayout && layoutItems.length > 1 && (
+          <button
+            onClick={reorganizeLevel}
+            className="p-1.5 rounded-lg text-white/50 hover:text-white/90 hover:bg-white/10 transition-colors"
+            aria-label="Reorganize layout"
+            title="Reorganize layout"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <rect x="4" y="4" width="7" height="7" rx="1.5" strokeWidth={2} />
+              <rect x="13" y="4" width="7" height="7" rx="1.5" strokeWidth={2} />
+              <rect x="4" y="13" width="7" height="7" rx="1.5" strokeWidth={2} />
+              <rect x="13" y="13" width="7" height="7" rx="1.5" strokeWidth={2} />
+            </svg>
+          </button>
+        )}
+        <button
+          onClick={() => setSelectMode(true)}
+          className="p-1.5 rounded-lg text-white/50 hover:text-white/90 hover:bg-white/10 transition-colors"
+          aria-label="Select items"
+        >
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+          </svg>
+        </button>
         {/* View toggle */}
         <div
-          className="flex-shrink-0 flex rounded-xl overflow-hidden"
+          className="flex rounded-xl overflow-hidden"
           style={{ background: 'var(--hover)', border: '1px solid var(--border)' }}
         >
           {[
@@ -2388,7 +2543,10 @@ export default function BubbleVisualization({
             </button>
           ))}
         </div>
-        </div>{/* end max-w-2xl wrapper */}
+        </div>{/* end right cluster */}
+        </>
+        )}
+        </div>{/* end sub-bar row */}
       </div>
 
       {/* ── Swipe offset wrapper ──────────────────────────────────────────────── */}
@@ -2467,6 +2625,8 @@ export default function BubbleVisualization({
                               customTagColors={project.customTagColors || {}}
                               isDragging={draggingId === item.id}
                               animateLayout={layoutAnim && draggingId !== item.id}
+                              selectable={selectMode}
+                              selected={selectedIds.has(item.id)}
                             />
                           ) : (
                             <BubbleCircle
@@ -2476,6 +2636,8 @@ export default function BubbleVisualization({
                               hidden={expandAnim?.id === item.id}
                               isDragging={draggingId === item.id}
                               animateLayout={layoutAnim && draggingId !== item.id}
+                              selectable={selectMode}
+                              selected={selectedIds.has(item.id)}
                             />
                           )
                         )}
@@ -2494,6 +2656,8 @@ export default function BubbleVisualization({
                         index={i}
                         customTagColors={project.customTagColors || {}}
                         isDragging={draggingId === item.id}
+                        selectable={selectMode}
+                        selected={selectedIds.has(item.id)}
                       />
                     ) : (
                       <BubbleCircle
@@ -2502,6 +2666,8 @@ export default function BubbleVisualization({
                         index={i}
                         hidden={expandAnim?.id === item.id}
                         isDragging={draggingId === item.id}
+                        selectable={selectMode}
+                        selected={selectedIds.has(item.id)}
                       />
                     )
                   )}
@@ -2513,7 +2679,7 @@ export default function BubbleVisualization({
       </div>
 
       {/* ── Page indicator dots — fixed, above the + button ───────────────────── */}
-      {paginated && pages.length > 1 && (
+      {paginated && pages.length > 1 && !selectMode && (
         <div
           className="absolute left-0 right-0 flex items-center justify-center gap-2 pointer-events-none z-10"
           style={{ bottom: 'calc(20px + env(safe-area-inset-bottom))' }}
@@ -2549,6 +2715,45 @@ export default function BubbleVisualization({
 
       {/* ── ZoomExpand — outside swipe wrapper so it covers the header too ───── */}
       <ZoomExpand anim={expandAnim} size={size} onDone={handleExpandDone} />
+
+      {/* ── Selection delete bar — centered, clear of the + button ────────────── */}
+      {selectMode && (
+        <div
+          className="absolute left-0 right-0 flex justify-center pointer-events-none z-40"
+          style={{ bottom: 'calc(18px + env(safe-area-inset-bottom))' }}
+        >
+          <button
+            onClick={() => setConfirmDelete(true)}
+            disabled={selectedIds.size === 0}
+            className="pointer-events-auto flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold text-white shadow-lg transition-opacity disabled:opacity-40"
+            style={{ background: '#dc2626' }}
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+            Delete{selectedIds.size > 0 ? ` ${selectedIds.size}` : ''}
+          </button>
+        </div>
+      )}
+
+      <ConfirmDialog
+        open={confirmDelete}
+        title={`Delete ${selectedIds.size} item${selectedIds.size === 1 ? '' : 's'}?`}
+        message="Selected bubbles delete their notes and sub-bubbles too. This can't be undone."
+        confirmLabel="Delete"
+        onCancel={() => setConfirmDelete(false)}
+        onConfirm={() => {
+          const noteIds = []
+          const bubbleIds = []
+          for (const it of layoutItems) {
+            if (!selectedIds.has(it.id)) continue
+            if (it.type === 'note') noteIds.push(it.id)
+            else bubbleIds.push(it.id)
+          }
+          onDeleteItems?.({ noteIds, bubbleIds })
+          exitSelect()
+        }}
+      />
     </div>
   )
 }
