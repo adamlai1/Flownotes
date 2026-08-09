@@ -100,7 +100,7 @@ function layoutPage(pageItems, savedPositions, projectId, contextId, width, heig
   const settled = (anchored.size > 0 && anchored.size < laidMapped.length)
     ? settleItems(laidMapped, anchored, width, height)
     : laidMapped
-  return separateOverlaps(settled, width, height)
+  return separateOverlaps(settled, width, height, shouldPinBubbles(settled, anchored.size))
 }
 
 // ─── Utilities ───────────────────────────────────────────────────────────────
@@ -137,37 +137,96 @@ const NOTE_HH = 1.15 / 2   // half-height / r  = 0.575
 // Note spacing per axis. Horizontal: a tight 5px. Vertical: the float animation bobs each
 // note UP by floatAmt = 2.5 + (index % 3) * 1.5 → up to 5.5px, so vertically adjacent notes
 // need that extra clearance on top of the base gap or they visually collide mid-bob.
-// (16 was sized for the old 11px bob; kept as-is, so there's ~5px of slack — dropping it
-// to ~11 would buy roughly one extra note row per page if density ever matters more.)
 const NOTE_GAP_X = 5
-const NOTE_GAP_Y = 16      // 5px base + 5.5px max float travel + slack
+const NOTE_GAP_Y = 11      // 5px base + 5.5px max float travel, rounded up
 
-// Rectangle (AABB) separation for a pair when at least one is a note. Pushes the pair
-// apart along the axis of least penetration so their boxes keep gapX/gapY px between
-// edges. Mutates whichever endpoints the move callbacks set. Returns true if it pushed.
-// halfW/halfH give each item's half-extent (box for notes, circle radius for bubbles).
+// Category bubbles render as wide rounded rectangles at W = r*2, H = r*1.33 (a ~3:2
+// card), so their half-extents are these fractions of r. `r` is NOT a circle radius
+// anywhere any more — it's the size scalar the box is derived from, and every packing,
+// collision, bounds and hit test below measures a bubble by that box.
+const BUB_HW = 2 / 2       // half-width  / r  = 1.0
+const BUB_HH = 1.33 / 2    // half-height / r  = 0.665
+
+// Bubbles bob UP by floatAmt = 2.5 + (index % 3) * 1.5 → up to 5.5px, so any pair
+// involving a bubble needs that much extra vertical clearance on top of the pass's
+// base gap or the boxes visually collide mid-bob (the same reason NOTE_GAP_Y > NOTE_GAP_X).
+const BUB_FLOAT_PAD = 6
+// Base inter-bubble gap: tighter when a page is crowded so many bubbles pack closer.
+const bubPackGap = (n) => n > 16 ? 4 : n > 10 ? 6 : 8
+
+// Minimum bubble size — the floor every other bubble size derives from. MIN_BUB_D is the
+// box's WIDTH (BUB_HW is 1, so width = 2r); the height follows from BUB_HH.
+const MIN_BUB_D = 80
+const MIN_BUB_R = MIN_BUB_D / 2
+// How far inside each screen edge an item's box is held (see clampToBounds).
+const EDGE_INSET = 12
+
+// Note cards render at the user's note-size preference; category bubbles are sized by
+// content and never scaled by it. With a fixed bubble floor, a sparse bubble stayed at
+// MIN_BUB_D while notes grew past it, so at medium/large a note card rendered BIGGER than
+// the bubbles beside it. The floor therefore has to rise with the note size. Height is the
+// binding axis (NOTE_HH/BUB_HH = 0.865 > NOTE_HW/BUB_HW = 0.775), and at small the ratio
+// lands below MIN_BUB_R so that setting is unchanged.
+const NOTE_TO_BUB_R = Math.max(NOTE_HW / BUB_HW, NOTE_HH / BUB_HH)
+const noteRFor = (noteScale) => MIN_BUB_R * noteScale
+const minBubbleRFor = (noteScale) => Math.max(MIN_BUB_R, noteRFor(noteScale) * NOTE_TO_BUB_R)
+
+// Largest bubble radius that still fits the page on both axes. Nothing downstream can
+// place an item bigger than its page: every pass just clamps it against the edges and
+// leaves it overlapping whatever it lands on. So this is a hard ceiling on any size the
+// fill-scaling below computes, not a preference.
+function maxFittingBubbleR(width, availH) {
+  return Math.min(
+    (width - EDGE_INSET * 2) / (2 * BUB_HW),
+    (availH - EDGE_INSET * 2) / (2 * BUB_HH),
+  )
+}
+// Corner rounding: ~22% of the box, resolved to px so the corners stay circular instead
+// of stretching into ellipses along the wide axis (which a `%` radius would do).
+const bubbleCornerPx = (r) => Math.round(r * BUB_HH * 2 * 0.22)
+
+// Rectangle (AABB) separation for a pair. Pushes the pair apart along the axis of least
+// penetration so their boxes keep gapX/gapY px between edges. Mutates whichever endpoints
+// the move callbacks set. Returns how deep the pair was overlapping (0 if already clear),
+// so callers can both test "did this push?" and score how bad a whole arrangement is.
 function separateBoxPair(dx, dy, halfWa, halfHa, halfWb, halfHb, gapX, gapY, pushX, pushY) {
   const ox = halfWa + halfWb + gapX - Math.abs(dx)
   const oy = halfHa + halfHb + gapY - Math.abs(dy)
-  if (ox <= 0 || oy <= 0) return false
+  if (ox <= 0 || oy <= 0) return 0
   if (ox < oy) pushX((ox / 2) * (dx < 0 ? -1 : 1))
   else pushY((oy / 2) * (dy < 0 ? -1 : 1))
-  return true
+  return Math.min(ox, oy)
 }
-const halfWidthOf  = (p) => p.type === 'note' ? p.r * NOTE_HW : p.r
-const halfHeightOf = (p) => p.type === 'note' ? p.r * NOTE_HH : p.r
+// Rendered half-extents — the single source of truth for how big an item is on screen.
+const halfWidthOf  = (p) => p.type === 'note' ? p.r * NOTE_HW : p.r * BUB_HW
+const halfHeightOf = (p) => p.type === 'note' ? p.r * NOTE_HH : p.r * BUB_HH
 
-// Circle(bubble) vs box(note) penetration: distance from the bubble center to the
-// nearest point of the note's rectangle, versus bubble radius + gap. Returns the
-// penetration depth (0 if clear); callers push along the center-to-center direction.
-// Treating the note as its fat bounding circle (radius ~38.8) held cards ~19px of dead
-// air off a bubble vertically — this measures to the card's real edge instead.
-function circleBoxPen(bub, note, gap) {
-  const hw = note.r * NOTE_HW, hh = note.r * NOTE_HH
-  const px = Math.max(note.cx - hw, Math.min(bub.cx, note.cx + hw))
-  const py = Math.max(note.cy - hh, Math.min(bub.cy, note.cy + hh))
-  const d = Math.hypot(px - bub.cx, py - bub.cy)
-  return Math.max(0, bub.r + gap - d)
+// Per-axis minimum gap for a pair, given a pass's base gap. Note-note pairs keep the
+// note grid's fixed gaps (the even-spread grid is built to them); any pair involving a
+// bubble uses the base gap, plus the float-bob clearance on the vertical axis.
+const pairGapX = (a, b, base) => (a.type === 'note' && b.type === 'note') ? NOTE_GAP_X : base
+const pairGapY = (a, b, base) => (a.type === 'note' && b.type === 'note') ? NOTE_GAP_Y : base + BUB_FLOAT_PAD
+
+// Symmetric box separation for ANY pair at the pass's base gap. Mutates a and b.
+function separatePair(a, b, base) {
+  return separateBoxPair(
+    b.cx - a.cx, b.cy - a.cy,
+    halfWidthOf(a), halfHeightOf(a), halfWidthOf(b), halfHeightOf(b),
+    pairGapX(a, b, base), pairGapY(a, b, base),
+    (p) => { a.cx -= p; b.cx += p }, (p) => { a.cy -= p; b.cy += p },
+  )
+}
+
+// Circle vs box penetration: distance from the circle's center to the nearest point of
+// the item's rendered rectangle, versus the circle radius + gap. Returns the penetration
+// depth (0 if clear); callers push along the center-to-center direction. Used for the one
+// genuinely round obstacle left on the page — the floating + button.
+function circleBoxPen(circle, item, gap) {
+  const hw = halfWidthOf(item), hh = halfHeightOf(item)
+  const px = Math.max(item.cx - hw, Math.min(circle.cx, item.cx + hw))
+  const py = Math.max(item.cy - hh, Math.min(circle.cy, item.cy + hh))
+  const d = Math.hypot(px - circle.cx, py - circle.cy)
+  return Math.max(0, circle.r + gap - d)
 }
 
 // Rightmost note-CENTER x for a grid row at cy that keeps the note's real BOX clear of
@@ -198,9 +257,13 @@ function lloydSpread(items, width, height, headerH, bottomPad, pinnedNoteIds = n
   const pos = items.map(i => ({ ...i }))
   const step = 18
   const btnCx = width - 52, btnCy = height - 52
-  // Effective claim radius: notes claim a bit less than their bounding circle so
-  // bubbles (true circles) get proportionally more room.
-  const rEff = (p) => p.type === 'note' ? p.r * 0.85 : p.r
+  // Effective claim radius — one scalar per item for the power diagram, sized so each
+  // type claims page area in proportion to the box it actually occupies (a bubble is
+  // wider than a note but also much shorter, so its claim is the geometric mean of its
+  // half-extents rather than its full half-width).
+  const rEff = (p) => p.type === 'note'
+    ? p.r * 0.85
+    : p.r * Math.sqrt(BUB_HW * BUB_HH)
   // The bubble cluster's ellipse is note-forbidden territory: samples inside it are
   // owned by nobody, so no note's centroid can pull it into the pockets between
   // bubbles. (Bubbles are pinned, so the ellipse is constant across passes.)
@@ -245,8 +308,8 @@ function lloydSpread(items, width, height, headerH, bottomPad, pinnedNoteIds = n
 // circle (notes can crowd right against the cluster's silhouette) while staying
 // convex — so the between-bubble pockets remain off-limits to notes.
 function clusterEllipse(bubs) {
-  const minX = Math.min(...bubs.map(b => b.cx - b.r)), maxX = Math.max(...bubs.map(b => b.cx + b.r))
-  const minY = Math.min(...bubs.map(b => b.cy - b.r)), maxY = Math.max(...bubs.map(b => b.cy + b.r))
+  const minX = Math.min(...bubs.map(b => b.cx - halfWidthOf(b))), maxX = Math.max(...bubs.map(b => b.cx + halfWidthOf(b)))
+  const minY = Math.min(...bubs.map(b => b.cy - halfHeightOf(b))), maxY = Math.max(...bubs.map(b => b.cy + halfHeightOf(b)))
   return { ex: (minX + maxX) / 2, ey: (minY + maxY) / 2, A: (maxX - minX) / 2, B: (maxY - minY) / 2 }
 }
 // Per-axis clearances so a note is held off by its real half-extents (31px wide,
@@ -270,20 +333,21 @@ function projectOutOfEllipse(p, e, clearX, clearY) {
 
 // ── Centered bubble cluster (mixed pages) ─────────────────────────────────────
 // Re-cluster a mixed page's bubbles compactly around the page center: mini golden-angle
-// spiral seed, pairwise circle relaxation, and the cluster centroid re-anchored to the
+// spiral seed, pairwise box relaxation, and the cluster centroid re-anchored to the
 // center each pass. The notes around them are then distributed by lloydSpread (which
 // pins bubbles), so mixed pages read as "bubbles in the middle, notes around them".
-function recenterBubbles(items, width, height, headerH, bottomPad) {
+function recenterBubbles(items, width, height, headerH, bottomPad, noteScale = 1) {
   const pos = items.map(i => ({ ...i }))
   const bubs = pos.filter(p => p.type !== 'note')
   if (bubs.length === 0) return pos
   const cx0 = width / 2
   const cy0 = headerH + (height - headerH - bottomPad) / 2
+  const GAP = 8
   if (bubs.length === 1) {
     bubs[0].cx = cx0; bubs[0].cy = cy0
   } else if (bubs.length === 2) {
     // Pair: side by side, centered.
-    const off = (bubs[0].r + bubs[1].r + 8) / 2
+    const off = (halfWidthOf(bubs[0]) + halfWidthOf(bubs[1]) + GAP) / 2
     bubs[0].cx = cx0 - off; bubs[0].cy = cy0
     bubs[1].cx = cx0 + off; bubs[1].cy = cy0
   } else {
@@ -291,34 +355,33 @@ function recenterBubbles(items, width, height, headerH, bottomPad) {
     // triangle (not hub-and-spoke, which read as a lopsided "V" for 3 bubbles);
     // any further bubbles spiral snugly around that core and the relaxation
     // below packs everything to touching.
+    //
+    // The seed radii are per-axis: the relaxation below only ever pushes boxes APART,
+    // so a seed sized for circles (one radius on both axes) would leave the now-shorter
+    // bubbles with a permanent vertical gap nothing pulls closed. Rtx makes the two base
+    // vertices — a triangle side, Rt*sqrt(3) apart horizontally — just clear each other;
+    // Rty makes the apex, 1.5*Rt above the base, just clear the row below it.
     const GA = Math.PI * (3 - Math.sqrt(5))
     const rCore = (bubs[0].r + bubs[1].r + bubs[2].r) / 3
-    const Rt = (2 * rCore + 8) / Math.sqrt(3)
+    const Rtx = (2 * rCore * BUB_HW + GAP) / Math.sqrt(3)
+    const Rty = (2 * rCore * BUB_HH + GAP + BUB_FLOAT_PAD) / 1.5
     for (let i = 0; i < 3; i++) {
       const ang = -Math.PI / 2 + i * (2 * Math.PI / 3)
-      bubs[i].cx = cx0 + Math.cos(ang) * Rt
-      bubs[i].cy = cy0 + Math.sin(ang) * Rt
+      bubs[i].cx = cx0 + Math.cos(ang) * Rtx
+      bubs[i].cy = cy0 + Math.sin(ang) * Rty
     }
     for (let i = 3; i < bubs.length; i++) {
       const ang = (i - 3) * GA
-      const dist = Rt + (rCore + bubs[i].r) * 0.5 + 4 * (i - 3)
-      bubs[i].cx = cx0 + Math.cos(ang) * dist
-      bubs[i].cy = cy0 + Math.sin(ang) * dist
+      const step = (rCore + bubs[i].r) * 0.5 + 4 * (i - 3)
+      bubs[i].cx = cx0 + Math.cos(ang) * (Rtx + step * BUB_HW)
+      bubs[i].cy = cy0 + Math.sin(ang) * (Rty + step * BUB_HH)
     }
     for (let iter = 0; iter < 120; iter++) {
       let any = false
       for (let i = 0; i < bubs.length; i++) {
         for (let j = i + 1; j < bubs.length; j++) {
-          const a = bubs[i], b = bubs[j]
-          const dx = b.cx - a.cx, dy = b.cy - a.cy
-          const d = Math.sqrt(dx * dx + dy * dy) || 0.001
-          const need = a.r + b.r + 8
-          if (d < need - 0.25) {
-            const p = (need - d) / 2, nx = dx / d, ny = dy / d
-            a.cx -= nx * p; a.cy -= ny * p
-            b.cx += nx * p; b.cy += ny * p
-            any = true
-          }
+          // -0.25 sub-pixel tolerance so float noise can't keep the loop "moving".
+          if (separatePair(bubs[i], bubs[j], GAP - 0.25)) any = true
         }
       }
       // Keep the cluster centroid anchored on the page center as it relaxes.
@@ -328,6 +391,37 @@ function recenterBubbles(items, width, height, headerH, bottomPad) {
       if (!any) break
     }
   }
+
+  // Shrink the formation to fit the page.
+  //
+  // These radii were chosen by computeLayout's fill-scaling, which measured them against
+  // the PACKED SCATTER — a completely different arrangement from the centered formation
+  // just built above. A scatter that happened to stack two bubbles vertically scales up
+  // to fill the page's height, and then gets re-clustered side by side here, where the
+  // same radii need far more width than the page has. Nothing downstream can undo that:
+  // separateOverlaps just clamps both bubbles against opposite edges and ships the
+  // overlap. So measure the formation we actually built, and scale the bubbles — radii
+  // and offsets from the center together — until it fits.
+  const usableW = width - EDGE_INSET * 2
+  const usableH = (height - headerH - bottomPad) - EDGE_INSET * 2
+  const bbW = Math.max(...bubs.map(b => b.cx + halfWidthOf(b))) - Math.min(...bubs.map(b => b.cx - halfWidthOf(b)))
+  const bbH = Math.max(...bubs.map(b => b.cy + halfHeightOf(b))) - Math.min(...bubs.map(b => b.cy - halfHeightOf(b)))
+  const fit = Math.min(1, usableW / (bbW || 1), usableH / (bbH || 1))
+  if (fit < 1) {
+    // Honour the minimum size: below it, bubbles pack tight and overlap rather than
+    // shrink away to nothing (pagination is what rescues a genuinely overfull page).
+    // The floor is note-size dependent — this shrink pass runs AFTER computeLayout has
+    // already applied it, so using the bare MIN_BUB_R here would undo it and put a bubble
+    // back below the note cards.
+    const minR = minBubbleRFor(noteScale)
+    const floored = Math.max(fit, Math.min(1, minR / Math.min(...bubs.map(b => b.r))))
+    for (const b of bubs) {
+      b.r *= floored
+      b.cx = cx0 + (b.cx - cx0) * floored
+      b.cy = cy0 + (b.cy - cy0) * floored
+    }
+  }
+
   // Seed notes OUTSIDE the cluster ellipse so none start in the pockets between
   // bubbles (lloydSpread and the pinned separation then keep them out).
   const e = clusterEllipse(bubs)
@@ -370,30 +464,171 @@ function arrangeNotesAroundBubbles(items, anchoredIds, width, height) {
   )
 }
 
-// True notes-per-page capacity of the even-spread grid above: densest legal pitch
-// (minimum per-axis gaps), summed per row with the + button losses — the bottom
-// rows lose the cells the button zone covers. Mirrors the grid path's geometry
-// exactly so pagination never assigns a page more notes than the grid can place.
-function noteGridCapacity(width, height, headerH, bottomPad, noteScale = 1) {
-  const MIN_R = 40 * noteScale
-  const BOX_W = MIN_R * 2 * NOTE_HW, BOX_H = MIN_R * 2 * NOTE_HH
-  // MUST mirror the grid path's margins (incl. reserved jitter) exactly.
-  const mX = 14 + 12 + BOX_W / 2
-  const mT = headerH + 10 + 10 + BOX_H / 2, mB = 10 + 10 + BOX_H / 2
-  const spanW = width - mX * 2
-  const spanH = (height - bottomPad) - mT - mB
-  const cols = Math.max(1, Math.floor(spanW / (BOX_W + NOTE_GAP_X)) + 1)
-  const rows = Math.max(1, Math.floor(spanH / (BOX_H + NOTE_GAP_Y)) + 1)
-  const pitchX = cols > 1 ? spanW / (cols - 1) : 0
-  const pitchY = rows > 1 ? spanH / (rows - 1) : 0
-  let cap = 0
-  for (let r = 0; r < rows; r++) {
-    const cy = rows > 1 ? mT + r * pitchY : mT + spanH / 2
-    const xMax = Math.min(width - mX, noteRowXMax(cy, width, height, BOX_W / 2, BOX_H / 2))
-    const rs = xMax - mX
-    cap += rs <= 0 ? 0 : Math.min(cols, Math.floor(rs / Math.max(pitchX, BOX_W + NOTE_GAP_X)) + 1)
+// ── Note grid geometry ────────────────────────────────────────────────────────
+// Single source of truth for the even-spread grid's frame, shared by the layout path
+// and the capacity estimate so the two can never drift apart.
+//
+// resX/resY is the jitter amplitude the margins hold back. It used to be pinned at the
+// MAXIMUM amplitude (12/10) unconditionally, but the jitter actually applied is derived
+// from whatever pitch is left over (see jitterFor) — so a densely packed page jitters by
+// ~0 while still paying 24px of width and 20px of height for jitter it never uses. That
+// cost a whole row or column outright at the larger note sizes, where the boxes are big
+// enough that one row is a big fraction of the page. The reserve is now solved for.
+const NOTE_MARGIN_X = 14, NOTE_MARGIN_Y = 10
+const NOTE_JITTER_X = 12, NOTE_JITTER_Y = 10
+
+function noteGridFrame(width, height, headerH, bottomPad, noteR, resX, resY) {
+  const BOX_W = noteR * 2 * NOTE_HW, BOX_H = noteR * 2 * NOTE_HH
+  const mX = NOTE_MARGIN_X + resX + BOX_W / 2
+  const mT = headerH + NOTE_MARGIN_Y + resY + BOX_H / 2
+  const mB = NOTE_MARGIN_Y + resY + BOX_H / 2
+  return {
+    BOX_W, BOX_H, mX, mT,
+    spanW: width - mX * 2,
+    spanH: (height - bottomPad) - mT - mB,
   }
-  return Math.max(1, cap)
+}
+
+// Jitter amplitude for a chosen pitch: whatever slack is left over once the minimum gap
+// is honoured, capped. A grid at its densest legal pitch yields 0 on both axes.
+const jitterFor = (f, cols, rows, pitchX, pitchY) => ({
+  jx: Math.min(Math.max(((cols > 1 ? pitchX - f.BOX_W : f.spanW) - NOTE_GAP_X) / 2, 0), NOTE_JITTER_X),
+  jy: Math.min(Math.max(((rows > 1 ? pitchY - f.BOX_H : f.spanH) - NOTE_GAP_Y) / 2, 0), NOTE_JITTER_Y),
+})
+
+// Per-row usable right edge: rows level with the + button stop short of its exclusion zone.
+const noteRowXMaxAt = (f, cy, width, height) =>
+  Math.min(width - f.mX, noteRowXMax(cy, width, height, f.BOX_W / 2, f.BOX_H / 2))
+
+// How many cells a row can hold at a given pitch, given the + button's bite.
+function noteRowCap(f, cy, pitchX, width, height) {
+  const rs = noteRowXMaxAt(f, cy, width, height) - f.mX
+  return rs <= 0 ? 0 : Math.floor(rs / Math.max(pitchX, f.BOX_W + NOTE_GAP_X)) + 1
+}
+
+// Gap ceiling: a few notes shouldn't be flung to the page corners — beyond this, extra
+// space stays as page margin around a centered cluster instead of gap.
+const GAP_X_MAX = 48, GAP_Y_MAX = 44
+
+// Choose the col/row split for n notes: the one whose (capped) leftover gaps are closest
+// to equal on both axes, biased toward the page's aspect so sparse clusters take a fitting
+// shape, honouring the per-axis minimum gaps and the button-reduced row capacities.
+// Everything is evaluated at the CAPPED pitch — that's what actually gets placed.
+function solveNoteGrid(n, width, height, headerH, bottomPad, noteR, resX, resY) {
+  const f = noteGridFrame(width, height, headerH, bottomPad, noteR, resX, resY)
+  const { BOX_W, BOX_H, mT, spanW, spanH } = f
+  let best = null
+  for (let cols = 1; cols <= n; cols++) {
+    for (let rows = Math.ceil(n / cols); rows <= Math.ceil(n / cols) + 2; rows++) {
+      const pitchX = cols > 1 ? Math.min(spanW / (cols - 1), BOX_W + GAP_X_MAX) : 0
+      const pitchY = rows > 1 ? Math.min(spanH / (rows - 1), BOX_H + GAP_Y_MAX) : 0
+      const gapX = cols > 1 ? spanW / (cols - 1) - BOX_W : Infinity
+      const gapY = rows > 1 ? spanH / (rows - 1) - BOX_H : Infinity
+      if (cols > 1 && gapX < NOTE_GAP_X) break // fewer cols only → gapX won't recover
+      if (rows > 1 && gapY < NOTE_GAP_Y) continue
+      const mTc = rows > 1 ? mT + (spanH - (rows - 1) * pitchY) / 2 : mT
+      let capTotal = 0
+      for (let r = 0; r < rows; r++) {
+        const cy = rows > 1 ? mTc + r * pitchY : mT + spanH / 2
+        capTotal += Math.min(cols, noteRowCap(f, cy, pitchX, width, height))
+      }
+      if (capTotal < n) continue
+      const fx = Math.min(isFinite(gapX) ? gapX : spanW, GAP_X_MAX)
+      const fy = Math.min(isFinite(gapY) ? gapY : spanH, GAP_Y_MAX)
+      const idealR = Math.sqrt(spanW * (BOX_H + GAP_Y_MAX) / (spanH * (BOX_W + GAP_X_MAX)))
+      const score = Math.abs(fx - fy) + 30 * Math.abs(Math.log((cols / rows) / idealR))
+      if (!best || score < best.score) best = { cols, rows, pitchX, pitchY, score }
+      break // loosest fitting rows found for this cols; more rows only tightens Y
+    }
+  }
+  if (!best) {
+    // Over this frame's capacity: densest legal grid; the caller's separation passes
+    // resolve whatever overlap the surplus items cause. `fits: false` tells the caller
+    // the frame couldn't hold n, so it can back off to a roomier one rather than ship
+    // notes stacked on top of each other.
+    const cols = Math.max(1, Math.floor(spanW / (BOX_W + NOTE_GAP_X)) + 1)
+    const rows = Math.ceil(n / cols)
+    return {
+      f, cols, rows, fits: false,
+      pitchX: spanW / Math.max(cols - 1, 1),
+      pitchY: spanH / Math.max(rows - 1, 1),
+    }
+  }
+  return { f, ...best, fits: true }
+}
+
+// True notes-per-page capacity: the largest n the solver can actually place at a zero
+// jitter reserve — the densest legal frame, and the one a full page converges on.
+//
+// This used to re-derive the count from the geometry (densest cols × rows, summed per row
+// with the + button's losses). That was a second implementation of the solver's own fit
+// rules, and the two disagreed on some viewports: capacity came out a few notes above
+// anything the solver would accept, pagination handed a page that many notes, the solver
+// found no legal grid, and the surplus landed in the corner stack. Asking the solver
+// directly is slower — a handful of solves per layout — but it cannot drift.
+function noteGridCapacity(width, height, headerH, bottomPad, noteScale = 1) {
+  const noteR = noteRFor(noteScale)
+  const f = noteGridFrame(width, height, headerH, bottomPad, noteR, 0, 0)
+  const cols = Math.max(1, Math.floor(f.spanW / (f.BOX_W + NOTE_GAP_X)) + 1)
+  const rows = Math.max(1, Math.floor(f.spanH / (f.BOX_H + NOTE_GAP_Y)) + 1)
+  const fits = (n) => solveNoteGrid(n, width, height, headerH, bottomPad, noteR, 0, 0).fits
+  // The grid can never hold more than its own cells, so that bounds the search.
+  let lo = 1, hi = Math.max(1, cols * rows)
+  if (fits(hi)) return hi
+  while (lo < hi) {
+    const mid = Math.ceil((lo + hi) / 2)
+    if (fits(mid)) lo = mid
+    else hi = mid - 1
+  }
+  return Math.max(1, lo)
+}
+
+// ── Page capacity ─────────────────────────────────────────────────────────────
+// How many pages a given mix of bubbles and notes needs, and the blended per-page count.
+// Capacity comes from each type's REAL footprint, not a one-size bubble grid: notes render
+// as small rectangles (W = r*1.55 ≈ 62px, H = r*1.15 ≈ 46px) packed ~5px apart, so counting
+// them as 98px bubble cells paginated note pages long before they were visually full.
+// pageLoad > 1 means the mix doesn't fit one screen; perPage is the count assignPages
+// splits on (it is count-based, so the two capacities blend into one number).
+function pageLoadFor(bubbleN, noteN, width, height, noteScale) {
+  if (width <= 0) return { pageLoad: 0, perPage: 1 }
+  const pageAvailH = height - SUB_BAR_H - BOTTOM_PAD
+  // The bubble floor rises with the note-size preference (see minBubbleRFor), so the cell
+  // this estimate is built on has to rise with it too — otherwise larger note sizes would
+  // be told more bubbles fit per page than the packer can actually place, and pages would
+  // overfill instead of paginating.
+  const minBubR = minBubbleRFor(noteScale)
+  const minBubD = minBubR * 2
+  // The packer keeps item centers a half-extent + EDGE_INSET inside each edge (see
+  // clampToBounds), so the usable band is the screen minus that inset on both sides.
+  // Bubbles are wide rectangles, so the horizontal and vertical insets differ.
+  const usablePageW = Math.max(width - 2 * (minBubR * BUB_HW + EDGE_INSET), 1)
+  const usablePageH = Math.max(pageAvailH - 2 * (minBubR * BUB_HH + EDGE_INSET), 1)
+  // Notes: the even-spread grid's true capacity (densest legal pitch incl. float-bob
+  // clearance, minus the cells lost to the + button). No derate needed — the grid
+  // places cells exactly, unlike the old organic packer this formula used to model.
+  const notesPerPage = noteGridCapacity(width, height, SUB_BAR_H, BOTTOM_PAD, noteScale)
+  // Bubbles are wide rounded rectangles, and the packer separates them by that box — so at
+  // the crowded gap they settle into a roughly RECTANGULAR arrangement, not the hexagonal
+  // circle packing this used to model. Estimate from the cell area of the region the packer
+  // can place centers in, bounded by the row/column count so narrow pages stay sane, and
+  // derated 20% for the size variation of content-scaled bubbles (the cell is sized for the
+  // minimum bubble, and only the smallest are actually that size). Pagination only triggers
+  // on a crowded page, where the packer uses its tightest gap.
+  const gap = bubPackGap(Infinity)
+  const cellW = minBubD * BUB_HW + gap
+  const cellH = minBubD * BUB_HH + gap + BUB_FLOAT_PAD
+  const bubblesPerPage = Math.max(1, Math.floor(0.8 * Math.min(
+    (usablePageW * usablePageH) / (cellW * cellH),
+    (Math.floor(usablePageW / cellW) + 1) * (Math.floor(usablePageH / cellH) + 1),
+  )))
+  const pageLoad = noteN / notesPerPage + bubbleN / bubblesPerPage
+  return {
+    pageLoad,
+    perPage: Math.max(1, Math.floor((bubbleN + noteN) / Math.max(pageLoad, 0.001))),
+    notesPerPage,
+    bubblesPerPage,
+  }
 }
 
 function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteScale = 1) {
@@ -407,17 +642,20 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteSc
   const cy0 = headerH + availH / 2
   const base = Math.min(width, availH) * 0.4
 
-  // Minimum bubble size — every other size floor derives from this.
-  const MIN_D = 80           // 80px minimum diameter
-  const MIN_R = MIN_D / 2    // → 40px minimum radius
   // Note cards render at a user-chosen size: the base radius scaled by the note-size
-  // preference (small = 1×). Only notes scale; category bubbles stay content-sized.
-  const NOTE_R = MIN_R * noteScale
+  // preference (small = 1×). Only notes scale; category bubbles stay content-sized — but
+  // the bubble floor tracks the note size so a sparse bubble never renders smaller than
+  // the note cards around it (see minBubbleRFor).
+  const NOTE_R = noteRFor(noteScale)
+  const MIN_R = minBubbleRFor(noteScale)
+  // No bubble may be bigger than the page it lives on, whatever the fill-scaling below
+  // computes — see maxFittingBubbleR.
+  const MAX_R = maxFittingBubbleR(width, availH)
 
   if (n === 1) {
     const r = items[0].type === 'note'
       ? NOTE_R
-      : Math.max(Math.min(width, availH) * 0.27, MIN_R)
+      : Math.min(Math.max(Math.min(width, availH) * 0.27, MIN_R), MAX_R)
     return [{ ...items[0], cx: cx0, cy: cy0, r }]
   }
 
@@ -430,65 +668,38 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteSc
   // (float-bob clearance included). Pages containing bubbles keep the organic scatter
   // below (bubbles scale up to fill, so they don't have this problem).
   if (items.every(i => i.type === 'note')) {
-    const BOX_W = NOTE_R * 2 * NOTE_HW, BOX_H = NOTE_R * 2 * NOTE_HH   // scaled rendered box
-    // Margins reserve the max jitter amplitude (±12 x, ±10 y) on top of the visible
-    // margin, so a jittered edge note can never sit closer than ~14px to the screen edge.
-    const mX = 14 + 12 + BOX_W / 2
-    const mT = headerH + 10 + 10 + BOX_H / 2, mB = 10 + 10 + BOX_H / 2
-    const spanW = width - mX * 2
-    const spanH = (height - bottomPad) - mT - mB
+    // Solve the grid twice. The first pass holds back no jitter room and measures the
+    // jitter its pitch would actually produce; the second holds back exactly that much.
+    // A full page converges on a zero reserve — which is the grid noteGridCapacity
+    // measures, so the two agree exactly where it matters — while a sparse page still
+    // reserves room for the wobble it will actually use.
+    const probe = solveNoteGrid(n, width, height, headerH, bottomPad, NOTE_R, 0, 0)
+    const probeJ = jitterFor(probe.f, probe.cols, probe.rows, probe.pitchX, probe.pitchY)
+    const reserved = solveNoteGrid(n, width, height, headerH, bottomPad, NOTE_R, probeJ.jx, probeJ.jy)
+    // The probe can pick a loose split whose jitter, once reserved, leaves too little room
+    // for n — a full desktop page of large notes did exactly that and dumped the surplus
+    // in a stack. Only adopt the reserved frame if it still holds every note; otherwise
+    // keep the roomier zero-reserve frame, which by definition has no jitter to reserve.
+    const useReserved = reserved.fits
+    const { f, cols, rows, pitchX, pitchY } = useReserved ? reserved : probe
+    const reserve = useReserved ? probeJ : { jx: 0, jy: 0 }
+    const { mX, mT, spanH } = f
     // Rows near the + button stop short of it: cells are never placed inside its
     // exclusion zone (shoving them out after placement broke the float clearance).
-    const xMaxAt = (cy) =>
-      Math.min(width - mX, noteRowXMax(cy, width, height, BOX_W / 2, BOX_H / 2))
-    const rowCapAt = (cy, pitchX) => {
-      const rs = xMaxAt(cy) - mX
-      return rs <= 0 ? 0 : Math.floor(rs / Math.max(pitchX, BOX_W + NOTE_GAP_X)) + 1
-    }
-    // Gap ceiling: a few notes shouldn't be flung to the page corners — beyond this,
-    // extra space stays as page margin around a centered cluster instead of gap.
-    const GAP_X_MAX = 48, GAP_Y_MAX = 44
-    // Pick the col/row split whose (capped) leftover gaps are closest to equal on both
-    // axes, biased toward the page's aspect so sparse clusters take a fitting shape,
-    // honouring the per-axis minimum gaps and the button-reduced row capacities.
-    // Everything is evaluated at the CAPPED pitch — that's what actually gets placed.
-    let best = null
-    for (let cols = 1; cols <= n; cols++) {
-      for (let rows = Math.ceil(n / cols); rows <= Math.ceil(n / cols) + 2; rows++) {
-        const pitchX = cols > 1 ? Math.min(spanW / (cols - 1), BOX_W + GAP_X_MAX) : 0
-        const pitchY = rows > 1 ? Math.min(spanH / (rows - 1), BOX_H + GAP_Y_MAX) : 0
-        const gapX = cols > 1 ? spanW / (cols - 1) - BOX_W : Infinity
-        const gapY = rows > 1 ? spanH / (rows - 1) - BOX_H : Infinity
-        if (cols > 1 && gapX < NOTE_GAP_X) break // fewer cols only → gapX won't recover
-        if (rows > 1 && gapY < NOTE_GAP_Y) continue
-        const mTc = rows > 1 ? mT + (spanH - (rows - 1) * pitchY) / 2 : mT
-        let capTotal = 0
-        for (let r = 0; r < rows; r++) {
-          const cy = rows > 1 ? mTc + r * pitchY : mT + spanH / 2
-          capTotal += Math.min(cols, rowCapAt(cy, pitchX))
-        }
-        if (capTotal < n) continue
-        const fx = Math.min(isFinite(gapX) ? gapX : spanW, GAP_X_MAX)
-        const fy = Math.min(isFinite(gapY) ? gapY : spanH, GAP_Y_MAX)
-        const idealR = Math.sqrt(spanW * (BOX_H + GAP_Y_MAX) / (spanH * (BOX_W + GAP_X_MAX)))
-        const score = Math.abs(fx - fy) + 30 * Math.abs(Math.log((cols / rows) / idealR))
-        if (!best || score < best.score) best = { cols, rows, pitchX, pitchY, score }
-        break // loosest fitting rows found for this cols; more rows only tightens Y
-      }
-    }
-    if (!best) {
-      // Over true capacity: densest legal grid; the caller's separation passes
-      // resolve whatever overlap the surplus items cause.
-      const cols = Math.max(1, Math.floor(spanW / (BOX_W + NOTE_GAP_X)) + 1)
-      const rows = Math.ceil(n / cols)
-      best = { cols, rows, pitchX: spanW / Math.max(cols - 1, 1), pitchY: spanH / Math.max(rows - 1, 1) }
-    }
-    const { cols, rows, pitchX, pitchY } = best
+    const xMaxAt = (cy) => noteRowXMaxAt(f, cy, width, height)
+    const rowCapAt = (cy, px) => noteRowCap(f, cy, px, width, height)
     // Pitches are already gap-capped by the search; center the block vertically so
     // sparse pages read as a loose cluster, not a corner-to-corner stretch.
     const mT2 = rows > 1 ? mT + (spanH - (rows - 1) * pitchY) / 2 : mT
-    const jx = Math.min(Math.max(((cols > 1 ? pitchX - BOX_W : spanW) - NOTE_GAP_X) / 2, 0), 12)
-    const jy = Math.min(Math.max(((rows > 1 ? pitchY - BOX_H : spanH) - NOTE_GAP_Y) / 2, 0), 10)
+    // The applied jitter can never exceed what the frame held back: the margins are
+    // NOTE_MARGIN + reserve, so `reserve` IS the room an edge cell has to wobble into.
+    // Don't assume the second pass wants less than the first — the col/row search is
+    // discrete, so a larger reserve can flip it to a looser split that wants MORE jitter
+    // (an iPhone SE page of large notes does exactly this). Clamping is what makes the
+    // margin a guarantee rather than an argument about monotonicity.
+    const fit = jitterFor(f, cols, rows, pitchX, pitchY)
+    const jx = Math.min(fit.jx, reserve.jx)
+    const jy = Math.min(fit.jy, reserve.jy)
     // Allot items per row: fill each row to ITS capacity from the top, so the only
     // short rows are at the bottom (where the + button eats cells). The old
     // "spread the remainder evenly" rule dented full pages mid-grid (5,5,5,5,4,4,5,4,3
@@ -538,7 +749,7 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteSc
     // True over-capacity leftovers (pagination normally prevents this): drop in and
     // let the caller's separation passes sort them out.
     while (placed < n) {
-      slots.push({ x: mX + (placed % 3) * (BOX_W + NOTE_GAP_X), y: mT + spanH / 2 })
+      slots.push({ x: mX + (placed % 3) * (f.BOX_W + NOTE_GAP_X), y: mT + spanH / 2 })
       placed++
     }
     // Cells are built row-major (top-left → bottom-right), but new notes are APPENDED
@@ -571,9 +782,9 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteSc
     return minR + (maxR - minR) * t
   })
 
-  // Tighter circle-packing when crowded: shrink the inter-bubble gap as the
+  // Tighter box-packing when crowded: shrink the inter-bubble gap as the
   // count grows so many bubbles pack closer together.
-  const packGap = n > 16 ? 4 : n > 10 ? 6 : 8
+  const packGap = bubPackGap(n)
   // Notes use the fixed per-axis gaps (NOTE_GAP_X / NOTE_GAP_Y), independent of the
   // category-bubble spacing above.
 
@@ -586,47 +797,34 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteSc
   const ell = Math.pow(aspect, 0.8)
   const ellX = ell < 1 ? 1 / ell : 1
   const ellY = ell > 1 ? ell : 1
+  // The seed is squashed vertically by the bubble aspect as well: every pass below only
+  // pushes boxes APART, so a seed spread for round items would leave the now-shorter
+  // bubbles with vertical dead air that nothing pulls closed.
   let pos = items.map((item, i) => {
     const angle = i * GA
     const dist = base * 0.46 * Math.sqrt(i / (n - 1 || 1))
-    return { ...item, x: dist * Math.cos(angle) * ellX, y: dist * Math.sin(angle) * ellY, r: radii[i] }
+    return {
+      ...item,
+      x: dist * Math.cos(angle) * ellX,
+      y: dist * Math.sin(angle) * ellY * (BUB_HH / BUB_HW),
+      r: radii[i],
+    }
   })
 
+  // Pack in layout space. Every pair separates by its rendered box: notes as their card
+  // (W = r*1.55, H = r*1.15), bubbles as theirs (W = r*2, H = r*1.33). Packing bubbles by
+  // a bounding circle instead would leave their corners overlapping on the diagonals.
   for (let iter = 0; iter < 240; iter++) {
     let any = false
     for (let i = 0; i < pos.length; i++) {
       for (let j = i + 1; j < pos.length; j++) {
         const a = pos[i], b = pos[j]
-        const dx = b.x - a.x, dy = b.y - a.y
-        if (a.type === 'note' && b.type === 'note') {
-          // Notes are rendered as rectangles (W = r*1.55, H = r*1.15), so pack them
-          // by their actual box — not the much larger bounding circle, which is what
-          // left the wide vertical gaps.
-          const ox = (a.r + b.r) * NOTE_HW - Math.abs(dx) + NOTE_GAP_X
-          const oy = (a.r + b.r) * NOTE_HH - Math.abs(dy) + NOTE_GAP_Y
-          if (ox > 0 && oy > 0) {
-            if (ox < oy) {
-              const push = (ox / 2) * (dx < 0 ? -1 : 1)
-              pos[i] = { ...a, x: a.x - push }
-              pos[j] = { ...b, x: b.x + push }
-            } else {
-              const push = (oy / 2) * (dy < 0 ? -1 : 1)
-              pos[i] = { ...a, y: a.y - push }
-              pos[j] = { ...b, y: b.y + push }
-            }
-            any = true
-          }
-        } else {
-          const d = Math.sqrt(dx * dx + dy * dy) || 0.001
-          const gap = a.r + b.r + packGap
-          if (d < gap) {
-            const push = (gap - d) / 2
-            const nx = dx / d, ny = dy / d
-            pos[i] = { ...a, x: a.x - nx * push, y: a.y - ny * push }
-            pos[j] = { ...b, x: b.x + nx * push, y: b.y + ny * push }
-            any = true
-          }
-        }
+        if (separateBoxPair(
+          b.x - a.x, b.y - a.y,
+          halfWidthOf(a), halfHeightOf(a), halfWidthOf(b), halfHeightOf(b),
+          pairGapX(a, b, packGap), pairGapY(a, b, packGap),
+          (p) => { a.x -= p; b.x += p }, (p) => { a.y -= p; b.y += p },
+        )) any = true
       }
     }
     if (!any) break
@@ -634,8 +832,8 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteSc
 
   // Tighter margin around the cluster when crowded so it can scale up to fill more.
   const pad = n > 10 ? 16 : 28
-  const xs = pos.flatMap(p => [p.x - p.r, p.x + p.r])
-  const ys = pos.flatMap(p => [p.y - p.r, p.y + p.r])
+  const xs = pos.flatMap(p => [p.x - halfWidthOf(p), p.x + halfWidthOf(p)])
+  const ys = pos.flatMap(p => [p.y - halfHeightOf(p), p.y + halfHeightOf(p)])
   const minX = Math.min(...xs), maxX = Math.max(...xs)
   const minY = Math.min(...ys), maxY = Math.max(...ys)
   const bw = maxX - minX || 1, bh = maxY - minY || 1
@@ -653,51 +851,28 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteSc
     cx: cx0 + (p.x - lcx) * scaleX,
     cy: cy0 + (p.y - lcy) * scaleY,
     // Notes are always fixed at the minimum size (never scaled). Category bubbles keep the
-    // minimum ON SCREEN — scaled by the smaller axis factor so they stay circular (never
-    // stretched) and never shrink below MIN_R.
-    r: p.type === 'note' ? NOTE_R : Math.max(p.r * Math.min(scaleX, scaleY), MIN_R),
+    // minimum ON SCREEN — scaled by the smaller axis factor so their box keeps its aspect
+    // ratio (never stretched), never shrinking below MIN_R nor growing past what fits.
+    r: p.type === 'note'
+      ? NOTE_R
+      : Math.min(Math.max(p.r * Math.min(scaleX, scaleY), MIN_R), MAX_R),
   }))
 
   // Flooring the radius can re-introduce overlaps; relax in screen space with a
-  // tight gap, clamping every bubble fully on-screen each pass so nothing ends up
+  // tight gap, clamping every item fully on-screen each pass so nothing ends up
   // off the viewport. (When bubbles can't all fit at the minimum size they will
   // pack tightly / overlap rather than shrink below it.)
   const clampXY = (p) => {
-    p.cx = Math.max(p.r + 8, Math.min(width - p.r - 8, p.cx))
-    p.cy = Math.max(headerH + p.r + 8, Math.min(height - bottomPad - p.r, p.cy))
+    const hw = halfWidthOf(p), hh = halfHeightOf(p)
+    p.cx = Math.max(hw + 8, Math.min(width - hw - 8, p.cx))
+    p.cy = Math.max(headerH + hh + 8, Math.min(height - bottomPad - hh, p.cy))
   }
   const tightGap = Math.min(packGap, 5)
   for (let iter = 0; iter < 160; iter++) {
     let any = false
     for (let i = 0; i < result.length; i++) {
       for (let j = i + 1; j < result.length; j++) {
-        const a = result[i], b = result[j]
-        const dx = b.cx - a.cx, dy = b.cy - a.cy
-        if (a.type === 'note' && b.type === 'note') {
-          // Rectangle separation for note squares (see packing pass above).
-          const ox = (a.r + b.r) * NOTE_HW - Math.abs(dx) + NOTE_GAP_X
-          const oy = (a.r + b.r) * NOTE_HH - Math.abs(dy) + NOTE_GAP_Y
-          if (ox > 0 && oy > 0) {
-            if (ox < oy) {
-              const push = (ox / 2) * (dx < 0 ? -1 : 1)
-              a.cx -= push; b.cx += push
-            } else {
-              const push = (oy / 2) * (dy < 0 ? -1 : 1)
-              a.cy -= push; b.cy += push
-            }
-            any = true
-          }
-        } else {
-          const d = Math.sqrt(dx * dx + dy * dy) || 0.001
-          const need = a.r + b.r + tightGap
-          if (d < need) {
-            const push = (need - d) / 2
-            const nx = dx / d, ny = dy / d
-            a.cx -= nx * push; a.cy -= ny * push
-            b.cx += nx * push; b.cy += ny * push
-            any = true
-          }
-        }
+        if (separatePair(result[i], result[j], tightGap)) any = true
       }
     }
     result.forEach(clampXY)
@@ -712,7 +887,7 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteSc
   // pinned separation so notes yield to the anchored bubble cluster.
   if (items.some(i => i.type === 'note')) {
     return separateOverlaps(
-      lloydSpread(recenterBubbles(result, width, height, headerH, bottomPad), width, height, headerH, bottomPad),
+      lloydSpread(recenterBubbles(result, width, height, headerH, bottomPad, noteScale), width, height, headerH, bottomPad),
       width, height, true,
     )
   }
@@ -748,24 +923,28 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectab
   const countLines = (item.childBubbleCount > 0 ? 1 : 0) + (item.noteCount > 0 ? 1 : 0)
   const showSub = countLines > 0 && item.r >= 34
 
-  // Horizontal padding inside the bubble so text never touches the edges.
-  const TEXT_PAD = 5 // px each side
+  // Rendered box: a wide rounded rectangle, not a circle.
+  const W = Math.round(item.r * 2 * BUB_HW)
+  const H = Math.round(item.r * 2 * BUB_HH)
 
-  // Font auto-sizing: shrink the font until the WHOLE name fits inside the circle —
-  // both the longest word on the widest (center) line and the total text across the
-  // available lines — down to an 8px floor. Only if it still doesn't fit at 8px is it
-  // truncated with an ellipsis. Never breaks mid-word.
+  // Horizontal padding inside the bubble so text never touches the edges.
+  const TEXT_PAD = 8 // px each side
+
+  // Font auto-sizing: shrink the font until the WHOLE name fits inside the box — both the
+  // longest word on a full-width line and the total text across the available lines — down
+  // to an 8px floor. Only if it still doesn't fit at 8px is it truncated with an ellipsis.
+  // Never breaks mid-word. Unlike a circle, every line here gets the full width, so there's
+  // no separate "widest line" vs "average line" to reconcile.
   const CHAR_W = 0.62, LINE_H = 1.2 // conservative glyph width so words aren't clipped
   const longestWord = name.split(/\s+/).reduce((m, w) => Math.max(m, w.length), 1)
   const chars = Math.max(name.length, 1)
-  const centerW = Math.max(item.r * 2 - TEXT_PAD * 2 - 4, 1)   // widest usable line
-  const avgW = Math.max(item.r * 2 * 0.8 - TEXT_PAD * 2, 1)    // average line width across the circle
+  const lineW = Math.max(W - TEXT_PAD * 2, 1)                  // usable width, every line
   // Reserve room for the count lines (one per non-zero count), which sit directly
   // below the centered title.
-  const availH = Math.max(item.r * 2 * 0.66 - (showSub ? countLines * subSize * 1.2 + 4 : 0), 1)
+  const availH = Math.max(H * 0.84 - (showSub ? countLines * subSize * 1.2 + 4 : 0), 1)
   const baseFont = Math.min(item.r * 0.34, 20)                 // upper bound (short names stay large)
-  const wordFont = centerW / (CHAR_W * longestWord)            // longest word fits the center line
-  const areaFont = Math.sqrt((avgW * availH) / (CHAR_W * LINE_H * chars * 1.2)) // whole name fits the area
+  const wordFont = lineW / (CHAR_W * longestWord)              // longest word fits one line
+  const areaFont = Math.sqrt((lineW * availH) / (CHAR_W * LINE_H * chars * 1.2)) // whole name fits the area
   const fontSize = Math.max(Math.min(baseFont, wordFont, areaFont), 8)
 
   // Lines available at this font; text only overflows (→ ellipsis) at the 8px floor.
@@ -782,10 +961,10 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectab
       data-item-id={item.id}
       style={{
         position: 'absolute',
-        left: item.cx - item.r,
-        top: item.cy - item.r,
-        width: item.r * 2,
-        height: item.r * 2,
+        left: item.cx - W / 2,
+        top: item.cy - H / 2,
+        width: W,
+        height: H,
         cursor: isDragging ? 'grabbing' : 'grab',
         visibility: hidden ? 'hidden' : 'visible',
         pointerEvents: hidden ? 'none' : 'auto',
@@ -812,7 +991,7 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectab
           position: 'relative',
           width: '100%',
           height: '100%',
-          borderRadius: '50%',
+          borderRadius: bubbleCornerPx(item.r),
           background: isLight
             ? solidBg
             : `radial-gradient(135deg, rgba(255,255,255,0.24) 0%, rgba(${rgb},0.22) 55%, rgba(${rgb},0.07) 100%)`,
@@ -908,13 +1087,13 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectab
 
       {/* Selection overlay — ring (when selected) + checkmark badge, in the non-clipped
           outer wrapper so the corner badge isn't cut off by the bubble's overflow. */}
-      {selectable && <SelectionOverlay selected={selected} radius="50%" />}
+      {selectable && <SelectionOverlay selected={selected} radius={bubbleCornerPx(item.r)} />}
     </motion.div>
   )
 }
 
 // Ring + checkmark badge drawn over a selectable item. `radius` matches the item shape
-// (50% for bubbles, 22% for note cards).
+// (the bubble's px corner radius for bubbles, 22% for note cards).
 function SelectionOverlay({ selected, radius }) {
   return (
     <>
@@ -1150,7 +1329,11 @@ function ZoomExpand({ anim, size, onDone }) {
   const { phase, cx, cy, r, color } = anim
   const rgb = hexToRgb(color)
 
-  const bubbleRect = { left: cx - r, top: cy - r, width: r * 2, height: r * 2, borderRadius: r }
+  const bubbleRect = {
+    left: cx - r * BUB_HW, top: cy - r * BUB_HH,
+    width: r * 2 * BUB_HW, height: r * 2 * BUB_HH,
+    borderRadius: bubbleCornerPx(r),
+  }
   const screenRect = { left: 0, top: 0, width: size.width, height: size.height, borderRadius: 0 }
 
   const from = phase === 'in' ? bubbleRect : screenRect
@@ -1180,53 +1363,24 @@ const BOTTOM_PAD = 0           // no bottom barrier — bubbles reach the bottom
 // Just clear the + button itself: button is 56px (radius 28) + a small ~8px margin.
 const PLUS_BTN_EXCL_R = 36    // no-go radius around the floating + button
 
-// Effective collision radius (notes are rectangular; approximate as slightly smaller circle)
-function cr(item) { return item.type === 'note' ? item.r * 0.97 : item.r }
-
-// Keep an item's center outside a FULL circle around the + button (bottom-right),
-// blocking overlap from ANY direction. The button hugs the bottom-right corner, so
-// the always-open escape directions are left and up: we slide the center to the
-// nearest point on the exclusion circle along whichever axis fits in bounds. This
-// works even when the bubble is dragged in from the side or from directly below.
-// Mutates p.cx / p.cy in place.
+// Keep an item clear of the round + button (bottom-right), blocking overlap from ANY
+// direction. Every item — note card and category bubble alike — is measured by its real
+// rendered box against the button's exclusion circle, and pushed radially out of it.
+// (Bubbles used to get a circle-vs-circle test, which reserved a fat invisible moat on
+// the axes their box doesn't actually reach.) Mutates p.cx / p.cy in place.
 function keepClearOfPlusButton(p, width, height, topLimit, botLimit) {
   const btnCx = width - 52, btnCy = height - 52
-  // Notes clear the button by their real box (same rule as the grid's row capacity and
-  // the separation pass); the circle test reserved ~45px of phantom horizontal room.
-  if (p.type === 'note') {
-    const pen = circleBoxPen({ cx: btnCx, cy: btnCy, r: PLUS_BTN_EXCL_R }, p, BTN_ROW_PAD)
-    if (pen <= 0) return
-    const hw = halfWidthOf(p), hh = halfHeightOf(p)
-    const dx = p.cx - btnCx, dy = p.cy - btnCy
-    const d = Math.hypot(dx, dy) || 1
-    p.cx = Math.max(hw + 12, Math.min(width - hw - 12, p.cx + (dx / d) * pen))
-    p.cy = Math.max(topLimit + hh + 12, Math.min(botLimit - hh, p.cy + (dy / d) * pen))
-    return
-  }
-  const r = p.r
-  const minDist = PLUS_BTN_EXCL_R + r
-  const ddx = p.cx - btnCx, ddy = p.cy - btnCy
-  const dist = Math.sqrt(ddx * ddx + ddy * ddy)
-  if (dist >= minDist) return
-  // Single-axis exits that land exactly on the exclusion circle.
-  const leftX = btnCx - Math.sqrt(Math.max(minDist * minDist - ddy * ddy, 0))
-  const upY = btnCy - Math.sqrt(Math.max(minDist * minDist - ddx * ddx, 0))
-  const leftOk = leftX >= r + 12
-  const upOk = upY >= topLimit + r + 12
-  if (leftOk && (!upOk || (p.cx - leftX) <= (p.cy - upY))) {
-    p.cx = leftX
-  } else if (upOk) {
-    p.cy = upY
-  } else {
-    // Extremely tight space — push radially toward the interior as a fallback.
-    const nx = ddx / (dist || 1), ny = ddy / (dist || 1)
-    p.cx = Math.max(r + 12, Math.min(width - r - 12, p.cx + nx * (minDist - dist)))
-    p.cy = Math.max(topLimit + r + 12, Math.min(botLimit - r, p.cy + ny * (minDist - dist)))
-  }
+  const pen = circleBoxPen({ cx: btnCx, cy: btnCy, r: PLUS_BTN_EXCL_R }, p, BTN_ROW_PAD)
+  if (pen <= 0) return
+  const hw = halfWidthOf(p), hh = halfHeightOf(p)
+  const dx = p.cx - btnCx, dy = p.cy - btnCy
+  const d = Math.hypot(dx, dy) || 1
+  p.cx = Math.max(hw + 12, Math.min(width - hw - 12, p.cx + (dx / d) * pen))
+  p.cy = Math.max(topLimit + hh + 12, Math.min(botLimit - hh, p.cy + (dy / d) * pen))
 }
 
 // Clamp an item to screen bounds then push it clear of the + button (all sides).
-// Notes clamp by their real box half-extents, NOT the bounding circle — circle-clamping
+// Items clamp by their real box half-extents, NOT a bounding circle — circle-clamping
 // (r=40) forced note centers 17px further from the top edge than the even-spread grid
 // places them, shoving the whole top row down into row 2 and re-creating tiny overlaps
 // the layout had just resolved. Mutates p.cx / p.cy in place.
@@ -1254,81 +1408,103 @@ function clampToBounds(p, width, height) {
 // ellipseOnlyIds: when given, the cluster-ellipse obstacle applies only to these notes
 // (freshly arranged ones) — notes the user deliberately parked inside the cluster keep
 // their spot instead of being ejected on load.
+// Should the final safety pass pin the bubble cluster?
+//
+// On a fresh mixed page (nothing hand-placed) computeLayout has already settled the notes
+// around a PINNED, centered bubble cluster. Running the safety pass unpinned lets a
+// crowded page's notes shove that cluster back into itself — re-creating exactly the
+// bubble-on-bubble overlap the pinned pass had just resolved. Once the user has placed
+// items by hand there is no canonical cluster to protect, so everything moves freely.
+function shouldPinBubbles(items, anchoredCount) {
+  return anchoredCount === 0 &&
+    items.some(i => i.type === 'note') && items.some(i => i.type !== 'note')
+}
+
 function separateOverlaps(items, width, height, pinBubbles = false, ellipseOnlyIds = null) {
   const BUFFER = 3 // px gap so items never visually touch
   const EPS = 0.25 // sub-pixel tolerance so float noise doesn't spin the loop forever
   const pos = items.map(i => ({ ...i }))
   const btnCx = width - 52, btnCy = height - 52
-  // Screen bounds only — box-aware for notes, same insets as clampToBounds.
+  // Screen bounds only — box-aware, same insets as clampToBounds.
   const boundsClamp = (p) => {
     const hw = halfWidthOf(p), hh = halfHeightOf(p)
-    p.cx = Math.max(hw + 12, Math.min(width - hw - 12, p.cx))
-    p.cy = Math.max(SUB_BAR_H + hh + 12, Math.min(height - BOTTOM_PAD - hh, p.cy))
+    p.cx = Math.max(hw + EDGE_INSET, Math.min(width - hw - EDGE_INSET, p.cx))
+    p.cy = Math.max(SUB_BAR_H + hh + EDGE_INSET, Math.min(height - BOTTOM_PAD - hh, p.cy))
   }
+  // How far outside the page an item hangs, 0 when fully inside — the same insets read as
+  // a distance instead of a clamp, so a snapshot can be scored on it.
+  const outOfBounds = (p) => {
+    const hw = halfWidthOf(p), hh = halfHeightOf(p)
+    return Math.max(0, hw + EDGE_INSET - p.cx) + Math.max(0, p.cx - (width - hw - EDGE_INSET))
+      + Math.max(0, SUB_BAR_H + hh + EDGE_INSET - p.cy) + Math.max(0, p.cy - (height - BOTTOM_PAD - hh))
+  }
+  // Keep the BEST arrangement seen, not the last one.
+  //
+  // This relaxation does not always converge: on a crowded mixed page the pinned
+  // bubble-note transfer above can fight the bubble-bubble separation, each undoing the
+  // other every iteration. Returning `pos` after the iteration cap then ships whatever
+  // half-resolved frame iteration 119 happened to leave — which is how a page could end
+  // up MORE overlapped than an earlier iteration already had it. Scoring each iteration
+  // by its total penetration and returning the best one makes the pass monotonic: extra
+  // iterations can only ever help.
+  let best = null
+  let bestScore = Infinity
   for (let iter = 0; iter < 120; iter++) {
     let moved = false
+    // How wrong the arrangement is at the START of this iteration, in px: pair penetration
+    // (accumulated below) plus anything hanging off the page. Both are the same unit, so
+    // they add — a snapshot with no overlaps but an item off-screen is not a good one.
+    const snapshot = pos.map(p => ({ ...p }))
+    let score = pos.reduce((s, p) => s + outOfBounds(p), 0)
     for (let i = 0; i < pos.length; i++) {
       for (let j = i + 1; j < pos.length; j++) {
         const a = pos[i], b = pos[j]
-        const dx = b.cx - a.cx, dy = b.cy - a.cy
-        if (a.type === 'note' && b.type === 'note') {
-          // Separate note squares by their real box so they pack tight without the fat
-          // circle spacing (which over-separated and, when dense, left them overlapping).
-          if (separateBoxPair(
-            dx, dy,
-            halfWidthOf(a), halfHeightOf(a), halfWidthOf(b), halfHeightOf(b),
-            NOTE_GAP_X - EPS, NOTE_GAP_Y - EPS,
-            (p) => { a.cx -= p; b.cx += p }, (p) => { a.cy -= p; b.cy += p },
-          )) moved = true
-        } else if (a.type === 'note' || b.type === 'note') {
-          // Bubble-note: circle vs the note's REAL rectangle — the bounding-circle
-          // model kept a fat invisible moat around every bubble.
-          const bub = a.type === 'note' ? b : a
-          const note = a.type === 'note' ? a : b
-          const pen = circleBoxPen(bub, note, BUFFER - EPS)
-          if (pen > 0) {
-            const ddx = note.cx - bub.cx, ddy = note.cy - bub.cy
-            const dd = Math.hypot(ddx, ddy) || 0.001
-            const nx = ddx / dd, ny = ddy / dd
-            if (pinBubbles) { note.cx += nx * pen; note.cy += ny * pen }
-            else {
-              note.cx += nx * pen / 2; note.cy += ny * pen / 2
-              bub.cx -= nx * pen / 2; bub.cy -= ny * pen / 2
-            }
-            moved = true
-          }
-        } else {
-          const d = Math.sqrt(dx * dx + dy * dy) || 0.001
-          const need = cr(a) + cr(b) + BUFFER
-          if (d < need - EPS) {
-            const push = (need - d) / 2
-            const nx = dx / d, ny = dy / d
-            a.cx -= nx * push; a.cy -= ny * push
-            b.cx += nx * push; b.cy += ny * push
-            moved = true
-          }
+        // Every pair separates by its real rendered box so items pack tight without the
+        // fat circle spacing (which over-separated and, when dense, left them overlapping).
+        //
+        // On mixed pages the bubble cluster is pinned, so a bubble-note overlap is resolved
+        // by the note alone: it absorbs the whole push (2x the symmetric half) and the
+        // cluster stays centered. But a note can only yield while it has somewhere to go —
+        // wedged against a page edge it would keep its overlap forever, which looks worse
+        // than nudging the cluster. So whatever the note can't absorb transfers to the
+        // bubble. Bubble-bubble pairs, and every pair on an unpinned page, split it evenly.
+        const mixedPair = (a.type === 'note') !== (b.type === 'note')
+        const yielder = (pinBubbles && mixedPair) ? (a.type === 'note' ? a : b) : null
+        // Both branches must leave (b - a) separated by 2p on the push axis. The transfer
+        // to the bubble is DAMPED: at full strength it fights the bubble-bubble separation
+        // above — a bubble gets pushed off its neighbour, then a wedged note shoves it
+        // straight back, and the two never settle. Damped, the tug-of-war has a fixed
+        // point, so the cluster gives ground gradually instead of oscillating.
+        const TRANSFER_DAMPING = 0.4
+        const pinnedPush = (axis) => (p) => {
+          const want = yielder === a ? -2 * p : 2 * p
+          const before = yielder[axis]
+          yielder[axis] += want
+          boundsClamp(yielder)
+          const rest = (want - (yielder[axis] - before)) * TRANSFER_DAMPING
+          if (yielder === a) b[axis] -= rest
+          else a[axis] -= rest
         }
+        const depth = separateBoxPair(
+          b.cx - a.cx, b.cy - a.cy,
+          halfWidthOf(a), halfHeightOf(a), halfWidthOf(b), halfHeightOf(b),
+          pairGapX(a, b, BUFFER) - EPS, pairGapY(a, b, BUFFER) - EPS,
+          yielder ? pinnedPush('cx') : (p) => { a.cx -= p; b.cx += p },
+          yielder ? pinnedPush('cy') : (p) => { a.cy -= p; b.cy += p },
+        )
+        if (depth) { moved = true; score += depth }
       }
     }
-    // + button obstacle: radial push out. Notes measure by their real box (matching the
-    // grid's row capacity), bubbles by their circle — a circle test on notes would shove
-    // the bottom-row cells the grid legitimately placed beside the button.
+    // + button obstacle: every item measures by its real box against the button's
+    // exclusion circle (matching the grid's row capacity), then gets pushed radially
+    // out — a circle test would shove aside cells the grid legitimately placed beside it.
     for (const p of pos) {
-      const dx = p.cx - btnCx, dy = p.cy - btnCy
-      const d = Math.sqrt(dx * dx + dy * dy) || 0.001
-      if (p.type === 'note') {
-        const pen = circleBoxPen({ cx: btnCx, cy: btnCy, r: PLUS_BTN_EXCL_R }, p, BTN_ROW_PAD - EPS)
-        if (pen > 0) {
-          p.cx += (dx / d) * pen
-          p.cy += (dy / d) * pen
-          moved = true
-        }
-        continue
-      }
-      const need = PLUS_BTN_EXCL_R + p.r
-      if (d < need - EPS) {
-        p.cx = btnCx + (dx / d) * need
-        p.cy = btnCy + (dy / d) * need
+      const pen = circleBoxPen({ cx: btnCx, cy: btnCy, r: PLUS_BTN_EXCL_R }, p, BTN_ROW_PAD - EPS)
+      if (pen > 0) {
+        const dx = p.cx - btnCx, dy = p.cy - btnCy
+        const d = Math.sqrt(dx * dx + dy * dy) || 0.001
+        p.cx += (dx / d) * pen
+        p.cy += (dy / d) * pen
         moved = true
       }
     }
@@ -1351,9 +1527,12 @@ function separateOverlaps(items, width, height, pinBubbles = false, ellipseOnlyI
       boundsClamp(p)
       if (Math.abs(p.cx - px) > EPS || Math.abs(p.cy - py) > EPS) moved = true
     }
-    if (!moved) break
+    if (score < bestScore) { bestScore = score; best = snapshot }
+    // Nothing moved: `pos` satisfies every pair, the barrier and the bounds at once —
+    // strictly better than any scored snapshot, which are all pre-resolution states.
+    if (!moved) return pos
   }
-  return pos
+  return best ?? pos
 }
 
 // ─── Settle new (unplaced) items away from anchored (saved-position) items ─────
@@ -1371,37 +1550,21 @@ function settleItems(items, anchoredIds, width, height) {
         if (i === j) continue
         const b = pos[j]
         const dx = a.cx - b.cx, dy = a.cy - b.cy
-        if (a.type === 'note' && b.type === 'note') {
-          // Box separation: push `a` off `b` along the axis of least penetration so notes
-          // settle by their real rectangle, not the fat bounding circle.
-          const ox = halfWidthOf(a) + halfWidthOf(b) + NOTE_GAP_X - Math.abs(dx)
-          const oy = halfHeightOf(a) + halfHeightOf(b) + NOTE_GAP_Y - Math.abs(dy)
-          if (ox <= 0 || oy <= 0) continue
-          const bFree = !anchoredIds.has(b.id)
-          if (ox < oy) {
-            const s = dx < 0 ? -1 : 1
-            if (bFree) { a.cx += s * ox / 2; b.cx -= s * ox / 2; clampToBounds(b, width, height) }
-            else a.cx += s * ox
-          } else {
-            const s = dy < 0 ? -1 : 1
-            if (bFree) { a.cy += s * oy / 2; b.cy -= s * oy / 2; clampToBounds(b, width, height) }
-            else a.cy += s * oy
-          }
-          clampToBounds(a, width, height)
-          moved = true
-          continue
-        }
-        const dist = Math.sqrt(dx * dx + dy * dy) || 0.001
-        const minDist = cr(a) + cr(b) + GAP
-        if (dist >= minDist) continue
-        const overlap = minDist - dist
-        const nx = dx / dist, ny = dy / dist
-        if (anchoredIds.has(b.id)) {
-          a.cx += nx * overlap; a.cy += ny * overlap // push a fully
+        // Box separation: push `a` off `b` along the axis of least penetration, measuring
+        // every item by its real rendered rectangle (bubbles included) rather than a
+        // bounding circle. An anchored `b` doesn't move, so `a` absorbs the whole overlap.
+        const ox = halfWidthOf(a) + halfWidthOf(b) + pairGapX(a, b, GAP) - Math.abs(dx)
+        const oy = halfHeightOf(a) + halfHeightOf(b) + pairGapY(a, b, GAP) - Math.abs(dy)
+        if (ox <= 0 || oy <= 0) continue
+        const bFree = !anchoredIds.has(b.id)
+        if (ox < oy) {
+          const s = dx < 0 ? -1 : 1
+          if (bFree) { a.cx += s * ox / 2; b.cx -= s * ox / 2; clampToBounds(b, width, height) }
+          else a.cx += s * ox
         } else {
-          a.cx += nx * overlap / 2; a.cy += ny * overlap / 2
-          b.cx -= nx * overlap / 2; b.cy -= ny * overlap / 2
-          clampToBounds(b, width, height)
+          const s = dy < 0 ? -1 : 1
+          if (bFree) { a.cy += s * oy / 2; b.cy -= s * oy / 2; clampToBounds(b, width, height) }
+          else a.cy += s * oy
         }
         clampToBounds(a, width, height)
         moved = true
@@ -1443,104 +1606,45 @@ function resolveCollisions(items, draggedId, desiredCx, desiredCy, width, height
         const dx = b.cx - a.cx
         const dy = b.cy - a.cy
 
-        // Note-note pairs collide by their real box + the per-axis layout gaps — the
-        // circular model needed ~94px between centers, so dragging on a dense grid
-        // (67px pitch) would shove every neighbour apart and then pin the blown-up
-        // layout on drop. Box collision keeps drag physics consistent with layout.
-        if (a.type === 'note' && b.type === 'note') {
-          const ox = halfWidthOf(a) + halfWidthOf(b) + NOTE_GAP_X - Math.abs(dx)
-          const oy = halfHeightOf(a) + halfHeightOf(b) + NOTE_GAP_Y - Math.abs(dy)
-          if (ox <= 0 || oy <= 0) continue
-          anyOverlap = true
-          const axisX = ox < oy
-          const ov = axisX ? ox : oy
-          const sgn = (axisX ? dx : dy) < 0 ? -1 : 1 // a→b direction on the push axis
-          if (!a.isDragged && !b.isDragged) {
-            if (axisX) { a.cx -= sgn * ov / 2; b.cx += sgn * ov / 2 }
-            else { a.cy -= sgn * ov / 2; b.cy += sgn * ov / 2 }
-            clampToBounds(a, width, height)
-            clampToBounds(b, width, height)
-          } else {
-            const dragged = a.isDragged ? a : b
-            const other = a.isDragged ? b : a
-            const dir = a.isDragged ? sgn : -sgn // push the other away from the dragged
-            const bx = other.cx, by = other.cy
-            if (axisX) other.cx += dir * ov; else other.cy += dir * ov
-            clampToBounds(other, width, height)
-            const movedDist = Math.abs(axisX ? other.cx - bx : other.cy - by)
-            const remaining = ov - movedDist
-            if (remaining > 0.5) {
-              if (axisX) dragged.cx -= dir * remaining; else dragged.cy -= dir * remaining
-              clampToBounds(dragged, width, height)
-            }
-          }
-          continue
-        }
-
-        // Bubble-note pairs: circle vs the note's REAL rectangle with a small gap — the
-        // bounding-circle model + 16px gap made bubbles carry an oversized invisible
-        // moat that you could feel when dragging a note near one.
-        if (a.type === 'note' || b.type === 'note') {
-          const bub = a.type === 'note' ? b : a
-          const note = a.type === 'note' ? a : b
-          const pen = circleBoxPen(bub, note, 6)
-          if (pen <= 0) continue
-          anyOverlap = true
-          const ddx = note.cx - bub.cx, ddy = note.cy - bub.cy
-          const dd = Math.hypot(ddx, ddy) || 0.001
-          const bnx = ddx / dd, bny = ddy / dd
-          if (!a.isDragged && !b.isDragged) {
-            note.cx += bnx * pen / 2; note.cy += bny * pen / 2; clampToBounds(note, width, height)
-            bub.cx -= bnx * pen / 2; bub.cy -= bny * pen / 2; clampToBounds(bub, width, height)
-          } else {
-            const dragged = a.isDragged ? a : b
-            const other = a.isDragged ? b : a
-            // push direction on OTHER: away from the dragged item
-            const pox = other === note ? bnx : -bnx
-            const poy = other === note ? bny : -bny
-            const bcx = other.cx, bcy = other.cy
-            other.cx += pox * pen
-            other.cy += poy * pen
-            clampToBounds(other, width, height)
-            const movedDist = Math.sqrt((other.cx - bcx) ** 2 + (other.cy - bcy) ** 2)
-            const remaining = pen - movedDist
-            if (remaining > 0.5) {
-              dragged.cx -= pox * remaining
-              dragged.cy -= poy * remaining
-              clampToBounds(dragged, width, height)
-            }
-          }
-          continue
-        }
-
-        const dist = Math.sqrt(dx * dx + dy * dy) || 0.001
-        const minDist = cr(a) + cr(b) + GAP
-        if (dist >= minDist) continue
-
+        // Every pair collides by its real box + per-axis gaps — the circular model needed
+        // ~94px between note centers, so dragging on a dense grid (67px pitch) would shove
+        // every neighbour apart and then pin the blown-up layout on drop. Box collision
+        // keeps drag physics consistent with layout, and it's what makes a dragged
+        // rounded rectangle stop where its corner actually lands rather than where a
+        // bounding circle would.
+        const bothNotes = a.type === 'note' && b.type === 'note'
+        const bothBubbles = a.type !== 'note' && b.type !== 'note'
+        // Gaps by pair type: notes keep the grid's per-axis gaps; bubble-bubble keeps the
+        // roomy GAP so a dragged bubble shoves its neighbours convincingly; a mixed pair
+        // uses a tight 6px so a note dragged past a bubble doesn't feel like it's hitting
+        // an invisible moat. Vertical always adds the float-bob clearance.
+        const gapX = bothNotes ? NOTE_GAP_X : bothBubbles ? GAP : 6
+        const gapY = bothNotes ? NOTE_GAP_Y : gapX + BUB_FLOAT_PAD
+        const ox = halfWidthOf(a) + halfWidthOf(b) + gapX - Math.abs(dx)
+        const oy = halfHeightOf(a) + halfHeightOf(b) + gapY - Math.abs(dy)
+        if (ox <= 0 || oy <= 0) continue
         anyOverlap = true
-        const overlap = minDist - dist
-        const nx = dx / dist, ny = dy / dist
-
+        const axisX = ox < oy
+        const ov = axisX ? ox : oy
+        const sgn = (axisX ? dx : dy) < 0 ? -1 : 1 // a→b direction on the push axis
         if (!a.isDragged && !b.isDragged) {
-          a.cx -= nx * overlap / 2;  a.cy -= ny * overlap / 2;  clampToBounds(a, width, height)
-          b.cx += nx * overlap / 2;  b.cy += ny * overlap / 2;  clampToBounds(b, width, height)
+          if (axisX) { a.cx -= sgn * ov / 2; b.cx += sgn * ov / 2 }
+          else { a.cy -= sgn * ov / 2; b.cy += sgn * ov / 2 }
+          clampToBounds(a, width, height)
+          clampToBounds(b, width, height)
         } else {
           const dragged = a.isDragged ? a : b
-          const other   = a.isDragged ? b : a
-          const pnx = a.isDragged ? nx : -nx
-          const pny = a.isDragged ? ny : -ny
-
-          const bcx = other.cx, bcy = other.cy
-          other.cx += pnx * overlap
-          other.cy += pny * overlap
+          const other = a.isDragged ? b : a
+          const dir = a.isDragged ? sgn : -sgn // push the other away from the dragged
+          const bx = other.cx, by = other.cy
+          if (axisX) other.cx += dir * ov; else other.cy += dir * ov
           clampToBounds(other, width, height)
-
-          const movedDist = Math.sqrt((other.cx - bcx) ** 2 + (other.cy - bcy) ** 2)
-          const remaining = overlap - movedDist
-
+          // Whatever the other item couldn't absorb (it hit a wall) pushes the dragged
+          // item back instead — the "hits a wall" feel.
+          const movedDist = Math.abs(axisX ? other.cx - bx : other.cy - by)
+          const remaining = ov - movedDist
           if (remaining > 0.5) {
-            dragged.cx -= pnx * remaining
-            dragged.cy -= pny * remaining
+            if (axisX) dragged.cx -= dir * remaining; else dragged.cy -= dir * remaining
             clampToBounds(dragged, width, height)
           }
         }
@@ -1823,45 +1927,9 @@ export default function BubbleVisualization({
 
   // Pagination trigger (computed before the single-page layout so it can be skipped
   // when paged). More items than fit one screen at the minimum size → paginate.
-  const PAGE_MIN_D = 80
-  const pageAvailH = size.height - SUB_BAR_H - BOTTOM_PAD
-  // Capacity from each type's REAL footprint, not a one-size bubble grid: notes render as
-  // small rectangles (W = r*1.55 ≈ 62px, H = r*1.15 ≈ 46px) packed ~5px apart, so counting
-  // them as 98px bubble cells paginated note pages long before they were visually full.
-  // The packer keeps item centers (r + 12) inside each edge (see clampToBounds), so the
-  // usable band is the screen minus that inset on both sides.
-  const EDGE = PAGE_MIN_D / 2 + 12
-  const usablePageW = Math.max(size.width - 2 * EDGE, 1)
-  const usablePageH = Math.max(pageAvailH - 2 * EDGE, 1)
-  const gridCap = (boxW, boxH) =>
-    Math.max(1, Math.floor(usablePageW / boxW)) * Math.max(1, Math.floor(usablePageH / boxH))
-  // Notes: the even-spread grid's true capacity (densest legal pitch incl. float-bob
-  // clearance, minus the cells lost to the + button). No derate needed — the grid
-  // places cells exactly, unlike the old organic packer this formula used to model.
-  const notesPerPage = size.width > 0
-    ? noteGridCapacity(size.width, size.height, SUB_BAR_H, BOTTOM_PAD, noteScale)
-    : 1
-  // Bubbles pack organically (golden-angle spiral + relaxation) into a roughly HEXAGONAL
-  // arrangement at the crowded gap — not the square 98px grid this used to assume, which
-  // under-counted capacity by about 2x and spilled bubbles onto a new page long before
-  // one was full. Estimate from the hex-packing area of the region the packer can place
-  // centers in, bounded by the hex row/column count so narrow pages stay sane. Measured
-  // saturation (first visible overlap) is ~37 bubbles on a 400x780 phone and ~100 on a
-  // 1100x720 desktop; this lands ~20% below that, leaving headroom for the size
-  // variation of content-scaled bubbles.
-  const BUBBLE_PITCH = PAGE_MIN_D + 6
-  const hexRowPitch = BUBBLE_PITCH * Math.sqrt(3) / 2
-  const bubblesPerPage = Math.max(1, Math.min(
-    Math.floor((usablePageW * usablePageH) / (BUBBLE_PITCH * hexRowPitch)),
-    (Math.floor(usablePageW / BUBBLE_PITCH) + 1) * (Math.floor(usablePageH / hexRowPitch) + 1),
-  ))
-  // Blend the two capacities by the current item mix into one count (assignPages is
-  // count-based): pageLoad = how many pages this mix needs; perPage = items per page
-  // at that blended density.
   const noteN = layoutItems.filter(i => i.type === 'note').length
   const bubbleN = layoutItems.length - noteN
-  const pageLoad = noteN / notesPerPage + bubbleN / bubblesPerPage
-  const perPage = Math.max(1, Math.floor(layoutItems.length / Math.max(pageLoad, 0.001)))
+  const { pageLoad, perPage } = pageLoadFor(bubbleN, noteN, size.width, size.height, noteScale)
   const paginated = size.width > 0 && pageLoad > 1
 
   // Single-page organic layout (skipped when paginated — each page lays out its own).
@@ -1897,7 +1965,7 @@ export default function BubbleVisualization({
   // Final safety pass every render: separate any overlapping bubbles (with a small
   // buffer so they never touch) and re-apply the + button barrier and bounds.
   const laidWithOverrides = arrangedAroundBubbles ?? (size.width > 0
-    ? separateOverlaps(laidSettled, size.width, size.height)
+    ? separateOverlaps(laidSettled, size.width, size.height, shouldPinBubbles(laidSettled, anchoredIds.size))
     : laidSettled)
 
   // ── Pagination ────────────────────────────────────────────────────────────────
@@ -2056,9 +2124,10 @@ export default function BubbleVisualization({
     e.stopPropagation()
     e.currentTarget.setPointerCapture?.(e.pointerId)
     const pageItems = pagesRef.current[pageIndexRef.current] || []
-    const hit = pageItems.find(item => item.type === 'note'
-      ? (Math.abs(localX - item.cx) <= item.r * 0.775 && Math.abs(localY - item.cy) <= item.r * 0.575)
-      : Math.hypot(localX - item.cx, localY - item.cy) <= item.r)
+    // Box hit test — every item, note card and bubble alike, is a rectangle on screen.
+    const hit = pageItems.find(item =>
+      Math.abs(localX - item.cx) <= halfWidthOf(item) &&
+      Math.abs(localY - item.cy) <= halfHeightOf(item))
     const st = { mode: 'pending', startX: e.clientX, startY: e.clientY, itemId: hit?.id ?? null, lpTimer: null }
     pagedRef.current = st
     pageX.stop()
@@ -2102,10 +2171,11 @@ export default function BubbleVisualization({
       // Feed the pointer into the RAF physics loop (same as single-page dragging).
       const drag = dragInfoRef.current
       if (!drag) return
+      const dhw = halfWidthOf(drag), dhh = halfHeightOf(drag)
       dragInfoRef.current = {
         ...drag,
-        cx: Math.max(drag.r + 12, Math.min(W - drag.r - 12, localX)),
-        cy: Math.max(SUB_BAR_H + drag.r + 12, Math.min(H - BOTTOM_PAD - drag.r, localY)),
+        cx: Math.max(dhw + 12, Math.min(W - dhw - 12, localX)),
+        cy: Math.max(SUB_BAR_H + dhh + 12, Math.min(H - BOTTOM_PAD - dhh, localY)),
       }
       // Highlight the edge when hovering over one that has an adjacent page to move to.
       const cur = pageIndexRef.current
@@ -2247,15 +2317,10 @@ export default function BubbleVisualization({
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
 
-    // Hit test against current layout positions
-    const hit = laidWithOverridesRef.current.find(item => {
-      if (item.type === 'note') {
-        const r = item.r, W = Math.round(r * 1.55), H = Math.round(r * 1.15)
-        return x >= item.cx - W / 2 && x <= item.cx + W / 2 &&
-               y >= item.cy - H / 2 && y <= item.cy + H / 2
-      }
-      return Math.hypot(x - item.cx, y - item.cy) <= item.r
-    })
+    // Hit test against current layout positions — every item is a rectangle on screen.
+    const hit = laidWithOverridesRef.current.find(item =>
+      Math.abs(x - item.cx) <= halfWidthOf(item) &&
+      Math.abs(y - item.cy) <= halfHeightOf(item))
     if (!hit) return
 
     pendingPointerRef.current = { item: hit, startClientX: e.clientX, startClientY: e.clientY }
@@ -2296,10 +2361,11 @@ export default function BubbleVisualization({
     const { width, height } = sizeRef.current
 
     // Update mutable ref only — RAF loop will pick it up next frame
+    const dhw = halfWidthOf(drag), dhh = halfHeightOf(drag)
     dragInfoRef.current = {
       ...drag,
-      cx: Math.max(drag.r + 12, Math.min(width - drag.r - 12, e.clientX - rect.left)),
-      cy: Math.max(SUB_BAR_H + drag.r + 12, Math.min(height - BOTTOM_PAD - drag.r, e.clientY - rect.top)),
+      cx: Math.max(dhw + 12, Math.min(width - dhw - 12, e.clientX - rect.left)),
+      cy: Math.max(SUB_BAR_H + dhh + 12, Math.min(height - BOTTOM_PAD - dhh, e.clientY - rect.top)),
     }
   }
 
