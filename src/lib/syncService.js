@@ -134,6 +134,23 @@ export async function savePreferencesToCloud(userId, prefs) {
   if (error) throw error
 }
 
+// ── Feedback ──────────────────────────────────────────────────────────────────
+// One insert into the feedback table (see supabase/feedback.sql). Unlike the sync
+// helpers this one does NOT swallow its error: the user pressed Send and is waiting to
+// be told whether it arrived, so a failure has to reach them rather than vanish.
+// userId is null in guest mode — the table accepts anonymous reports.
+
+export async function submitFeedback(userId, message) {
+  const text = (message || '').trim()
+  if (!text) throw new Error('Feedback is empty')
+  const { error } = await supabase.from('feedback').insert({
+    user_id: userId ?? null,
+    message: text.slice(0, 5000),
+    user_agent: typeof navigator === 'undefined' ? null : navigator.userAgent,
+  })
+  if (error) throw error
+}
+
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 export async function loadAllFromCloud(userId) {

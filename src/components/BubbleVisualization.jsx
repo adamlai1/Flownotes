@@ -264,6 +264,16 @@ const NOTE_TO_BUB_R = Math.max(NOTE_HW / BUB_HW, NOTE_HH / BUB_HH)
 const noteRFor = (noteScale) => MIN_BUB_R * noteScale
 const minBubbleRFor = (noteScale) => Math.max(MIN_BUB_R, noteRFor(noteScale) * NOTE_TO_BUB_R)
 
+// The content-scaled bubble radius range for a page of this size, BEFORE the fill-scale:
+// the floor every bubble starts at, and the ceiling the busiest one on the page reaches.
+// These are seed sizes — the cluster is scaled to the page afterwards, so what actually
+// renders can be well outside this range in either direction.
+function bubbleRRange(width, availH, noteScale) {
+  const base = Math.min(width, availH) * 0.4
+  const minR = Math.max(base * 0.15, minBubbleRFor(noteScale))
+  return { minR, maxR: Math.max(Math.min(base * 0.42, 124), minR) }
+}
+
 // Largest bubble radius that still fits the page on both axes. Nothing downstream can
 // place an item bigger than its page: every pass just clamps it against the edges and
 // leaves it overlapping whatever it lands on. So this is a hard ceiling on any size the
@@ -346,8 +356,14 @@ function noteRowXMax(cy, width, height, hw, hh) {
 // over an ~18px sample lattice, run once per fresh page layout.
 // pinnedNoteIds: notes that must not move (user-saved positions) — only free notes
 // redistribute around them and the pinned bubbles.
+//
+// A BUBBLE-ONLY page has no notes to redistribute, so the two rules that exist to protect
+// the cluster from them — pinning the bubbles, and fencing off the cluster's interior —
+// would leave the pass with nothing to do. There, the bubbles ARE the items being spread,
+// and they get the same even coverage the notes get everywhere else.
 function lloydSpread(items, width, height, headerH, bottomPad, pinnedNoteIds = null) {
   const pos = items.map(i => ({ ...i }))
+  const bubblesOnly = !pos.some(p => p.type === 'note')
   const step = 18
   const btnCx = width - 52, btnCy = height - 52
   // Effective claim radius — one scalar per item for the power diagram, sized so each
@@ -361,7 +377,7 @@ function lloydSpread(items, width, height, headerH, bottomPad, pinnedNoteIds = n
   // owned by nobody, so no note's centroid can pull it into the pockets between
   // bubbles. (Bubbles are pinned, so the ellipse is constant across passes.)
   const bubs = pos.filter(p => p.type !== 'note')
-  const eCl = bubs.length > 0 ? clusterEllipse(bubs) : null
+  const eCl = (bubs.length > 0 && !bubblesOnly) ? clusterEllipse(bubs) : null
   for (let t = 0; t < 30; t++) {
     const sx = new Array(pos.length).fill(0)
     const sy = new Array(pos.length).fill(0)
@@ -384,8 +400,9 @@ function lloydSpread(items, width, height, headerH, bottomPad, pinnedNoteIds = n
       if (!sc[k]) continue
       // Bubbles are pinned: they stay in their cluster (centered or saved); only
       // notes redistribute into the space around them — and user-saved notes are
-      // pinned too when pinnedNoteIds is given.
-      if (pos[k].type !== 'note') continue
+      // pinned too when pinnedNoteIds is given. On a bubble-only page there is no
+      // cluster to protect, so the bubbles themselves are what spreads.
+      if (!bubblesOnly && pos[k].type !== 'note') continue
       if (pinnedNoteIds && pinnedNoteIds.has(pos[k].id)) continue
       // Damped move toward the owned-region centroid.
       pos[k].cx += (sx[k] / sc[k] - pos[k].cx) * 0.75
@@ -756,17 +773,26 @@ export const PAGE_FILL = 0.72
 export function pageLoadFor(bubbleN, noteN, width, height, noteScale) {
   if (width <= 0) return { pageLoad: 0, perPage: 1 }
   const pageAvailH = height - SUB_BAR_H - BOTTOM_PAD
-  // The bubble floor rises with the note-size preference (see minBubbleRFor), so the cell
-  // this estimate is built on has to rise with it too — otherwise larger note sizes would
-  // be told more bubbles fit per page than the packer can actually place, and pages would
-  // overfill instead of paginating.
-  const minBubR = minBubbleRFor(noteScale)
-  const minBubD = minBubR * 2
+  // The cell is the bubble FLOOR, and it has to be.
+  //
+  // Sizing it to the biggest bubble a page can hold sounds more honest and is badly
+  // wrong, because a bubble has no fixed size: computeLayout scales the whole cluster to
+  // the page, so the same set of bubbles renders at r 118–298px when three share a page
+  // and r 40–61px when twenty-four do. The biggest bubble is only big when there are few
+  // of them — precisely the case where capacity doesn't bind. A full page converges on
+  // the floor, which is what this measures. (Cell = maxR was tried: iPad capacity fell
+  // from 101 bubbles to 7, paginating pages that render fine as one.)
+  //
+  // The floor rises with the note-size preference (see minBubbleRFor), so the cell rises
+  // with it too — otherwise larger note sizes would be told more bubbles fit than the
+  // packer can place, and pages would overfill instead of paginating.
+  const bubR = minBubbleRFor(noteScale)
+  const bubD = bubR * 2
   // The packer keeps item centers a half-extent + EDGE_INSET inside each edge (see
   // clampToBounds), so the usable band is the screen minus that inset on both sides.
   // Bubbles are wide rectangles, so the horizontal and vertical insets differ.
-  const usablePageW = Math.max(width - 2 * (minBubR * BUB_HW + EDGE_INSET), 1)
-  const usablePageH = Math.max(pageAvailH - 2 * (minBubR * BUB_HH + EDGE_INSET), 1)
+  const usablePageW = Math.max(width - 2 * (bubR * BUB_HW + EDGE_INSET), 1)
+  const usablePageH = Math.max(pageAvailH - 2 * (bubR * BUB_HH + EDGE_INSET), 1)
   // Notes: the even-spread grid's true capacity (densest legal pitch incl. float-bob
   // clearance, minus the cells lost to the + button), held back to PAGE_FILL so the
   // solver always lands on a looser pitch than the densest one and jitterFor has slack
@@ -787,8 +813,8 @@ export function pageLoadFor(bubbleN, noteN, width, height, noteScale) {
   // can place centers in, bounded by the row/column count so narrow pages stay sane.
   // Pagination only triggers on a crowded page, where the packer uses its tightest gap.
   const gap = bubPackGap(Infinity)
-  const cellW = minBubD * BUB_HW + gap
-  const cellH = minBubD * BUB_HH + gap + BUB_FLOAT_PAD
+  const cellW = bubD * BUB_HW + gap
+  const cellH = bubD * BUB_HH + gap + BUB_FLOAT_PAD
   const rawBubblesPerPage = Math.max(1, Math.floor(Math.min(
     (usablePageW * usablePageH) / (cellW * cellH),
     (Math.floor(usablePageW / cellW) + 1) * (Math.floor(usablePageH / cellH) + 1),
@@ -818,11 +844,15 @@ export function pageLoadFor(bubbleN, noteN, width, height, noteScale) {
 const LAYOUT_PENALTY_EPS = 0.5 // sub-pixel float noise is not an overlap
 function layoutPenalty(laid, width, height, headerH, bottomPad) {
   let s = 0
+  const btn = { cx: width - 52, cy: height - 52, r: PLUS_BTN_EXCL_R }
   for (let i = 0; i < laid.length; i++) {
     const p = laid[i]
     const hw = halfWidthOf(p), hh = halfHeightOf(p)
     s += Math.max(0, hw - p.cx) + Math.max(0, p.cx - (width - hw))
       + Math.max(0, headerH + hh - p.cy) + Math.max(0, p.cy - (height - bottomPad - hh))
+    // The + button is as much an obstacle as another item — a candidate that only looks
+    // clean because it parked a bubble under the button is not clean.
+    s += circleBoxPen(btn, p, BTN_ROW_PAD)
     for (let j = i + 1; j < laid.length; j++) {
       const b = laid[j]
       const ox = hw + halfWidthOf(b) - Math.abs(b.cx - p.cx)
@@ -1003,8 +1033,7 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
   // Log-scale bubble sizes by total nested content (notes + descendant bubbles),
   // relative to the busiest bubble in this view.
   const maxContent = Math.max(...bubbleItems.map(i => i.contentCount || 0), 1)
-  const minR = Math.max(base * 0.15, MIN_R)
-  const maxR = Math.max(Math.min(base * 0.42, 124), minR)
+  const { minR, maxR } = bubbleRRange(width, availH, noteScale)
   // Note cards are the user-chosen size (independent of content) — only category
   // bubbles scale by content.
   const noteR = NOTE_R
@@ -1045,9 +1074,19 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
   //     arms without collapsing the even area coverage the spiral is there to provide.
   //   • the radial wobble — a fraction of THIS item's own size rather than a pixel
   //     count, so it stays proportionally the same as the note size grows.
+  //
+  // None of it applies to a BUBBLE-ONLY page. A page holding notes hands its bubbles to
+  // recenterBubbles, which throws this scatter away and re-seeds them as a tight centred
+  // cluster, so the wobble there only ever reaches the notes — and lloydSpread tidies
+  // those. A bubble-only page returns the scatter as its final layout, making it the one
+  // place a wobbled spiral survives to the screen: bubbles landed at odd spacings and
+  // odd angles while the very same bubbles packed neatly the moment a note joined them.
+  // Bubbles pack one way everywhere; the variation stays on the items that get tidied.
+  const hasNotes = items.some(i => i.type === 'note')
   const ANGLE_WOBBLE = 0.5    // radians, ±
   const RADIAL_WOBBLE = 0.45  // ± this fraction of the item's own size scalar
-  const scatterSeed = (wobble) => items.map((item, i) => {
+  const scatterSeed = (amount) => items.map((item, i) => {
+    const wobble = hasNotes ? amount : 0
     const angle = i * GA
       + hash2(seed, 17) * Math.PI * wobble
       + hash2(i, seed) * ANGLE_WOBBLE * wobble
@@ -1145,7 +1184,30 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
     )
   }
 
-  return result
+  // Bubble-only page: same even coverage the notes get, applied to the bubbles.
+  //
+  // The packing above only pushes overlapping boxes apart and then scales the whole
+  // cluster to the page — nothing inside it distributes anything, so the result kept the
+  // spiral's shape: dense in the middle, thinning toward the edges, corners empty. Lloyd
+  // is what the mixed path already uses to spread notes evenly, and it handles the
+  // bubbles' varying sizes natively (bigger items claim more area).
+  //
+  // But Lloyd moves each item to its region's centroid without regard for boxes, and a
+  // bubble's box is large and irregular where a note's is small and uniform, so on a
+  // crowded page it can drive two big bubbles together harder than the separation pass
+  // can pull them apart. So the spread is a candidate, not a conclusion: both are scored
+  // after the same cleanup and the more even one only wins if it is no more overlapped.
+  // Lloyd steers centroids away from the button but knows nothing about the boxes around
+  // them, so it undoes the barrier applied above — re-apply it to the spread candidate
+  // before the separation pass, exactly as the packed one already had it.
+  const spreadPos = lloydSpread(result, width, height, headerH, bottomPad)
+  spreadPos.forEach(item => keepClearOfPlusButton(item, width, height, headerH, height - bottomPad))
+  const packed = separateOverlaps(result, width, height, false)
+  const spread = separateOverlaps(spreadPos, width, height, false)
+  return layoutPenalty(spread, width, height, headerH, bottomPad)
+    <= layoutPenalty(packed, width, height, headerH, bottomPad) + LAYOUT_PENALTY_EPS
+    ? spread
+    : packed
   }
 
   // Take the most varied scatter that costs nothing.
@@ -1167,7 +1229,9 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
   // never place worse than the unvaried layout did.
   let best = scatter(1)
   let bestPenalty = layoutPenalty(best, width, height, headerH, bottomPad)
-  for (const wobble of [0.5, 0]) {
+  // A bubble-only page has no wobble to give back, so the other candidates would be the
+  // identical layout recomputed — don't pay for them.
+  for (const wobble of hasNotes ? [0.5, 0] : []) {
     if (bestPenalty <= LAYOUT_PENALTY_EPS) break
     const candidate = scatter(wobble)
     const penalty = layoutPenalty(candidate, width, height, headerH, bottomPad)
@@ -1198,6 +1262,20 @@ function LockGlyph({ size = 14, color = 'rgba(255,255,255,0.8)', style }) {
     >
       <path strokeLinecap="round" strokeLinejoin="round"
         d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+    </svg>
+  )
+}
+
+// Bin icon for the long-press menu's delete row.
+function TrashGlyph({ size = 14, color = 'currentColor', style }) {
+  return (
+    <svg
+      width={size} height={size} viewBox="0 0 24 24"
+      fill="none" stroke={color} strokeWidth={2.2}
+      style={{ flexShrink: 0, pointerEvents: 'none', ...style }}
+    >
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
     </svg>
   )
 }
@@ -1698,17 +1776,18 @@ function ZoomExpand({ anim, size, onDone }) {
 // Press-and-hold on an item without moving for this long opens its menu. It's
 // deliberately well past the drag threshold (100ms here, 220ms in paged mode): any
 // movement at all cancels the menu and the press stays a drag, so the two gestures
-// never compete.
-const LONG_PRESS_MENU_MS = 500
+// never compete. Raised by half from 500ms — the menu now carries a destructive action,
+// so it should take a deliberate hold to reach rather than a slightly slow tap.
+const LONG_PRESS_MENU_MS = 750
 
 // ─── Long-press item menu ─────────────────────────────────────────────────────
 // Anchored at the press point and clamped to stay on screen. Stops its own pointer
 // events so the canvas's drag handlers underneath don't pick them up.
 
-function LockMenu({ menu, gated, onLock, onClose, width, height }) {
+function LockMenu({ menu, gated, onLock, onDelete, onClose, width, height }) {
   if (!menu) return null
   const MENU_W = 176
-  const MENU_H = 92
+  const MENU_H = 138 // header + two rows
   const x = Math.max(8, Math.min(menu.x, width - MENU_W - 8))
   const y = Math.max(SUB_BAR_H + 8, Math.min(menu.y, height - MENU_H - 8))
   const item = menu.item
@@ -1746,6 +1825,15 @@ function LockMenu({ menu, gated, onLock, onClose, width, height }) {
         >
           <LockGlyph size={15} color="currentColor" />
           {label}
+        </button>
+        <div style={{ height: 1, background: 'var(--border)' }} />
+        <button
+          onClick={e => { e.stopPropagation(); onDelete() }}
+          className="w-full flex items-center gap-2 px-3 py-3 text-sm text-left active:opacity-70"
+          style={{ color: '#f87171' }}
+        >
+          <TrashGlyph size={15} color="currentColor" />
+          Delete
         </button>
       </motion.div>
     </>
@@ -2080,6 +2168,8 @@ export default function BubbleVisualization({
   const [selectMode, setSelectMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState(() => new Set())
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // The single item queued for deletion from its long-press menu (null when none).
+  const [confirmDeleteItem, setConfirmDeleteItem] = useState(null)
   const selectModeRef = useRef(false)
   selectModeRef.current = selectMode
   function toggleSelectItem(id) {
@@ -2101,6 +2191,7 @@ export default function BubbleVisualization({
     setSelectMode(false)
     setSelectedIds(new Set())
     setConfirmDelete(false)
+    setConfirmDeleteItem(null)
   }, [project.id, navStack])
 
   // ── Locking ───────────────────────────────────────────────────────────────────
@@ -2121,6 +2212,17 @@ export default function BubbleVisualization({
     if (!lockIndexRef.current.isGated(item)) return false
     requestUnlock(lockIndexRef.current.gatingIdsFor(item))
     return true
+  }
+
+  // Delete one item from its long-press menu. A locked item asks for the password first:
+  // the lock exists to keep content out of reach, and deleting it from a menu one hold
+  // away would be a way around that, not a shortcut through it.
+  function requestDeleteItem(item) {
+    if (lockIndexRef.current.isGated(item)) {
+      requestUnlock(lockIndexRef.current.gatingIdsFor(item))
+      return
+    }
+    setConfirmDeleteItem(item)
   }
 
   function toggleItemLock(item) {
@@ -3471,6 +3573,7 @@ export default function BubbleVisualization({
             height={size.height}
             onClose={closeLockMenu}
             onLock={() => { closeLockMenu(); toggleItemLock(lockMenu.item) }}
+            onDelete={() => { closeLockMenu(); requestDeleteItem(lockMenu.item) }}
           />
       )}
 
@@ -3500,7 +3603,7 @@ export default function BubbleVisualization({
       <ConfirmDialog
         open={confirmDelete}
         title={`Delete ${selectedIds.size} item${selectedIds.size === 1 ? '' : 's'}?`}
-        message="Selected bubbles delete their notes and sub-bubbles too. This can't be undone."
+        message="Selected bubbles delete their sub-bubbles too. Notes inside move back to the top level. This can't be undone."
         confirmLabel="Delete"
         onCancel={() => setConfirmDelete(false)}
         onConfirm={() => {
@@ -3513,6 +3616,27 @@ export default function BubbleVisualization({
           }
           onDeleteItems?.({ noteIds, bubbleIds })
           exitSelect()
+        }}
+      />
+
+      <ConfirmDialog
+        open={!!confirmDeleteItem}
+        title={confirmDeleteItem?.type === 'note' ? 'Delete note?' : 'Delete bubble?'}
+        // Accurate to what deleteItems actually does: sub-bubbles are removed with the
+        // parent, but its notes are only detached — they reappear at the top level.
+        message={confirmDeleteItem?.type === 'note'
+          ? "This can't be undone."
+          : "Sub-bubbles are deleted too. Notes inside move back to the top level. This can't be undone."}
+        confirmLabel="Delete"
+        onCancel={() => setConfirmDeleteItem(null)}
+        onConfirm={() => {
+          const it = confirmDeleteItem
+          if (it) {
+            onDeleteItems?.(it.type === 'note'
+              ? { noteIds: [it.id], bubbleIds: [] }
+              : { noteIds: [], bubbleIds: [it.id] })
+          }
+          setConfirmDeleteItem(null)
         }}
       />
     </div>

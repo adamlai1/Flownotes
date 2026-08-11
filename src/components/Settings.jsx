@@ -5,6 +5,7 @@ import { usePreferences } from '../contexts/PreferencesContext'
 import { useAuth } from '../contexts/AuthContext'
 import { useLock } from '../contexts/LockContext'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
+import { submitFeedback } from '../lib/syncService'
 import ImportNotes from './ImportNotes'
 
 function Toast({ message }) {
@@ -53,6 +54,10 @@ const Divider = () => (
   <div style={{ height: 1, background: 'var(--border)', marginLeft: 16 }} />
 )
 
+// Matches the server-side clamp in submitFeedback so the counter can't promise room the
+// insert would truncate.
+const FEEDBACK_MAX = 5000
+
 const NOTE_SIZE_OPTIONS = [
   { value: 'small', label: 'Small' },
   { value: 'medium', label: 'Medium' },
@@ -73,6 +78,8 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes 
   const isLight = theme === 'light'
   const [toast, setToast] = useState('')
   const [importOpen, setImportOpen] = useState(false)
+  const [feedback, setFeedback] = useState('')
+  const [sendingFeedback, setSendingFeedback] = useState(false)
   const toastTimer = useState(null)
 
   // Settings only mounts while it's open, so this is unconditional.
@@ -82,6 +89,22 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes 
     setToast(msg)
     if (toastTimer[0]) clearTimeout(toastTimer[0])
     toastTimer[0] = setTimeout(() => setToast(''), 2000)
+  }
+
+  // The box is only cleared once the insert has actually succeeded — a failed send
+  // keeps what was typed, so a flaky connection never eats someone's report.
+  async function sendFeedback() {
+    if (!feedback.trim() || sendingFeedback) return
+    setSendingFeedback(true)
+    try {
+      await submitFeedback(user?.id ?? null, feedback)
+      setFeedback('')
+      showToast('Thanks for the feedback!')
+    } catch {
+      showToast("Couldn't send — try again")
+    } finally {
+      setSendingFeedback(false)
+    }
   }
 
   return (
@@ -360,6 +383,51 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes 
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
                 </svg>
               </button>
+            </Card>
+          </div>
+
+          {/* FEEDBACK */}
+          <div>
+            <SectionHeader label="Feedback" />
+            <Card>
+              <div className="px-4 py-3.5">
+                <div className="mb-3">
+                  <p className="text-sm font-medium" style={{ color: 'var(--text)' }}>Send Feedback</p>
+                  <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                    Bugs, ideas, anything that felt wrong
+                  </p>
+                </div>
+                <textarea
+                  value={feedback}
+                  onChange={e => setFeedback(e.target.value.slice(0, FEEDBACK_MAX))}
+                  placeholder="What's on your mind?"
+                  rows={4}
+                  disabled={sendingFeedback}
+                  className="w-full text-sm rounded-xl px-3 py-2.5 resize-none focus:outline-none"
+                  style={{
+                    background: 'var(--surface)',
+                    border: '1px solid var(--border)',
+                    color: 'var(--text)',
+                  }}
+                />
+                <div className="flex items-center justify-between mt-2.5">
+                  <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                    {feedback.length}/{FEEDBACK_MAX}
+                  </span>
+                  <button
+                    onClick={sendFeedback}
+                    disabled={!feedback.trim() || sendingFeedback}
+                    className="text-[13px] font-medium px-4 py-1.5 rounded-[10px] transition-opacity"
+                    style={{
+                      background: '#6366f1',
+                      color: '#fff',
+                      opacity: (!feedback.trim() || sendingFeedback) ? 0.45 : 1,
+                    }}
+                  >
+                    {sendingFeedback ? 'Sending…' : 'Send'}
+                  </button>
+                </div>
+              </div>
             </Card>
           </div>
 
