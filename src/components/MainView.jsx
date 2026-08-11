@@ -26,6 +26,7 @@ export default function MainView({
   onSetBubbleLocked,
   onCurrentBubbleChange,
   navigateBubbleId,
+  placeBubbleId,
   onRefresh,
   sidebarOpen,
   onToggleSidebar,
@@ -214,6 +215,7 @@ export default function MainView({
           onSetViewMode={onSetViewMode}
           onCurrentBubbleChange={onCurrentBubbleChange}
           navigateToBubbleId={navigateBubbleId}
+          placeBubbleId={placeBubbleId}
           onRefresh={onRefresh}
         />
       ) : (

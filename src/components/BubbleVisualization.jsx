@@ -2248,6 +2248,7 @@ export default function BubbleVisualization({
   onSetViewMode,
   onCurrentBubbleChange,
   navigateToBubbleId,
+  placeBubbleId,
   onRefresh,
 }) {
   const containerRef = useRef(null)
@@ -2774,6 +2775,50 @@ export default function BubbleVisualization({
   useEffect(() => {
     if (pages.length > 0 && pageIndex > pages.length - 1) setPageIndex(pages.length - 1)
   }, [pages.length]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Placing a just-created bubble ─────────────────────────────────────────────
+  //
+  // A bubble made from the + button should land where the user is looking. Without an
+  // assignment it is packed onto the first page with room, which on a multi-page level
+  // is rarely the page on screen — so pin it to the current page, or to the next one
+  // when this page is full, and follow it there so the thing they just named is what
+  // they see. Nothing is written for an unpaginated level: there is only one page, and
+  // the layout already settles a position-less item into a free spot without overlap.
+  //
+  // Runs before paint, so the bubble is never seen on the wrong page first. Guarded by
+  // id, since the command prop stays set until the next bubble is created.
+  //
+  // Assigning and following are two passes: a page that doesn't exist yet is only
+  // brought into being by the assignment, and animateToPage clamps to the pages that
+  // exist when it is called. So the target is parked here and taken on the re-render
+  // the assignment causes — which React runs before paint, this being a layout effect.
+  const placedRef = useRef(null)
+  const followPageRef = useRef(null)
+  useLayoutEffect(() => {
+    if (followPageRef.current != null && followPageRef.current <= pages.length - 1) {
+      const target = followPageRef.current
+      followPageRef.current = null
+      animateToPage(target)
+      return
+    }
+    if (!placeBubbleId || placedRef.current === placeBubbleId) return
+    // Not on this level (they navigated away as it was created) — leave it alone.
+    if (!layoutItems.some(it => it.id === placeBubbleId)) return
+    placedRef.current = placeBubbleId
+    if (!paginated) return
+
+    const from = Math.min(pageIndexRef.current, Math.max(pages.length - 1, 0))
+    // At capacity by the same measure the packer uses for a page's items. Counting
+    // everything, not just bubbles, is the stricter reading: it won't drop a bubble
+    // onto a page already filled edge to edge with notes.
+    const full = (pages[from]?.length ?? 0) >= perPage
+    const target = full ? from + 1 : from
+
+    const nextPages = { ...savedPagesRef.current, [posKey(project.id, currentId, placeBubbleId)]: target }
+    setSavedPages(nextPages)
+    saveSavedPagesMap(project.id, nextPages)
+    if (target !== from) followPageRef.current = target
+  }, [placeBubbleId, layoutItems, paginated, pages, perPage, currentId, project.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Navigation ────────────────────────────────────────────────────────────────
 

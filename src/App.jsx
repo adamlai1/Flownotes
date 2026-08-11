@@ -53,11 +53,17 @@ import MainView from './components/MainView'
 import NoteEditor from './components/NoteEditor'
 import Settings from './components/Settings'
 import Onboarding from './components/Onboarding'
+import CreateBubbleSheet from './components/CreateBubbleSheet'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { PreferencesProvider } from './contexts/PreferencesContext'
 import { LockProvider } from './contexts/LockContext'
 import { useAuth } from './contexts/AuthContext'
 import { useEscapeShortcut } from './lib/escapeStack'
+
+// How long the + button has to be held before it creates a bubble instead of a note.
+// Deliberately the same figure as the bubble view's LONG_PRESS_MENU_MS: the app has one
+// hold gesture, and it should take the same hold everywhere it appears.
+const LONG_PRESS_MS = 750
 
 // ── One-time "leading newline" bug migration ────────────────────────────────
 // The old title/body editor stored a note whose title line was empty as
@@ -175,6 +181,15 @@ export default function App() {
   const [showOnboarding, setShowOnboarding] = useState(() =>
     !localStorage.getItem('hasSeenOnboarding')
   )
+  // Hold the + button → create a bubble instead of a note. See the button below.
+  const [createBubbleOpen, setCreateBubbleOpen] = useState(false)
+  const [sheetFocusNonce, setSheetFocusNonce] = useState(0)
+  const [plusHeld, setPlusHeld] = useState(false)
+  const holdTimerRef = useRef(null)
+  const heldFiredRef = useRef(false)
+  // Id of a bubble just created here, handed to the bubble view to place on the page
+  // the user is looking at. Command prop, like navigateBubbleId.
+  const [placeBubbleId, setPlaceBubbleId] = useState(null)
   const saveTimerRef = useRef(null)
   // Always-current ref so deferred callbacks (debounced saves) never read stale state
   const activeProjectRef = useRef(null)
@@ -761,6 +776,49 @@ export default function App() {
     setNoteStack([note.id])
   }
 
+  // ── + button: tap creates a note, hold creates a bubble ──────────────────────
+  //
+  // The two are mutually exclusive by way of heldFiredRef: once the hold has opened
+  // the sheet, the release that follows — and the click the browser synthesises from
+  // it — is swallowed, so a hold never also leaves a stray empty note behind. The
+  // ref resets on the next press. Keyboard activation reaches onClick with no pointer
+  // sequence at all, which is why the note path lives there and not in onPointerUp.
+  function beginPlusHold() {
+    heldFiredRef.current = false
+    setPlusHeld(true)
+    clearTimeout(holdTimerRef.current)
+    holdTimerRef.current = setTimeout(() => {
+      heldFiredRef.current = true
+      setPlusHeld(false)
+      setCreateBubbleOpen(true)
+    }, LONG_PRESS_MS)
+  }
+
+  function endPlusHold() {
+    clearTimeout(holdTimerRef.current)
+    setPlusHeld(false)
+    // The release is itself a user gesture — the one chance to raise the phone
+    // keyboard for a sheet that was opened from a timer.
+    if (heldFiredRef.current) setSheetFocusNonce(n => n + 1)
+  }
+
+  function cancelPlusHold() {
+    clearTimeout(holdTimerRef.current)
+    setPlusHeld(false)
+  }
+
+  function handlePlusClick() {
+    if (heldFiredRef.current) { heldFiredRef.current = false; return }
+    handleCreateNote()
+  }
+
+  function handleCreateBubble(name, color) {
+    const bubble = { id: generateId(), name, parent_id: currentBubbleId, color }
+    addBubble(bubble)
+    setPlaceBubbleId(bubble.id)
+    setCreateBubbleOpen(false)
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-dvh bg-gray-950">
@@ -836,6 +894,7 @@ export default function App() {
             onSetBubbleLocked={setBubbleLocked}
             onCurrentBubbleChange={setCurrentBubbleId}
             navigateBubbleId={navigateBubbleId}
+            placeBubbleId={placeBubbleId}
             onRefresh={handleRefresh}
             sidebarOpen={sidebarOpen}
             onToggleSidebar={() => setSidebarOpen(o => !o)}
@@ -843,15 +902,41 @@ export default function App() {
         </div>
       </div>
 
-      {/* Floating Create Button */}
+      {/* Floating Create Button — tap for a note, hold for a bubble */}
       <button
-        onClick={handleCreateNote}
+        onClick={handlePlusClick}
+        onPointerDown={beginPlusHold}
+        onPointerUp={endPlusHold}
+        onPointerLeave={cancelPlusHold}
+        onPointerCancel={cancelPlusHold}
+        onContextMenu={e => e.preventDefault()}
         className="flex fixed right-6 w-14 h-14 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full shadow-lg items-center justify-center text-2xl z-40 transition-colors"
-        style={{ bottom: 'calc(1.5rem + env(safe-area-inset-bottom))' }}
-        aria-label="Create note"
+        style={{
+          bottom: 'calc(1.5rem + env(safe-area-inset-bottom))',
+          // Grows while the hold is registering, so a different action is visibly on its
+          // way; snaps back on release or cancel. Slower than the hold itself, so the
+          // growth reads as the gesture filling up rather than a press-down bounce.
+          transform: plusHeld ? 'scale(1.18)' : 'scale(1)',
+          transition: plusHeld
+            ? `transform ${LONG_PRESS_MS}ms cubic-bezier(0.4, 0, 0.6, 1), background-color 0.15s`
+            : 'transform 0.18s ease-out, background-color 0.15s',
+          touchAction: 'manipulation',
+          WebkitTouchCallout: 'none',
+          userSelect: 'none',
+          WebkitUserSelect: 'none',
+        }}
+        aria-label="Create note. Hold to create a bubble."
       >
         +
       </button>
+
+      <CreateBubbleSheet
+        open={createBubbleOpen}
+        parentName={activeProject.bubbles.find(b => b.id === currentBubbleId)?.name ?? null}
+        focusNonce={sheetFocusNonce}
+        onCreate={handleCreateBubble}
+        onCancel={() => setCreateBubbleOpen(false)}
+      />
 
       {/* Settings panel */}
       <AnimatePresence>
