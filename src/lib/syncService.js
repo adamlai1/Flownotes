@@ -1,6 +1,29 @@
 import { supabase } from './supabase'
 import { generateId } from '../utils/helpers'
 
+// The `locked` column on notes/bubbles (supabase/locks.sql) may not exist yet on an
+// account that hasn't run the migration. Rather than break ALL syncing there, detect
+// that specific error and retry once without the column — locks then stay device-local
+// until the migration is run.
+function isMissingColumnError(error, column) {
+  const text = `${error?.message ?? ''} ${error?.details ?? ''} ${error?.hint ?? ''}`
+  return !!error && text.includes(column) &&
+    (error.code === 'PGRST204' || error.code === '42703' || /column/i.test(text))
+}
+
+async function upsertRows(table, rows, onConflict, optionalColumn) {
+  const { error } = await supabase.from(table).upsert(rows, { onConflict })
+  if (!error) return
+  if (optionalColumn && isMissingColumnError(error, optionalColumn)) {
+    console.warn(`[sync] ${table}.${optionalColumn} missing — run supabase/locks.sql. Retrying without it.`)
+    const stripped = rows.map(({ [optionalColumn]: _drop, ...rest }) => rest)
+    const retry = await supabase.from(table).upsert(stripped, { onConflict })
+    if (retry.error) throw retry.error
+    return
+  }
+  throw error
+}
+
 // ── Save functions ─────────────────────────────────────────────────────────────
 
 export async function saveProjectsToCloud(userId, projects) {
@@ -17,9 +40,9 @@ export async function saveBubblesToCloud(userId, projectId, bubbles) {
     id: b.id, project_id: projectId, user_id: userId,
     name: b.name, parent_id: b.parent_id ?? null, color: b.color ?? null,
     position_x: b.position_x ?? null, position_y: b.position_y ?? null,
+    locked: b.locked ?? false,
   }))
-  const { error } = await supabase.from('bubbles').upsert(rows, { onConflict: 'id' })
-  if (error) throw error
+  await upsertRows('bubbles', rows, 'id', 'locked')
 }
 
 export async function saveNotesToCloud(userId, notes) {
@@ -31,9 +54,9 @@ export async function saveNotesToCloud(userId, notes) {
     created_at: n.created_at, updated_at: n.updated_at,
     bubble_ids: n.bubble_ids ?? [], tags: n.tags ?? [],
     pinned: n.pinned ?? false,
+    locked: n.locked ?? false,
   }))
-  const { error } = await supabase.from('notes').upsert(rows, { onConflict: 'id' })
-  if (error) throw error
+  await upsertRows('notes', rows, 'id', 'locked')
 }
 
 export async function saveConnectionsToCloud(userId, notes) {
@@ -91,16 +114,20 @@ export async function saveCustomTagsToCloud(userId, customTagColors, customTagId
 export async function loadPreferencesFromCloud(userId) {
   const { data, error } = await supabase
     .from('user_preferences')
-    .select('note_size')
+    .select('note_size, lock_hash, lock_salt')
     .eq('user_id', userId)
     .maybeSingle()
   if (error) throw error
   return data // null when the user has no saved row yet
 }
 
+// Only the keys present in `prefs` are written, so the lock columns and note_size
+// can be updated independently without clobbering each other.
 export async function savePreferencesToCloud(userId, prefs) {
   const row = { user_id: userId, updated_at: new Date().toISOString() }
   if (prefs.note_size !== undefined) row.note_size = prefs.note_size
+  if (prefs.lock_hash !== undefined) row.lock_hash = prefs.lock_hash
+  if (prefs.lock_salt !== undefined) row.lock_salt = prefs.lock_salt
   const { error } = await supabase
     .from('user_preferences')
     .upsert(row, { onConflict: 'user_id' })
@@ -139,7 +166,10 @@ export async function loadAllFromCloud(userId) {
   const bubbleToProject = {}
   for (const b of bubbles ?? []) {
     if (!bubblesByProject[b.project_id]) bubblesByProject[b.project_id] = []
-    bubblesByProject[b.project_id].push({ id: b.id, name: b.name, parent_id: b.parent_id, color: b.color })
+    bubblesByProject[b.project_id].push({
+      id: b.id, name: b.name, parent_id: b.parent_id, color: b.color,
+      locked: b.locked ?? false,
+    })
     bubbleToProject[b.id] = b.project_id
   }
 
@@ -156,6 +186,7 @@ export async function loadAllFromCloud(userId) {
       id: n.id, content: n.content ?? '',
       created_at: n.created_at, updated_at: n.updated_at,
       bubble_ids: n.bubble_ids ?? [], tags: n.tags ?? [],
+      locked: n.locked ?? false,
       connections: connMap[n.id] ?? [],
     })
   }

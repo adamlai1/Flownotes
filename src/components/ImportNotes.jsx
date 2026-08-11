@@ -2,6 +2,7 @@ import { useState, useRef, useMemo, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
 import { getNoteTitle } from '../utils/helpers'
+import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 
 // ── Text splitting / note building ─────────────────────────────────────────────
 
@@ -217,6 +218,10 @@ export default function ImportNotes({ project, onImportNotes, onClose, showToast
     showToast(`Imported ${count} note${count === 1 ? '' : 's'}`)
     onClose()
   }
+
+  // Escape follows the same path as the header's back button: from the preview it
+  // cancels back to the menu, from the menu it closes the importer.
+  useEscapeLayer(true, () => back(), ESC_LEVEL.panel)
 
   function back() {
     if (stage === 'preview') {

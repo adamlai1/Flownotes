@@ -1,10 +1,18 @@
-import { useState, useEffect, useLayoutEffect, useRef } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react'
 import { flushSync } from 'react-dom'
 import { motion, AnimatePresence, useMotionValue, animate } from 'framer-motion'
 import { getNoteCountForBubble, getBubbleDescendantIds, getNoteTitle, contrastColor } from '../utils/helpers'
+import { buildLockIndex } from '../utils/locks'
+import {
+  fitNameFont, nameBoxHeight,
+  TEXT_PAD, NAME_COUNT_GAP, COUNT_FONT, COUNT_LINE_H,
+  NAME_MAX_FONT, NAME_MIN_FONT, NAME_LINE_H,
+} from '../utils/bubbleText'
 import { TAG_COLORS, ROOT_BUBBLE_ID } from '../data/defaultData'
 import { useTheme } from '../contexts/ThemeContext'
 import { usePreferences, NOTE_SIZE_SCALE } from '../contexts/PreferencesContext'
+import { useLock } from '../contexts/LockContext'
+import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import ConfirmDialog from './ConfirmDialog'
 
 // ─── Position persistence ─────────────────────────────────────────────────────
@@ -79,11 +87,96 @@ function assignPages(items, savedPages, projectId, contextId, perPage) {
   return pageOf
 }
 
+// Re-flow one level's SAVED page assignments against a new per-page capacity.
+//
+// Only saved assignments need this: everything else is packed from scratch by
+// assignPages on the next render, so it already tracks the current capacity. A saved
+// assignment is an absolute page number written when the user dragged an item across a
+// page edge, and it survives a capacity change unchanged — which is exactly what leaves
+// pages overfull after the note size grows, and half-empty after it shrinks.
+//
+// Two rules, applied in order, both keyed off the new capacity:
+//   • Pull forward — the level can only span ceil(total / perPage) pages now, so an
+//     assignment past the last of them is clamped onto it. This is what fills the room
+//     a smaller note size just freed up.
+//   • Spill forward — walking the assignments in page order, an item landing on a page
+//     already holding perPage of them moves to the next page with room, cascading. This
+//     is what empties a page the larger note size just overfilled.
+// Relative order is preserved throughout, so a hand-made arrangement survives the
+// change as far as the new capacity allows.
+export function reflowSavedPages(entries, perPage, totalItems) {
+  const maxPage = Math.max(0, Math.ceil(totalItems / perPage) - 1)
+  const ordered = entries
+    .map(([id, page], i) => ({ id, page: Math.min(Math.max(page, 0), maxPage), i }))
+    .sort((a, b) => a.page - b.page || a.i - b.i)
+  const next = {}
+  const counts = {}
+  for (const { id, page } of ordered) {
+    let p = page
+    while ((counts[p] || 0) >= perPage) p++
+    next[id] = p
+    counts[p] = (counts[p] || 0) + 1
+  }
+  return next
+}
+
+// The items a level holds, by type — the same membership rules the render path uses,
+// but for an arbitrary level rather than the visible one (contextKey is a bubble id, or
+// 'root' for the top level, matching posKey).
+function levelItemCounts(project, contextKey) {
+  const contextId = contextKey === 'root' ? null : contextKey
+  const bubbleN = project.bubbles.filter(b => b.parent_id === contextId).length
+  const noteN = contextId
+    ? project.notes.filter(n => n.bubble_ids.includes(contextId)).length
+    : project.notes.filter(n => n.bubble_ids.length === 0 || n.bubble_ids.includes(ROOT_BUBBLE_ID)).length
+  return { bubbleN, noteN }
+}
+
+// Split a saved-pages/positions key back into its level and item parts, or null if the
+// key doesn't belong to this project. Ids carry no colons, so the first two are ours.
+function splitPosKey(key, projectId) {
+  const prefix = `${projectId}:`
+  if (!key.startsWith(prefix)) return null
+  const rest = key.slice(prefix.length)
+  const cut = rest.indexOf(':')
+  if (cut < 0) return null
+  return { contextKey: rest.slice(0, cut), itemId: rest.slice(cut + 1) }
+}
+
+// ─── Layout randomness ────────────────────────────────────────────────────────
+// Every organic-looking offset below is a pure function of an item's index and its
+// page's seed. It HAS to be: the layout is recomputed from scratch on every render, so
+// a Math.random() would re-roll on each frame and the whole page would shimmer. These
+// are the standard sin-based shader hashes — cheap, and mixed enough between the two
+// inputs that the x and y offsets of one item don't visibly correlate.
+
+// Deterministic pseudo-random in [-1, 1] from a pair of integers.
+function hash2(a, b) {
+  const s = Math.sin(a * 127.1 + b * 311.7) * 43758.5453
+  return (s - Math.floor(s)) * 2 - 1
+}
+
+// FNV-1a over a string → a stable integer, so a level's identity can seed its layout.
+function hashStr(s) {
+  let h = 2166136261
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return h >>> 0
+}
+
+// One seed per (level, page). Pages of the same level get different seeds so they don't
+// all repeat the same silhouette, and different levels differ too — otherwise every
+// bubble you opened showed its notes in the identical arrangement.
+const layoutSeed = (contextId, pageIndex = 0) =>
+  (hashStr(`${contextId ?? 'root'}#${pageIndex}`) % 4096) + 1
+
 // Lay out ONE page's items exactly like the single-page view: organic scatter from
 // computeLayout, overridden by saved positions, new items settled, overlaps cleared.
-function layoutPage(pageItems, savedPositions, projectId, contextId, width, height, noteScale = 1) {
+function layoutPage(pageItems, savedPositions, projectId, contextId, width, height, noteScale = 1, seed = 0) {
   if (width <= 0) return []
-  const laid = computeLayout(pageItems, width, height, SUB_BAR_H, BOTTOM_PAD, noteScale)
+  const laid = computeLayout(pageItems, width, height, SUB_BAR_H, BOTTOM_PAD, noteScale, seed)
   const laidMapped = laid.map(item => {
     const saved = savedPositions[posKey(projectId, contextId, item.id)]
     return saved ? { ...item, cx: saved.xFrac * width, cy: saved.yFrac * height } : item
@@ -475,9 +568,15 @@ function arrangeNotesAroundBubbles(items, anchoredIds, width, height) {
 // cost a whole row or column outright at the larger note sizes, where the boxes are big
 // enough that one row is a big fraction of the page. The reserve is now solved for.
 const NOTE_MARGIN_X = 14, NOTE_MARGIN_Y = 10
-const NOTE_JITTER_X = 12, NOTE_JITTER_Y = 10
+// Jitter ceiling, as a fraction of the card's OWN box rather than a flat pixel count.
+// A flat 12/10px was a third of a small card's width and barely a tenth of a large
+// one's, so the wobble that read as hand-placed at the small size all but vanished as
+// the cards grew — exactly where the grid is most visible, because there are fewer,
+// bigger cards per row. Tied to the box, the offset stays proportionally the same.
+const NOTE_JITTER_FRAC = 0.34
+const noteJitterCap = (f) => ({ x: f.BOX_W * NOTE_JITTER_FRAC, y: f.BOX_H * NOTE_JITTER_FRAC })
 
-function noteGridFrame(width, height, headerH, bottomPad, noteR, resX, resY) {
+export function noteGridFrame(width, height, headerH, bottomPad, noteR, resX, resY) {
   const BOX_W = noteR * 2 * NOTE_HW, BOX_H = noteR * 2 * NOTE_HH
   const mX = NOTE_MARGIN_X + resX + BOX_W / 2
   const mT = headerH + NOTE_MARGIN_Y + resY + BOX_H / 2
@@ -491,19 +590,64 @@ function noteGridFrame(width, height, headerH, bottomPad, noteR, resX, resY) {
 
 // Jitter amplitude for a chosen pitch: whatever slack is left over once the minimum gap
 // is honoured, capped. A grid at its densest legal pitch yields 0 on both axes.
-const jitterFor = (f, cols, rows, pitchX, pitchY) => ({
-  jx: Math.min(Math.max(((cols > 1 ? pitchX - f.BOX_W : f.spanW) - NOTE_GAP_X) / 2, 0), NOTE_JITTER_X),
-  jy: Math.min(Math.max(((rows > 1 ? pitchY - f.BOX_H : f.spanH) - NOTE_GAP_Y) / 2, 0), NOTE_JITTER_Y),
-})
+//
+// Halving the leftover is what makes the offset safe without a collision check: two
+// neighbours can each wobble this far TOWARD each other and still be exactly the minimum
+// gap apart, so no arrangement of offsets can overlap.
+export const jitterFor = (f, cols, rows, pitchX, pitchY) => {
+  const cap = noteJitterCap(f)
+  return {
+    jx: Math.min(Math.max(((cols > 1 ? pitchX - f.BOX_W : f.spanW) - NOTE_GAP_X) / 2, 0), cap.x),
+    jy: Math.min(Math.max(((rows > 1 ? pitchY - f.BOX_H : f.spanH) - NOTE_GAP_Y) / 2, 0), cap.y),
+  }
+}
+
+// The inverse of noteRowXMax: the lowest a note card centred at `cx` may sit and still
+// keep its box clear of the + button. Infinity when the card is far enough left that the
+// button never reaches it. Same circle, same padding — solved for y instead of x.
+function noteCyMaxAt(cx, width, height, noteR) {
+  const hw = noteR * NOTE_HW, hh = noteR * NOTE_HH
+  const btnCx = width - 52, btnCy = height - 52
+  const need = PLUS_BTN_EXCL_R + BTN_ROW_PAD
+  const hGap = Math.max(0, btnCx - (cx + hw))
+  if (hGap >= need) return Infinity
+  return btnCy - hh - Math.sqrt(need * need - hGap * hGap)
+}
+
+// The usable span of ONE row of cells: the frame's own spanW, cut back only where the
+// + button bites into this row. Every consumer — the capacity count, the placement, the
+// pitch — measures the row through this, so there is exactly one usable width in play.
+export function noteRowSpan(f, cy, width, height) {
+  const xMax = noteRowXMax(cy, width, height, f.BOX_W / 2, f.BOX_H / 2)
+  return Math.min(f.spanW, xMax - f.mX)
+}
 
 // Per-row usable right edge: rows level with the + button stop short of its exclusion zone.
-const noteRowXMaxAt = (f, cy, width, height) =>
-  Math.min(width - f.mX, noteRowXMax(cy, width, height, f.BOX_W / 2, f.BOX_H / 2))
+const noteRowXMaxAt = (f, cy, width, height) => f.mX + noteRowSpan(f, cy, width, height)
 
 // How many cells a row can hold at a given pitch, given the + button's bite.
+//
+// The span has to come from the frame (noteRowSpan above) rather than be re-derived by
+// subtracting the margins a second time. This used to compute `(width - mX) - mX` while
+// the pitch it divides by came from the frame's `width - mX * 2` — the same quantity by
+// algebra, but not bit-for-bit, and the frame's was the LARGER of the two. A grid whose
+// columns fit the row exactly then divided out to 1.9999999999999998 instead of 2, floored
+// to 1, and the row was reported one cell short. Every row, on every page: with three
+// columns spanning a phone at the large note size, a third of the page was thrown away,
+// and the solver fell back to two-column grids that visibly wasted the right margin.
+// The epsilon is the other half of the same point — an exact fit must count as fitting.
+const CELL_EPS = 1e-6
+
+// How many cells of size `box` fit across `span` at the minimum `gap`. The span measures
+// CENTER to CENTER (the frame already reserves half a box at each end), so n cells need
+// n-1 pitches. Same epsilon, same reason: an exact fit counts.
+const cellsAcross = (span, box, gap) =>
+  Math.max(1, Math.floor(span / (box + gap) + CELL_EPS) + 1)
+
 function noteRowCap(f, cy, pitchX, width, height) {
-  const rs = noteRowXMaxAt(f, cy, width, height) - f.mX
-  return rs <= 0 ? 0 : Math.floor(rs / Math.max(pitchX, f.BOX_W + NOTE_GAP_X)) + 1
+  const rs = noteRowSpan(f, cy, width, height)
+  if (rs < 0) return 0
+  return Math.floor(rs / Math.max(pitchX, f.BOX_W + NOTE_GAP_X) + CELL_EPS) + 1
 }
 
 // Gap ceiling: a few notes shouldn't be flung to the page corners — beyond this, extra
@@ -514,7 +658,7 @@ const GAP_X_MAX = 48, GAP_Y_MAX = 44
 // to equal on both axes, biased toward the page's aspect so sparse clusters take a fitting
 // shape, honouring the per-axis minimum gaps and the button-reduced row capacities.
 // Everything is evaluated at the CAPPED pitch — that's what actually gets placed.
-function solveNoteGrid(n, width, height, headerH, bottomPad, noteR, resX, resY) {
+export function solveNoteGrid(n, width, height, headerH, bottomPad, noteR, resX, resY) {
   const f = noteGridFrame(width, height, headerH, bottomPad, noteR, resX, resY)
   const { BOX_W, BOX_H, mT, spanW, spanH } = f
   let best = null
@@ -546,7 +690,7 @@ function solveNoteGrid(n, width, height, headerH, bottomPad, noteR, resX, resY) 
     // resolve whatever overlap the surplus items cause. `fits: false` tells the caller
     // the frame couldn't hold n, so it can back off to a roomier one rather than ship
     // notes stacked on top of each other.
-    const cols = Math.max(1, Math.floor(spanW / (BOX_W + NOTE_GAP_X)) + 1)
+    const cols = cellsAcross(spanW, BOX_W, NOTE_GAP_X)
     const rows = Math.ceil(n / cols)
     return {
       f, cols, rows, fits: false,
@@ -566,11 +710,11 @@ function solveNoteGrid(n, width, height, headerH, bottomPad, noteR, resX, resY) 
 // anything the solver would accept, pagination handed a page that many notes, the solver
 // found no legal grid, and the surplus landed in the corner stack. Asking the solver
 // directly is slower — a handful of solves per layout — but it cannot drift.
-function noteGridCapacity(width, height, headerH, bottomPad, noteScale = 1) {
+export function noteGridCapacity(width, height, headerH, bottomPad, noteScale = 1) {
   const noteR = noteRFor(noteScale)
   const f = noteGridFrame(width, height, headerH, bottomPad, noteR, 0, 0)
-  const cols = Math.max(1, Math.floor(f.spanW / (f.BOX_W + NOTE_GAP_X)) + 1)
-  const rows = Math.max(1, Math.floor(f.spanH / (f.BOX_H + NOTE_GAP_Y)) + 1)
+  const cols = cellsAcross(f.spanW, f.BOX_W, NOTE_GAP_X)
+  const rows = cellsAcross(f.spanH, f.BOX_H, NOTE_GAP_Y)
   const fits = (n) => solveNoteGrid(n, width, height, headerH, bottomPad, noteR, 0, 0).fits
   // The grid can never hold more than its own cells, so that bounds the search.
   let lo = 1, hi = Math.max(1, cols * rows)
@@ -584,13 +728,32 @@ function noteGridCapacity(width, height, headerH, bottomPad, noteScale = 1) {
 }
 
 // ── Page capacity ─────────────────────────────────────────────────────────────
+//
+// Pages are deliberately NOT filled to their theoretical maximum. Both layout paths
+// degenerate at 100% fill:
+//
+//   • Notes: jitterFor() returns the leftover pitch above the minimum gap, so a page at
+//     noteGridCapacity() has almost none to spend. Measured across common viewports it
+//     collapses to 0.2–2px on at least one axis (iPad small 0.4/1.7, Pixel 7 medium
+//     7.8/0.2, desktop large 0.3/4.4) — sub-pixel wobble on one axis is what makes the
+//     page read as exact rows or columns. At PAGE_FILL the same viewports get several
+//     px on BOTH axes (8.9/6.3, 7.8/10.0, 11.9/10.0).
+//   • Bubbles: the golden-angle scatter and the separation passes have nothing left to
+//     push into, so items pin against the bounds clamp and settle into tight rows.
+//
+// Holding a page to a fraction of its maximum keeps the pitch above its minimum, which
+// is what leaves jitter and the organic scatter room to work. The cost is more pages
+// with fewer items each — the intended trade. Items are never shrunk to fit more in;
+// the floors (noteRFor / minBubbleRFor) are untouched by any of this.
+export const PAGE_FILL = 0.72
+
 // How many pages a given mix of bubbles and notes needs, and the blended per-page count.
 // Capacity comes from each type's REAL footprint, not a one-size bubble grid: notes render
 // as small rectangles (W = r*1.55 ≈ 62px, H = r*1.15 ≈ 46px) packed ~5px apart, so counting
 // them as 98px bubble cells paginated note pages long before they were visually full.
 // pageLoad > 1 means the mix doesn't fit one screen; perPage is the count assignPages
 // splits on (it is count-based, so the two capacities blend into one number).
-function pageLoadFor(bubbleN, noteN, width, height, noteScale) {
+export function pageLoadFor(bubbleN, noteN, width, height, noteScale) {
   if (width <= 0) return { pageLoad: 0, perPage: 1 }
   const pageAvailH = height - SUB_BAR_H - BOTTOM_PAD
   // The bubble floor rises with the note-size preference (see minBubbleRFor), so the cell
@@ -605,33 +768,72 @@ function pageLoadFor(bubbleN, noteN, width, height, noteScale) {
   const usablePageW = Math.max(width - 2 * (minBubR * BUB_HW + EDGE_INSET), 1)
   const usablePageH = Math.max(pageAvailH - 2 * (minBubR * BUB_HH + EDGE_INSET), 1)
   // Notes: the even-spread grid's true capacity (densest legal pitch incl. float-bob
-  // clearance, minus the cells lost to the + button). No derate needed — the grid
-  // places cells exactly, unlike the old organic packer this formula used to model.
-  const notesPerPage = noteGridCapacity(width, height, SUB_BAR_H, BOTTOM_PAD, noteScale)
+  // clearance, minus the cells lost to the + button), held back to PAGE_FILL so the
+  // solver always lands on a looser pitch than the densest one and jitterFor has slack
+  // to spend. Filling to rawNotesPerPage is precisely the zero-jitter case.
+  const rawNotesPerPage = noteGridCapacity(width, height, SUB_BAR_H, BOTTOM_PAD, noteScale)
+  const notesPerPage = Math.max(1, Math.floor(rawNotesPerPage * PAGE_FILL))
+  // Reported for the capacity log: the one usable width every note count is derived from
+  // (centre-to-centre, i.e. the page minus the header, the edge margin and half a card at
+  // each end), and how many cards fit across it as pure arithmetic. If the placement ever
+  // puts fewer than noteCols in a full row again, these two numbers show it immediately.
+  const noteFrame = noteGridFrame(width, height, SUB_BAR_H, BOTTOM_PAD, noteRFor(noteScale), 0, 0)
+  const usableW = noteFrame.spanW
+  const noteCols = cellsAcross(usableW, noteFrame.BOX_W, NOTE_GAP_X)
+  const noteRows = cellsAcross(noteFrame.spanH, noteFrame.BOX_H, NOTE_GAP_Y)
   // Bubbles are wide rounded rectangles, and the packer separates them by that box — so at
   // the crowded gap they settle into a roughly RECTANGULAR arrangement, not the hexagonal
   // circle packing this used to model. Estimate from the cell area of the region the packer
-  // can place centers in, bounded by the row/column count so narrow pages stay sane, and
-  // derated 20% for the size variation of content-scaled bubbles (the cell is sized for the
-  // minimum bubble, and only the smallest are actually that size). Pagination only triggers
-  // on a crowded page, where the packer uses its tightest gap.
+  // can place centers in, bounded by the row/column count so narrow pages stay sane.
+  // Pagination only triggers on a crowded page, where the packer uses its tightest gap.
   const gap = bubPackGap(Infinity)
   const cellW = minBubD * BUB_HW + gap
   const cellH = minBubD * BUB_HH + gap + BUB_FLOAT_PAD
-  const bubblesPerPage = Math.max(1, Math.floor(0.8 * Math.min(
+  const rawBubblesPerPage = Math.max(1, Math.floor(Math.min(
     (usablePageW * usablePageH) / (cellW * cellH),
     (Math.floor(usablePageW / cellW) + 1) * (Math.floor(usablePageH / cellH) + 1),
   )))
+  // PAGE_FILL also subsumes the 20% derate this used to carry for the size variation of
+  // content-scaled bubbles (the cell is sized for the minimum bubble, and only the
+  // smallest are actually that size) — 0.72 is the stricter of the two.
+  const bubblesPerPage = Math.max(1, Math.floor(rawBubblesPerPage * PAGE_FILL))
   const pageLoad = noteN / notesPerPage + bubbleN / bubblesPerPage
   return {
     pageLoad,
     perPage: Math.max(1, Math.floor((bubbleN + noteN) / Math.max(pageLoad, 0.001))),
     notesPerPage,
     bubblesPerPage,
+    rawNotesPerPage,
+    rawBubblesPerPage,
+    usableW,
+    noteCols,
+    noteRows,
   }
 }
 
-function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteScale = 1) {
+// How wrong a finished layout is, in pixels: how deeply every pair penetrates, plus how
+// far anything hangs off the page. Both are the same unit, so they add. Zero means the
+// layout is clean — nothing overlapping, nothing off-screen — which is the only thing the
+// caller below actually tests for.
+const LAYOUT_PENALTY_EPS = 0.5 // sub-pixel float noise is not an overlap
+function layoutPenalty(laid, width, height, headerH, bottomPad) {
+  let s = 0
+  for (let i = 0; i < laid.length; i++) {
+    const p = laid[i]
+    const hw = halfWidthOf(p), hh = halfHeightOf(p)
+    s += Math.max(0, hw - p.cx) + Math.max(0, p.cx - (width - hw))
+      + Math.max(0, headerH + hh - p.cy) + Math.max(0, p.cy - (height - bottomPad - hh))
+    for (let j = i + 1; j < laid.length; j++) {
+      const b = laid[j]
+      const ox = hw + halfWidthOf(b) - Math.abs(b.cx - p.cx)
+      const oy = hh + halfHeightOf(b) - Math.abs(b.cy - p.cy)
+      if (ox > 0 && oy > 0) s += Math.min(ox, oy)
+    }
+  }
+  return s
+}
+
+export function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteScale = 1, seed = 0) {
   const n = items.length
   if (n === 0) return []
 
@@ -740,16 +942,33 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteSc
       if (k <= 0) continue
       const rowSpan = xMaxAt(cy) - mX
       const pitch = k > 1 ? Math.min(pitchX, rowSpan / (k - 1)) : 0
-      const x0 = k > 1 ? mX + (rowSpan - (k - 1) * pitch) / 2 : mX + rowSpan / 2
+      // Slack is the room the row's block of cells does NOT use. Centering it wastes
+      // that room identically on every row, which is half of why the grid reads as a
+      // grid — the columns line up perfectly all the way down. Sliding each row to its
+      // own hashed offset within its own slack breaks the columns outright, and cannot
+      // overlap anything: the block stays inside the row, and rows never touch (they
+      // are a full pitchY apart). A row packed to capacity has no slack and doesn't move.
+      const slack = k > 1 ? rowSpan - (k - 1) * pitch : 0
+      // The row's OWN pitch, not the frame's, bounds how far its cells may wobble: a
+      // button-shortened row packs tighter than pitchX, and spending the frame's larger
+      // budget there would close the gap past its minimum.
+      const jxRow = k > 1
+        ? Math.min(jx, Math.max((pitch - f.BOX_W - NOTE_GAP_X) / 2, 0))
+        : jx
+      // The slide has to leave the end cards room for their own wobble on top of it,
+      // or the two together walk the last card past the end of the row — and the end of
+      // a bottom row is the + button's exclusion zone, not just empty margin.
+      const phase = hash2(r + 1, seed) * Math.max(slack / 2 - jxRow, 0)
+      const x0 = k > 1 ? mX + slack / 2 + phase : mX + rowSpan / 2
       for (let c = 0; c < k && placed < n; c++) {
-        slots.push({ x: k > 1 ? x0 + c * pitch : x0, y: cy })
+        slots.push({ x: k > 1 ? x0 + c * pitch : x0, y: cy, jx: jxRow })
         placed++
       }
     }
     // True over-capacity leftovers (pagination normally prevents this): drop in and
     // let the caller's separation passes sort them out.
     while (placed < n) {
-      slots.push({ x: mX + (placed % 3) * (f.BOX_W + NOTE_GAP_X), y: mT + spanH / 2 })
+      slots.push({ x: mX + (placed % 3) * (f.BOX_W + NOTE_GAP_X), y: mT + spanH / 2, jx: 0 })
       placed++
     }
     // Cells are built row-major (top-left → bottom-right), but new notes are APPENDED
@@ -759,9 +978,24 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteSc
     // order) and the button-adjacent cell goes to the oldest, stably placed note.
     return items.map((item, i) => {
       const s = slots[slots.length - 1 - i] ?? slots[slots.length - 1]
-      // Deterministic per-index jitter so the layout is stable across renders.
-      const hx = Math.sin(i * 127.1), hy = Math.sin(i * 311.7)
-      return { ...item, cx: s.x + hx * jx, cy: s.y + hy * jy, r: NOTE_R }
+      // Per-item wobble on top of the row's offset. Seeded per page, and the two axes
+      // are hashed from different inputs so a card's horizontal and vertical offsets
+      // don't move together (sin(i·127.1) and sin(i·311.7) drift into step over a long
+      // page, which put diagonal streaks through the wobble).
+      const hx = hash2(i, seed), hy = hash2(i + 4093, seed + 7)
+      const cx = s.x + hx * s.jx
+      // A row's usable width was measured at the row's OWN cy. Wobbling a card downward
+      // moves it to a cy where the + button's exclusion circle reaches further left, so
+      // the bottom-right card could wobble into a zone its row had already cleared.
+      // Cap how far down this card may go, given where it ended up horizontally. The
+      // unjittered cell is always clear (that is what rowSpan guarantees), so the cap
+      // never pulls a card above its own jitter band and into the row overhead.
+      return {
+        ...item,
+        cx,
+        cy: Math.min(s.y + hy * jy, noteCyMaxAt(cx, width, height, NOTE_R)),
+        r: NOTE_R,
+      }
     })
   }
 
@@ -800,9 +1034,25 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteSc
   // The seed is squashed vertically by the bubble aspect as well: every pass below only
   // pushes boxes APART, so a seed spread for round items would leave the now-shorter
   // bubbles with vertical dead air that nothing pulls closed.
-  let pos = items.map((item, i) => {
+  //
+  // The golden angle on its own is too even to look scattered: it is the step that
+  // distributes points as UNIFORMLY as possible, which is precisely the regularity that
+  // survives the relaxation below and reads as rows and columns. Three things break it,
+  // all scaled by `wobble` so the whole scatter can be re-run tamer (see below):
+  //   • startAngle — a per-page phase, so pages of the same level don't repeat one
+  //     silhouette (the spiral is otherwise identical wherever it is drawn).
+  //   • the angular wobble — up to ±0.5 rad on each step, enough to visibly disturb the
+  //     arms without collapsing the even area coverage the spiral is there to provide.
+  //   • the radial wobble — a fraction of THIS item's own size rather than a pixel
+  //     count, so it stays proportionally the same as the note size grows.
+  const ANGLE_WOBBLE = 0.5    // radians, ±
+  const RADIAL_WOBBLE = 0.45  // ± this fraction of the item's own size scalar
+  const scatterSeed = (wobble) => items.map((item, i) => {
     const angle = i * GA
+      + hash2(seed, 17) * Math.PI * wobble
+      + hash2(i, seed) * ANGLE_WOBBLE * wobble
     const dist = base * 0.46 * Math.sqrt(i / (n - 1 || 1))
+      + radii[i] * RADIAL_WOBBLE * wobble * hash2(i + 4093, seed + 7)
     return {
       ...item,
       x: dist * Math.cos(angle) * ellX,
@@ -810,6 +1060,9 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteSc
       r: radii[i],
     }
   })
+
+  const scatter = (wobble) => {
+  let pos = scatterSeed(wobble)
 
   // Pack in layout space. Every pair separates by its rendered box: notes as their card
   // (W = r*1.55, H = r*1.15), bubbles as theirs (W = r*2, H = r*1.33). Packing bubbles by
@@ -893,6 +1146,34 @@ function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteSc
   }
 
   return result
+  }
+
+  // Take the most varied scatter that costs nothing.
+  //
+  // The relaxation inside scatter() separates every pair, but the anisotropic fill-scale
+  // that follows it stretches the two axes by DIFFERENT factors, which can put boxes back
+  // into each other; the screen-space passes then clean up what they can. On a crowded
+  // mixed page they can't always, and which pages come out overlapped turns out to depend
+  // on the seed — measured over ~4000 synthetic pages, wobbling the spiral moved the
+  // overlapping fraction from 6% to 8%. That is a real regression against "items must
+  // never overlap", and it is not fixable by picking smaller constants: even rotating the
+  // spiral by a per-page phase and changing nothing else shifts the same number.
+  //
+  // So the amplitude isn't chosen up front — the page is laid out at full wobble, scored,
+  // and only re-run tamer if that particular page came out overlapping. A page that packs
+  // cleanly (the large majority) keeps the full variation and pays for one extra scoring
+  // pass; a page that doesn't gives the variation back a step at a time rather than
+  // shipping an overlap. The plain golden angle is always the last candidate, so this can
+  // never place worse than the unvaried layout did.
+  let best = scatter(1)
+  let bestPenalty = layoutPenalty(best, width, height, headerH, bottomPad)
+  for (const wobble of [0.5, 0]) {
+    if (bestPenalty <= LAYOUT_PENALTY_EPS) break
+    const candidate = scatter(wobble)
+    const penalty = layoutPenalty(candidate, width, height, headerH, bottomPad)
+    if (penalty < bestPenalty) { best = candidate; bestPenalty = penalty }
+  }
+  return best
 }
 
 // ─── Page transition variants ─────────────────────────────────────────────────
@@ -907,6 +1188,22 @@ const pageVariants = {
     : { opacity: 0, scale: 0.88, transition: { duration: 0.22, ease: 'easeIn' } },
 }
 
+// Small padlock drawn on a locked bubble / note card, above its (withheld) label.
+function LockGlyph({ size = 14, color = 'rgba(255,255,255,0.8)', style }) {
+  return (
+    <svg
+      width={size} height={size} viewBox="0 0 24 24"
+      fill="none" stroke={color} strokeWidth={2.2}
+      style={{ flexShrink: 0, pointerEvents: 'none', ...style }}
+    >
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+    </svg>
+  )
+}
+
+// Bubble name/count type metrics live in utils/bubbleText.js (pure, and tested).
+
 // ─── BubbleCircle ─────────────────────────────────────────────────────────────
 
 function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectable = false, selected = false }) {
@@ -915,40 +1212,61 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectab
   const rgb = hexToRgb(item.color)
   const solidBg = isLight ? solidMutedColor(item.color) : null
   const solidText = isLight ? contrastColor(solidBg) : null
-  const name = item.name || ''
+  // `item.gated` — locked and not unlocked this session. The name and the child/note
+  // counts are both withheld (a count leaks how much is inside).
+  const gated = !!item.gated
+  const name = gated ? 'Locked' : (item.name || '')
 
-  // Count lines ("N bubbles" / "N notes" on separate lines): shrink with the bubble
-  // and hide entirely when it's tiny.
-  const subSize = Math.max(Math.min(item.r * 0.15, 12), 8)
+  // Count line ("N bubbles" / "N notes" on separate lines). Fixed size — it's
+  // secondary information, so it never scales with the name or the bubble.
   const countLines = (item.childBubbleCount > 0 ? 1 : 0) + (item.noteCount > 0 ? 1 : 0)
-  const showSub = countLines > 0 && item.r >= 34
+  const showSub = !gated && countLines > 0 && item.r >= 34
 
   // Rendered box: a wide rounded rectangle, not a circle.
   const W = Math.round(item.r * 2 * BUB_HW)
   const H = Math.round(item.r * 2 * BUB_HH)
 
-  // Horizontal padding inside the bubble so text never touches the edges.
-  const TEXT_PAD = 8 // px each side
+  // Vertical budget: the name is centred, the count hangs directly beneath it, and
+  // both have to live inside H with a little breathing room top and bottom.
+  const lineW = Math.max(W - TEXT_PAD * 2, 1)   // usable width, every line
+  const nameBoxH = nameBoxHeight(H, showSub ? countLines : 0)
 
-  // Font auto-sizing: shrink the font until the WHOLE name fits inside the box — both the
-  // longest word on a full-width line and the total text across the available lines — down
-  // to an 8px floor. Only if it still doesn't fit at 8px is it truncated with an ellipsis.
-  // Never breaks mid-word. Unlike a circle, every line here gets the full width, so there's
-  // no separate "widest line" vs "average line" to reconcile.
-  const CHAR_W = 0.62, LINE_H = 1.2 // conservative glyph width so words aren't clipped
-  const longestWord = name.split(/\s+/).reduce((m, w) => Math.max(m, w.length), 1)
-  const chars = Math.max(name.length, 1)
-  const lineW = Math.max(W - TEXT_PAD * 2, 1)                  // usable width, every line
-  // Reserve room for the count lines (one per non-zero count), which sit directly
-  // below the centered title.
-  const availH = Math.max(H * 0.84 - (showSub ? countLines * subSize * 1.2 + 4 : 0), 1)
-  const baseFont = Math.min(item.r * 0.34, 20)                 // upper bound (short names stay large)
-  const wordFont = lineW / (CHAR_W * longestWord)              // longest word fits one line
-  const areaFont = Math.sqrt((lineW * availH) / (CHAR_W * LINE_H * chars * 1.2)) // whole name fits the area
-  const fontSize = Math.max(Math.min(baseFont, wordFont, areaFont), 8)
+  // Starting size: the largest that the name is *estimated* to fit at. Wrapping is
+  // preferred over shrinking — at each candidate size the name may use as many lines
+  // as the height allows, so the font only drops when even a wrapped name is too tall.
+  // The measured pass below corrects this against the real glyph widths.
+  const estimatedFont = useMemo(
+    () => fitNameFont(name, lineW, nameBoxH),
+    [name, lineW, nameBoxH]
+  )
 
-  // Lines available at this font; text only overflows (→ ellipsis) at the 8px floor.
-  const nameLines = Math.max(1, Math.floor(availH / (fontSize * LINE_H)))
+  const nameRef = useRef(null)
+  const [nameFont, setNameFont] = useState(estimatedFont)
+
+  // Correct the estimate against what the browser actually renders, so a name is only
+  // ever truncated when it genuinely doesn't fit at the floor — not because the glyph
+  // width guess was off. Clamping is lifted for the measurement so scrollHeight
+  // reports the full wrapped height, then restored.
+  useLayoutEffect(() => {
+    const el = nameRef.current
+    if (!el || !name) return
+    const restore = el.style.webkitLineClamp
+    el.style.webkitLineClamp = 'unset'
+    const fits = (px) => {
+      el.style.fontSize = `${px}px`
+      return el.scrollHeight <= nameBoxH + 0.5
+    }
+    let size = Math.min(NAME_MAX_FONT, Math.max(NAME_MIN_FONT, estimatedFont))
+    while (size > NAME_MIN_FONT && !fits(size)) size = Math.max(NAME_MIN_FONT, size - 0.5)
+    while (size < NAME_MAX_FONT && fits(size + 0.5)) size += 0.5
+    el.style.fontSize = ''
+    el.style.webkitLineClamp = restore
+    setNameFont(size)
+  }, [name, lineW, nameBoxH, estimatedFont])
+
+  const fontSize = nameFont
+  // Lines this font may occupy. Text is only ellipsised at the floor.
+  const nameLines = Math.max(1, Math.floor(nameBoxH / (fontSize * NAME_LINE_H)))
 
   const floatAmt = 2.5 + (index % 3) * 1.5
   const floatDuration = 2.6 + (index % 4) * 0.45
@@ -1029,19 +1347,26 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectab
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
+          gap: gated ? Math.max(fontSize * 0.35, 4) : 0,
           textAlign: 'center',
           width: '100%',
           padding: `0 ${TEXT_PAD}px`,
           boxSizing: 'border-box',
           pointerEvents: 'none',
         }}>
-          <span style={{
+          {gated && (
+            <LockGlyph
+              size={Math.max(Math.min(item.r * 0.3, 18), 10)}
+              color={isLight ? solidText : 'rgba(255,255,255,0.85)'}
+            />
+          )}
+          <span ref={nameRef} style={{
             fontSize,
             fontWeight: 600,
             color: isLight ? solidText : 'rgba(255,255,255,0.93)',
             textAlign: 'center',
             textShadow: isLight ? 'none' : '0 1px 4px rgba(0,0,0,0.55)',
-            lineHeight: LINE_H,
+            lineHeight: NAME_LINE_H,
             maxWidth: '100%',
             // Wrap at spaces first (and the font shrinks to fit whole words); if a
             // single word is still too long, break it onto the next line rather than
@@ -1054,7 +1379,7 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectab
             WebkitLineClamp: nameLines,
             WebkitBoxOrient: 'vertical',
           }}>
-            {item.name}
+            {name}
           </span>
           {showSub && (
             <div style={{
@@ -1063,12 +1388,12 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectab
               // Match the title's horizontal padding (aligns with the title content box).
               left: TEXT_PAD,
               right: TEXT_PAD,
-              marginTop: 3,
-              fontSize: subSize,
+              marginTop: NAME_COUNT_GAP,
+              fontSize: COUNT_FONT,
               color: isLight ? (solidText === '#ffffff' ? 'rgba(255,255,255,0.65)' : 'rgba(31,41,55,0.55)') : 'rgba(255,255,255,0.48)',
               fontWeight: 500,
               textAlign: 'center',
-              lineHeight: 1.15,
+              lineHeight: COUNT_LINE_H,
               // Each count on its own line; wrap a long line if needed.
               wordBreak: 'normal',
               overflowWrap: 'anywhere',
@@ -1135,15 +1460,20 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
   const r = item.r
   const W = Math.round(r * 1.55)
   const H = Math.round(r * 1.15)
-  const tagDots = (item.tags || []).map(t => TAG_COLORS[t] || customTagColors[t]).filter(Boolean)
+  // Locked and not unlocked this session: title, body preview and tag dots are all
+  // content, so none of them are drawn — just a padlock and "Locked".
+  const gated = !!item.gated
+  const tagDots = gated
+    ? []
+    : (item.tags || []).map(t => TAG_COLORS[t] || customTagColors[t]).filter(Boolean)
 
   const floatAmt      = 2.5 + (index % 3) * 1.5
   const floatDuration = 2.6 + (index % 4) * 0.45
   const floatDelay    = (index * 0.22) % 3
 
-  const label    = getNoteTitle(item.content) || 'New note'
+  const label    = gated ? 'Locked' : (getNoteTitle(item.content) || 'New note')
   const lines    = (item.content || '').split('\n').filter(l => l.trim())
-  const bodyText = lines.slice(1).join('\n').trim() // content after the first (title) line
+  const bodyText = gated ? '' : lines.slice(1).join('\n').trim() // content after the first (title) line
   const fontSize = Math.max(Math.min(r * 0.17, 13), 8)
   const subSize  = Math.max(Math.min(r * 0.13, 10), 7)
   const iconSize = Math.max(Math.min(r * 0.18, 12), 8)
@@ -1251,6 +1581,13 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
             }
         }
       >
+        {gated && (
+          <LockGlyph
+            size={Math.max(Math.min(r * 0.26, 15), 9)}
+            color={isLight ? solidText : 'rgba(255,255,255,0.85)'}
+            style={{ marginBottom: 2 }}
+          />
+        )}
         <span ref={titleRef} style={{
           fontSize,
           fontWeight: 600,
@@ -1358,6 +1695,63 @@ function ZoomExpand({ anim, size, onDone }) {
 
 // ─── Layout constants & shared helpers ────────────────────────────────────────
 
+// Press-and-hold on an item without moving for this long opens its menu. It's
+// deliberately well past the drag threshold (100ms here, 220ms in paged mode): any
+// movement at all cancels the menu and the press stays a drag, so the two gestures
+// never compete.
+const LONG_PRESS_MENU_MS = 500
+
+// ─── Long-press item menu ─────────────────────────────────────────────────────
+// Anchored at the press point and clamped to stay on screen. Stops its own pointer
+// events so the canvas's drag handlers underneath don't pick them up.
+
+function LockMenu({ menu, gated, onLock, onClose, width, height }) {
+  if (!menu) return null
+  const MENU_W = 176
+  const MENU_H = 92
+  const x = Math.max(8, Math.min(menu.x, width - MENU_W - 8))
+  const y = Math.max(SUB_BAR_H + 8, Math.min(menu.y, height - MENU_H - 8))
+  const item = menu.item
+  const label = gated ? 'Unlock' : item.locked ? 'Remove Lock' : 'Lock'
+
+  return (
+    <>
+      <div
+        className="absolute inset-0 z-40"
+        onPointerDown={e => { e.stopPropagation(); onClose() }}
+        onClick={e => e.stopPropagation()}
+      />
+      <motion.div
+        initial={{ opacity: 0, scale: 0.92 }}
+        animate={{ opacity: 1, scale: 1 }}
+        transition={{ duration: 0.13 }}
+        className="absolute z-50 rounded-xl overflow-hidden shadow-2xl"
+        style={{
+          left: x, top: y, width: MENU_W, transformOrigin: 'top left',
+          background: 'var(--surface-2)', border: '1px solid var(--border)',
+        }}
+        onPointerDown={e => e.stopPropagation()}
+        onPointerUp={e => e.stopPropagation()}
+      >
+        <div
+          className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider truncate"
+          style={{ color: 'var(--text-muted)', borderBottom: '1px solid var(--border)' }}
+        >
+          {gated ? 'Locked' : (item.type === 'note' ? (getNoteTitle(item.content) || 'New note') : item.name)}
+        </div>
+        <button
+          onClick={e => { e.stopPropagation(); onLock() }}
+          className="w-full flex items-center gap-2 px-3 py-3 text-sm text-left active:opacity-70"
+          style={{ color: 'var(--text)' }}
+        >
+          <LockGlyph size={15} color="currentColor" />
+          {label}
+        </button>
+      </motion.div>
+    </>
+  )
+}
+
 const SUB_BAR_H = 52
 const BOTTOM_PAD = 0           // no bottom barrier — bubbles reach the bottom edge
 // Just clear the + button itself: button is 56px (radius 28) + a small ~8px margin.
@@ -1420,7 +1814,7 @@ function shouldPinBubbles(items, anchoredCount) {
     items.some(i => i.type === 'note') && items.some(i => i.type !== 'note')
 }
 
-function separateOverlaps(items, width, height, pinBubbles = false, ellipseOnlyIds = null) {
+export function separateOverlaps(items, width, height, pinBubbles = false, ellipseOnlyIds = null) {
   const BUFFER = 3 // px gap so items never visually touch
   const EPS = 0.25 // sub-pixel tolerance so float noise doesn't spin the loop forever
   const pos = items.map(i => ({ ...i }))
@@ -1663,6 +2057,8 @@ export default function BubbleVisualization({
   project,
   onSelectNote,
   onDeleteItems,
+  onSetNoteLocked,
+  onSetBubbleLocked,
   viewMode,
   onSetViewMode,
   onCurrentBubbleChange,
@@ -1707,6 +2103,38 @@ export default function BubbleVisualization({
     setConfirmDelete(false)
   }, [project.id, navStack])
 
+  // ── Locking ───────────────────────────────────────────────────────────────────
+  // lockMenu: null | { item, x, y } — the long-press menu (see handlePointerDown).
+  const [lockMenu, setLockMenu] = useState(null)
+  const { unlockedIds, ensurePassword, requestUnlock, relockIds } = useLock()
+  const lockIndex = useMemo(
+    () => buildLockIndex(project.bubbles, project.notes, unlockedIds),
+    [project.bubbles, project.notes, unlockedIds]
+  )
+  // Kept in a ref because the pointer handlers run outside the render closure.
+  const lockIndexRef = useRef(lockIndex)
+  lockIndexRef.current = lockIndex
+
+  // Tapping a locked item prompts for the password instead of opening/entering it.
+  // Returns true when the tap was consumed by the prompt.
+  function gateTap(item) {
+    if (!lockIndexRef.current.isGated(item)) return false
+    requestUnlock(lockIndexRef.current.gatingIdsFor(item))
+    return true
+  }
+
+  function toggleItemLock(item) {
+    const setLocked = item.type === 'note' ? onSetNoteLocked : onSetBubbleLocked
+    // Hidden right now (own lock or inherited) → password prompt; visible but locked
+    // → drop the lock; otherwise → lock it.
+    if (lockIndexRef.current.isGated(item)) {
+      requestUnlock(lockIndexRef.current.gatingIdsFor(item))
+      return
+    }
+    if (item.locked) { setLocked?.(item.id, false); return }
+    ensurePassword(() => { relockIds(item.id); setLocked?.(item.id, true) })
+  }
+
   // expandAnim: null | { phase: 'in'|'out', id, cx, cy, r, color }
   const [expandAnim, setExpandAnim] = useState(null)
   const [swipeOffset, setSwipeOffset] = useState(0)
@@ -1734,6 +2162,8 @@ export default function BubbleVisualization({
   const longPressTimerRef = useRef(null)
   const pendingPointerRef = useRef(null) // { item, startClientX, startClientY }
   const dragActivatedRef = useRef(false)
+  const menuTimerRef = useRef(null)      // long-press → item menu
+  const menuOpenedRef = useRef(false)    // swallow the pointer-up that opened the menu
   // ── Paged mode state ──────────────────────────────────────────────────────────
   const [pageIndex, setPageIndex] = useState(0)
   const pageIndexRef = useRef(0)
@@ -1746,9 +2176,37 @@ export default function BubbleVisualization({
   const perPageRef = useRef(1)
   const paginatedRef = useRef(false)
   const pagedRef = useRef(null)       // active paged gesture state
-  // Briefly true after a cross-page move so affected pages animate their re-layout.
+  // Briefly true after a re-layout (a cross-page move, a reorganize, a note-size
+  // change) so items ease to their new size and position instead of snapping.
   const [layoutAnim, setLayoutAnim] = useState(false)
   const layoutAnimTimerRef = useRef(null)
+  const LAYOUT_ANIM_MS = 420
+  function pulseLayoutAnim() {
+    if (layoutAnimTimerRef.current) clearTimeout(layoutAnimTimerRef.current)
+    setLayoutAnim(true)
+    layoutAnimTimerRef.current = setTimeout(() => setLayoutAnim(false), LAYOUT_ANIM_MS)
+  }
+  // The note-size change is the one re-layout that CANNOT be flagged from an effect:
+  // every note's width/height/left/top changes on the render that first sees the new
+  // scale, and a CSS transition only carries a change it is present for. An effect runs
+  // after that commit, so the resize would already have snapped and the transition would
+  // have nothing left to animate. Flipping the flag during render instead puts the
+  // transition and the new geometry in the same commit, which is what the browser needs.
+  // animScale holds the scale currently being animated to (null when settled) rather
+  // than a plain flag, so flipping through the sizes in quick succession restarts the
+  // window on each change instead of letting the first one's timer cut the last short.
+  const noteScaleRef = useRef(noteScale)
+  const [animScale, setAnimScale] = useState(null)
+  if (noteScaleRef.current !== noteScale) {
+    noteScaleRef.current = noteScale
+    setAnimScale(noteScale)
+  }
+  useEffect(() => {
+    if (animScale === null) return
+    const t = setTimeout(() => setAnimScale(null), LAYOUT_ANIM_MS)
+    return () => clearTimeout(t)
+  }, [animScale]) // eslint-disable-line react-hooks/exhaustive-deps
+  const animatingLayout = layoutAnim || animScale !== null
   // Highlights the edge a dragged bubble is hovering over (will move to that page on drop).
   const [edgeGlow, setEdgeGlow] = useState(null) // 'left' | 'right' | null
 
@@ -1811,6 +2269,7 @@ export default function BubbleVisualization({
     return () => {
       if (navTimerRef.current) clearTimeout(navTimerRef.current)
       if (layoutAnimTimerRef.current) clearTimeout(layoutAnimTimerRef.current)
+      if (menuTimerRef.current) clearTimeout(menuTimerRef.current)
     }
   }, [])
 
@@ -1916,12 +2375,19 @@ export default function BubbleVisualization({
       const noteCount = getNoteCountForBubble(project.notes, b.id, project.bubbles)
       const childBubbleCount = project.bubbles.filter(c => c.parent_id === b.id).length
       const descendantBubbleCount = getBubbleDescendantIds(project.bubbles, b.id).length - 1
-      return { ...b, type: 'bubble', noteCount, childBubbleCount, contentCount: noteCount + descendantBubbleCount }
+      return {
+        ...b, type: 'bubble', noteCount, childBubbleCount,
+        contentCount: noteCount + descendantBubbleCount,
+        // `locked` is the item's own flag (spread from b); `gated` is the effective
+        // state including inherited locks and this session's unlocks.
+        gated: lockIndex.gatedBubbleIds.has(b.id),
+      }
     }),
     ...directNotes.map(n => ({
       ...n,
       type: 'note',
       color: '#a5b4fc',
+      gated: lockIndex.gatedNoteIds.has(n.id),
     })),
   ]
 
@@ -1929,12 +2395,15 @@ export default function BubbleVisualization({
   // when paged). More items than fit one screen at the minimum size → paginate.
   const noteN = layoutItems.filter(i => i.type === 'note').length
   const bubbleN = layoutItems.length - noteN
-  const { pageLoad, perPage } = pageLoadFor(bubbleN, noteN, size.width, size.height, noteScale)
+  const {
+    pageLoad, perPage, notesPerPage, bubblesPerPage, rawNotesPerPage, rawBubblesPerPage,
+    usableW, noteCols, noteRows,
+  } = pageLoadFor(bubbleN, noteN, size.width, size.height, noteScale)
   const paginated = size.width > 0 && pageLoad > 1
 
   // Single-page organic layout (skipped when paginated — each page lays out its own).
   const laid = (!paginated && size.width > 0)
-    ? computeLayout(layoutItems, size.width, size.height, SUB_BAR_H, BOTTOM_PAD, noteScale)
+    ? computeLayout(layoutItems, size.width, size.height, SUB_BAR_H, BOTTOM_PAD, noteScale, layoutSeed(currentId))
     : []
 
   // Apply saved positions on top of auto-layout
@@ -1981,9 +2450,113 @@ export default function BubbleVisualization({
     )
     const groups = Array.from({ length: numPages }, () => [])
     for (const it of layoutItems) groups[pageOf[it.id] ?? 0].push(it)
-    pages = groups.map(group => layoutPage(group, savedPositions, project.id, currentId, size.width, size.height, noteScale))
+    pages = groups.map((group, pi) => layoutPage(
+      group, savedPositions, project.id, currentId,
+      size.width, size.height, noteScale, layoutSeed(currentId, pi),
+    ))
   }
   const clampedPageIndex = pages.length > 0 ? Math.min(pageIndex, pages.length - 1) : 0
+
+  // ── Capacity log ──────────────────────────────────────────────────────────────
+  // Reports what each page was allowed to hold vs what it actually got, so the fill
+  // target can be checked against a real device. Keyed on a signature so it prints
+  // once per layout change rather than on every render (drag, theme, selection…).
+  const pageFillSig = size.width > 0
+    ? `${project.id}|${currentId ?? 'root'}|${size.width}x${size.height}|${noteScale}|` +
+      (paginated ? pages.map(p => p.length).join(',') : `single:${layoutItems.length}`)
+    : ''
+  const lastFillLogRef = useRef('')
+  useEffect(() => {
+    if (!pageFillSig || lastFillLogRef.current === pageFillSig) return
+    lastFillLogRef.current = pageFillSig
+    const noteR = noteRFor(noteScale)
+    const cap =
+      `note size ${noteSize} (${noteScale}× → card ${Math.round(noteR * 2 * NOTE_HW)}×` +
+      `${Math.round(noteR * 2 * NOTE_HH)}px, bubble floor r ${Math.round(minBubbleRFor(noteScale))}px) · ` +
+      `usable ${Math.round(usableW ?? 0)}px wide → ${noteCols} across × ${noteRows} down = ` +
+      `${(noteCols ?? 0) * (noteRows ?? 0)} cells · ` +
+      `notes ${notesPerPage}/page (max ${rawNotesPerPage}), bubbles ${bubblesPerPage}/page ` +
+      `(max ${rawBubblesPerPage}), blended perPage ${perPage}`
+    if (!paginated) {
+      console.log(
+        `[bubble-pages] ${currentBubble?.name ?? 'root'}: 1 page (unpaginated), ` +
+        `${layoutItems.length} items (${bubbleN} bubbles + ${noteN} notes) · ${cap} · fill target ${Math.round(PAGE_FILL * 100)}%`
+      )
+      return
+    }
+    const rows = pages.map((p, i) => {
+      const b = p.filter(it => it.type !== 'note').length
+      const nts = p.length - b
+      // Share of the page's real (unfilled) capacity this page is using.
+      const used = rawNotesPerPage > 0 && rawBubblesPerPage > 0
+        ? nts / rawNotesPerPage + b / rawBubblesPerPage
+        : 0
+      return `page ${i}: ${p.length} items (${b} bubbles + ${nts} notes) = ${Math.round(used * 100)}% of max`
+    })
+    console.log(
+      `[bubble-pages] ${currentBubble?.name ?? 'root'}: ${pages.length} pages, ` +
+      `${layoutItems.length} items · ${cap} · fill target ${Math.round(PAGE_FILL * 100)}%\n  ` +
+      rows.join('\n  ')
+    )
+  }, [pageFillSig]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Note-size repagination ────────────────────────────────────────────────────
+  // Page capacity is derived from the user's note size, so changing that setting
+  // changes how much fits on a page — immediately, for every level of the project,
+  // not just the one on screen. Levels with no saved page assignments re-flow for
+  // free (assignPages packs them against the new perPage on the render that follows
+  // this one); the levels handled here are the ones the user has hand-arranged, whose
+  // saved assignments would otherwise pin items to pages that no longer fit them.
+  // See reflowSavedPages for the two rules. Items that land on a different page lose
+  // their saved position too, so they settle into the new page's layout rather than
+  // keeping coordinates chosen on the old one.
+  const reflowedScaleRef = useRef(noteScale)
+  useEffect(() => {
+    if (reflowedScaleRef.current === noteScale) return
+    reflowedScaleRef.current = noteScale
+    const { width: W, height: H } = sizeRef.current
+    if (W <= 0) return
+    // Group this project's saved assignments by level.
+    const levels = new Map() // contextKey → [ [itemId, page], … ]
+    for (const [key, page] of Object.entries(savedPagesRef.current)) {
+      if (!Number.isInteger(page)) continue
+      const parts = splitPosKey(key, project.id)
+      if (!parts) continue
+      if (!levels.has(parts.contextKey)) levels.set(parts.contextKey, [])
+      levels.get(parts.contextKey).push([parts.itemId, page])
+    }
+    const nextPages = { ...savedPagesRef.current }
+    const nextPositions = { ...savedPositionsRef.current }
+    let changed = false
+    for (const [contextKey, entries] of levels) {
+      const { bubbleN, noteN } = levelItemCounts(project, contextKey)
+      const total = bubbleN + noteN
+      if (total === 0) continue
+      const { pageLoad: lvlLoad, perPage: lvlPerPage } =
+        pageLoadFor(bubbleN, noteN, W, H, noteScale)
+      // Unpaginated at this size: the level renders as a single page and its saved
+      // assignments are dormant. Left as they are — if a later size brings pagination
+      // back, this same pass re-flows them then.
+      if (lvlLoad <= 1) continue
+      const reflowed = reflowSavedPages(entries, lvlPerPage, total)
+      for (const [itemId, oldPage] of entries) {
+        if (reflowed[itemId] === oldPage) continue
+        const key = posKey(project.id, contextKey === 'root' ? null : contextKey, itemId)
+        nextPages[key] = reflowed[itemId]
+        delete nextPositions[key]
+        changed = true
+      }
+    }
+    if (!changed) return
+    // Batched with the assignment change, so the items this pass shuffles get their new
+    // positions and the transition in one commit. (The resize itself is already covered
+    // by scaleAnim — this only extends the window to cover the re-flow.)
+    pulseLayoutAnim()
+    setSavedPages(nextPages)
+    setSavedPositions(nextPositions)
+    saveSavedPagesMap(project.id, nextPages)
+    saveSavedPositions(project.id, nextPositions)
+  }, [noteScale]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Keep refs current (used in pointer handlers and RAF loop). In paged mode the
   // "current layout" is the visible page's items (drag physics operate on these).
@@ -2046,30 +2619,50 @@ export default function BubbleVisualization({
     setExpandAnim(null)
   }
 
-  function zoomOut() {
+  // Navigate back to `depth` levels of nesting (0 = the project root) with the
+  // standard zoom-out. The panel shrinks into navStack[depth] — the bubble that was
+  // opened FROM the destination level — whose stored position belongs to that
+  // level's layout. That makes one back step and a multi-level breadcrumb jump the
+  // same animation: the deeper levels in between are simply never drawn.
+  function zoomOutTo(depth) {
     if (expandAnim || navTimerRef.current) return
-    if (navStack.length === 0) return
+    // depth >= navStack.length means the current level (or deeper) — nothing to do.
+    if (depth < 0 || depth >= navStack.length) return
 
-    const lastItem = navStack[navStack.length - 1]
+    const exiting = navStack[depth]
     setNavDir('out')
     // Pop navStack immediately — parent view renders with bubble hidden
-    setNavStack(s => s.slice(0, -1))
+    setNavStack(s => s.slice(0, depth))
     setSwipeOffset(0)
 
-    // Shrink the full-screen view back to the bubble's stored position
-    if (lastItem.cx !== undefined) {
+    // Shrink the full-screen view back to the bubble's stored position. Levels opened
+    // from the sidebar have no recorded geometry, so those fall back to the plain
+    // directional page transition.
+    if (exiting.cx !== undefined) {
       setExpandAnim({
         phase: 'out',
-        id: lastItem.id,
-        cx: lastItem.cx,
-        cy: lastItem.cy,
-        r: lastItem.r,
-        color: lastItem.color,
+        id: exiting.id,
+        cx: exiting.cx,
+        cy: exiting.cy,
+        r: exiting.r,
+        color: exiting.color,
       })
     }
   }
+
+  // The back arrow and the edge-swipe gesture: exactly one level up.
+  function zoomOut() {
+    zoomOutTo(navStack.length - 1)
+  }
   // Keep ref current so the native touch handler can call the latest zoomOut
   zoomOutRef.current = zoomOut
+
+  // Escape inside a nested bubble goes up one level with the same zoom-out. It only
+  // registers while there IS a level to leave, so at the root the press falls through
+  // to whatever else is open (or does nothing).
+  useEscapeLayer(navStack.length > 0, zoomOut, ESC_LEVEL.base)
+  // The long-press menu is drawn over the canvas, so it takes the press first.
+  useEscapeLayer(!!lockMenu, closeLockMenu, ESC_LEVEL.popup)
 
   // ── Reorganize the current level ────────────────────────────────────────────
   // Drop the saved manual positions + page assignments for THIS level only, so it
@@ -2083,16 +2676,14 @@ export default function BubbleVisualization({
     )
     const newPositions = keep(savedPositionsRef.current)
     const newPages = keep(savedPagesRef.current)
-    if (layoutAnimTimerRef.current) clearTimeout(layoutAnimTimerRef.current)
     setSavedPositions(newPositions)
     setSavedPages(newPages)
     setPageIndex(0)
     pageIndexRef.current = 0
     pageX.set(0)
-    setLayoutAnim(true)
     saveSavedPositions(project.id, newPositions)
     saveSavedPagesMap(project.id, newPages)
-    layoutAnimTimerRef.current = setTimeout(() => setLayoutAnim(false), 420)
+    pulseLayoutAnim()
   }
   // Only meaningful when this level has a hand-arranged layout to reset.
   const levelPrefix = `${project.id}:${currentId ?? 'root'}:`
@@ -2113,6 +2704,38 @@ export default function BubbleVisualization({
       el.style.transition = ''; el.style.transform = ''; el.style.zIndex = ''
     })
   }
+
+  // Abandon an in-flight drag without saving. Safe because the menu only opens when
+  // the pointer never moved, so the item is still exactly where it started.
+  function cancelActiveDrag() {
+    if (longPressTimerRef.current) { clearTimeout(longPressTimerRef.current); longPressTimerRef.current = null }
+    if (dragRafRef.current) { cancelAnimationFrame(dragRafRef.current); dragRafRef.current = null }
+    dragActivatedRef.current = false
+    pendingPointerRef.current = null
+    dragInfoRef.current = null
+    resolvedDragPosRef.current = null
+    resolvedAllPosRef.current = []
+    clearAllDragTransforms()
+    setDraggingId(null)
+  }
+
+  function openLockMenu(item, clientX, clientY) {
+    cancelActiveDrag()
+    menuOpenedRef.current = true
+    navigator.vibrate?.(15)
+    const rect = containerRef.current?.getBoundingClientRect()
+    setLockMenu({
+      item,
+      x: clientX - (rect?.left ?? 0),
+      y: clientY - (rect?.top ?? 0),
+    })
+  }
+
+  function closeLockMenu() { setLockMenu(null) }
+
+  // The menu shows a stale snapshot of the item after a lock toggle, so it always
+  // closes on action. Navigating or switching project drops it too.
+  useEffect(() => { setLockMenu(null) }, [project.id, navStack, selectMode])
 
   function onPagedPointerDown(e) {
     if (!paginatedRef.current || expandAnim || navTimerRef.current) return
@@ -2143,16 +2766,34 @@ export default function BubbleVisualization({
         setDraggingId(hit.id)
         dragRafRef.current = requestAnimationFrame(runDragFrame)
       }, 220)
+
+      // Keep holding without moving and the pick-up gives way to the item's menu.
+      const menuX = e.clientX, menuY = e.clientY
+      st.menuTimer = setTimeout(() => {
+        if (pagedRef.current !== st) return
+        st.menuTimer = null
+        if (st.lpTimer) { clearTimeout(st.lpTimer); st.lpTimer = null }
+        st.mode = 'menu'
+        if (st.edgeSide) { st.edgeSide = null; setEdgeGlow(null) }
+        const slot = (pagesRef.current[pageIndexRef.current] || []).find(it => it.id === hit.id) || hit
+        openLockMenu(slot, menuX, menuY)
+      }, LONG_PRESS_MENU_MS)
     }
   }
 
   function onPagedPointerMove(e) {
     const st = pagedRef.current
     if (!st) return
+    if (st.mode === 'menu') return
     const rect = containerRef.current?.getBoundingClientRect()
     if (!rect) return
     const dx = e.clientX - st.startX
     const dy = e.clientY - st.startY
+    // Moved at all → this press is a swipe or a drag, never a menu.
+    if (st.menuTimer && Math.hypot(dx, dy) > 8) {
+      clearTimeout(st.menuTimer)
+      st.menuTimer = null
+    }
     const localX = e.clientX - rect.left
     const localY = e.clientY - rect.top
     const { width: W, height: H } = sizeRef.current
@@ -2190,7 +2831,10 @@ export default function BubbleVisualization({
     if (!st) return
     pagedRef.current = null
     if (st.lpTimer) { clearTimeout(st.lpTimer); st.lpTimer = null }
+    if (st.menuTimer) { clearTimeout(st.menuTimer); st.menuTimer = null }
     if (st.edgeSide) setEdgeGlow(null)
+    // The menu already consumed this press (the drag was cancelled when it opened).
+    if (st.mode === 'menu') { menuOpenedRef.current = false; return }
     const rect = containerRef.current?.getBoundingClientRect()
     const localX = rect ? e.clientX - rect.left : 0
     const dx = e.clientX - st.startX
@@ -2256,6 +2900,7 @@ export default function BubbleVisualization({
       const item = (pagesRef.current[pageIndexRef.current] || []).find(it => it.id === st.itemId)
       if (item) {
         if (selectModeRef.current) toggleSelectItem(item.id)
+        else if (gateTap(item)) { /* locked — password prompt opened instead */ }
         else item.type === 'bubble' ? handleBubbleClick(item) : onSelectNote(item)
       }
     }
@@ -2323,6 +2968,9 @@ export default function BubbleVisualization({
       Math.abs(y - item.cy) <= halfHeightOf(item))
     if (!hit) return
 
+    // Drop any menu timer left over from a previous press (e.g. a second finger).
+    if (menuTimerRef.current) { clearTimeout(menuTimerRef.current); menuTimerRef.current = null }
+
     pendingPointerRef.current = { item: hit, startClientX: e.clientX, startClientY: e.clientY }
     dragActivatedRef.current = false
 
@@ -2338,9 +2986,26 @@ export default function BubbleVisualization({
       setDraggingId(currentHit.id)
       dragRafRef.current = requestAnimationFrame(runDragFrame)
     }, 100)
+
+    // Held in place (never moved) → give up the drag and open the item's menu.
+    const menuX = e.clientX, menuY = e.clientY
+    menuTimerRef.current = setTimeout(() => {
+      menuTimerRef.current = null
+      const currentHit = laidWithOverridesRef.current.find(i => i.id === hit.id) || hit
+      openLockMenu(currentHit, menuX, menuY)
+    }, LONG_PRESS_MENU_MS)
   }
 
   function handlePointerMove(e) {
+    // Any real movement means the press is a drag, not a menu.
+    if (menuTimerRef.current && pendingPointerRef.current) {
+      const mdx = e.clientX - pendingPointerRef.current.startClientX
+      const mdy = e.clientY - pendingPointerRef.current.startClientY
+      if (Math.hypot(mdx, mdy) > 9) {
+        clearTimeout(menuTimerRef.current)
+        menuTimerRef.current = null
+      }
+    }
     // Cancel long press if finger moved significantly before threshold
     if (pendingPointerRef.current && !dragActivatedRef.current) {
       const dx = e.clientX - pendingPointerRef.current.startClientX
@@ -2373,6 +3038,17 @@ export default function BubbleVisualization({
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current)
       longPressTimerRef.current = null
+    }
+    if (menuTimerRef.current) {
+      clearTimeout(menuTimerRef.current)
+      menuTimerRef.current = null
+    }
+    // The press that opened the menu must not also count as a tap.
+    if (menuOpenedRef.current) {
+      menuOpenedRef.current = false
+      pendingPointerRef.current = null
+      dragActivatedRef.current = false
+      return
     }
 
     const wasDrag = dragActivatedRef.current
@@ -2449,6 +3125,8 @@ export default function BubbleVisualization({
       const { item } = pending
       if (selectModeRef.current) {
         toggleSelectItem(item.id)
+      } else if (gateTap(item)) {
+        // Locked — the password prompt takes the tap.
       } else if (item.type === 'bubble') {
         handleBubbleClick(item)
       } else {
@@ -2521,8 +3199,11 @@ export default function BubbleVisualization({
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
           </button>
+          {/* Every breadcrumb segment goes through zoomOutTo, so tapping the parent
+              level animates exactly like the back arrow. The root segment is depth 0;
+              segment i sits at depth i + 1. */}
           <button
-            onClick={() => { setNavDir('out'); setNavStack([]) }}
+            onClick={() => zoomOutTo(0)}
             className={`text-sm transition-colors flex-shrink-0 truncate ${
               navStack.length === 0 ? 'text-white/80 font-semibold' : 'text-white/40 hover:text-white/70'
             }`}
@@ -2534,7 +3215,7 @@ export default function BubbleVisualization({
             <span key={item.id} className="flex items-center gap-0.5 min-w-0">
               <span className="text-white/25 text-xs flex-shrink-0 px-0.5">›</span>
               <button
-                onClick={() => { setNavDir('out'); setNavStack(prev => prev.slice(0, i + 1)) }}
+                onClick={() => zoomOutTo(i + 1)}
                 className={`text-sm transition-colors truncate ${
                   i === navStack.length - 1
                     ? 'text-white/80 font-semibold'
@@ -2690,7 +3371,7 @@ export default function BubbleVisualization({
                               index={i % 6}
                               customTagColors={project.customTagColors || {}}
                               isDragging={draggingId === item.id}
-                              animateLayout={layoutAnim && draggingId !== item.id}
+                              animateLayout={animatingLayout && draggingId !== item.id}
                               selectable={selectMode}
                               selected={selectedIds.has(item.id)}
                             />
@@ -2701,7 +3382,7 @@ export default function BubbleVisualization({
                               index={i % 6}
                               hidden={expandAnim?.id === item.id}
                               isDragging={draggingId === item.id}
-                              animateLayout={layoutAnim && draggingId !== item.id}
+                              animateLayout={animatingLayout && draggingId !== item.id}
                               selectable={selectMode}
                               selected={selectedIds.has(item.id)}
                             />
@@ -2722,6 +3403,7 @@ export default function BubbleVisualization({
                         index={i}
                         customTagColors={project.customTagColors || {}}
                         isDragging={draggingId === item.id}
+                        animateLayout={animatingLayout && draggingId !== item.id}
                         selectable={selectMode}
                         selected={selectedIds.has(item.id)}
                       />
@@ -2732,6 +3414,7 @@ export default function BubbleVisualization({
                         index={i}
                         hidden={expandAnim?.id === item.id}
                         isDragging={draggingId === item.id}
+                        animateLayout={animatingLayout && draggingId !== item.id}
                         selectable={selectMode}
                         selected={selectedIds.has(item.id)}
                       />
@@ -2777,6 +3460,18 @@ export default function BubbleVisualization({
             background: `linear-gradient(to ${edgeGlow === 'left' ? 'right' : 'left'}, rgba(99,102,241,0.45), rgba(99,102,241,0))`,
           }}
         />
+      )}
+
+      {/* ── Long-press item menu (lock / unlock) ──────────────────────────────── */}
+      {lockMenu && (
+          <LockMenu
+            menu={lockMenu}
+            gated={lockIndex.isGated(lockMenu.item)}
+            width={size.width}
+            height={size.height}
+            onClose={closeLockMenu}
+            onLock={() => { closeLockMenu(); toggleItemLock(lockMenu.item) }}
+          />
       )}
 
       {/* ── ZoomExpand — outside swipe wrapper so it covers the header too ───── */}

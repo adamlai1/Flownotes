@@ -1,9 +1,10 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { formatDate, getNoteTitle, contrastColor } from '../utils/helpers'
+import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import { TAG_COLORS } from '../data/defaultData'
 
-export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, onTogglePin, pinned = false, customTagColors = {}, selectMode = false, selected = false, onToggleSelect }) {
+export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, onTogglePin, onToggleLock, locked = false, pinned = false, customTagColors = {}, selectMode = false, selected = false, onToggleSelect }) {
   const [showMenu, setShowMenu] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const title = getNoteTitle(note.content)
@@ -13,12 +14,18 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
     .slice(titleLineIdx + 1)
     .filter(l => l.trim())
     .join(' ')
-  const noteBubbles = bubbles.filter(b => note.bubble_ids.includes(b.id))
+  // `locked` here means "hidden right now" (the note's own lock, or an inherited one
+  // from a locked bubble, that hasn't been unlocked this session). Everything derived
+  // from the note's content is withheld while it's true — title, preview, tags,
+  // bubbles and the connection count would all leak something about the note.
+  const noteBubbles = locked ? [] : bubbles.filter(b => note.bubble_ids.includes(b.id))
   // Count both forward connections (this note → others) and reverse (others → this note)
   const reverseConnectionCount = allNotes
     ? allNotes.filter(n => n.id !== note.id && n.connections.some(c => c.note_id === note.id)).length
     : 0
-  const totalConnectionCount = note.connections.length + reverseConnectionCount
+  const totalConnectionCount = locked ? 0 : note.connections.length + reverseConnectionCount
+
+  useEscapeLayer(showDeleteConfirm, () => setShowDeleteConfirm(false), ESC_LEVEL.modal)
 
   function handleDelete(e) {
     e.stopPropagation()
@@ -81,6 +88,14 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
               {pinned ? 'Unpin' : 'Pin'}
             </button>
             <button
+              onClick={e => { e.stopPropagation(); onToggleLock?.(); setShowMenu(false) }}
+              className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
+            >
+              {/* Hidden (by its own lock or an inherited one) → ask for the password.
+                  Visible but locked → drop the lock. Otherwise → lock it. */}
+              {locked ? 'Unlock' : note.locked ? 'Remove Lock' : 'Lock'}
+            </button>
+            <button
               onClick={handleDelete}
               className="w-full text-left px-3 py-2 text-sm text-red-500 hover:bg-red-950"
             >
@@ -90,9 +105,17 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
         </>
       )}
 
-      {/* Title + body preview */}
+      {/* Title + body preview — replaced by a lock placeholder while hidden */}
       <div className="pr-6">
-        {title ? (
+        {locked ? (
+          <div className="flex items-center gap-1.5">
+            <svg className="w-3.5 h-3.5 flex-shrink-0 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+            <p className="text-sm font-medium text-gray-500 leading-snug">Locked</p>
+          </div>
+        ) : title ? (
           <>
             <p className="text-sm font-medium text-gray-100 truncate leading-snug">{title}</p>
             {bodyPreview && (
@@ -127,7 +150,7 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
       )}
 
       {/* Tags — displayed as hashtags to visually distinguish from bubble pills */}
-      {note.tags.length > 0 && (
+      {!locked && note.tags.length > 0 && (
         <div className="flex flex-wrap gap-2 mt-2">
           {note.tags.map(tag => {
             const color = TAG_COLORS[tag] || customTagColors[tag]

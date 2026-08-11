@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import BubbleTree from './BubbleTree'
 import { BUBBLE_COLORS, CUSTOM_TAG_PALETTE } from '../data/defaultData'
 import { generateId } from '../utils/helpers'
+import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 
 export default function Sidebar({
   open,
@@ -35,6 +36,13 @@ export default function Sidebar({
   const newBubbleInputRef = useRef(null)
   const newTagInputRef = useRef(null)
   const editTagInputRef = useRef(null)
+
+  // Escape closes the sidebar. It registers when the sidebar OPENS, so if it was
+  // opened while inside a nested bubble it sits above the bubble-level handler and
+  // takes the first press; otherwise the level-back below it goes first.
+  useEscapeLayer(open, onClose, ESC_LEVEL.base)
+  // The tag delete confirmation is drawn over the sidebar and outranks it.
+  useEscapeLayer(confirmDeleteTag != null, () => setConfirmDeleteTag(null), ESC_LEVEL.modal)
 
   useEffect(() => {
     if (addingBubble && newBubbleInputRef.current) {

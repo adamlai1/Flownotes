@@ -1,4 +1,5 @@
 import { motion, AnimatePresence } from 'framer-motion'
+import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 
 // Small centered confirm modal. Rendered at the top of the tree by whoever needs it;
 // `open` drives the enter/exit animation. onConfirm/onCancel are always provided.
@@ -10,6 +11,9 @@ export default function ConfirmDialog({
   onConfirm,
   onCancel,
 }) {
+  // Escape cancels the dialog and nothing else — it outranks the view underneath.
+  useEscapeLayer(open, onCancel, ESC_LEVEL.modal)
+
   return (
     <AnimatePresence>
       {open && (

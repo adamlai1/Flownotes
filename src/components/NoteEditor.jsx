@@ -2,6 +2,9 @@ import { useState, useRef, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CONNECTION_TYPES, CUSTOM_TAG_PALETTE, ROOT_BUBBLE_ID } from '../data/defaultData'
 import { getNoteTitle } from '../utils/helpers'
+import { buildLockIndex } from '../utils/locks'
+import { useLock } from '../contexts/LockContext'
+import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 
 
 function formatNoteDate(isoStr) {
@@ -12,6 +15,7 @@ function formatNoteDate(isoStr) {
 
 
 export default function NoteEditor({ note, project, onClose, onUpdateNote, onDeleteNote, onUpdateCustomTagColors, onNavigateToNote, onSwipeProgress, backLabel = 'Notes', zIndex = 50 }) {
+  const { unlockedIds, requestUnlock } = useLock()
   const [isDesktop, setIsDesktop] = useState(() => window.matchMedia('(min-width: 768px)').matches)
   useEffect(() => {
     const mq = window.matchMedia('(min-width: 768px)')
@@ -90,6 +94,13 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     }
     onClose()
   }
+
+  // Escape closes the note the same way the back arrow does — same save, same
+  // slide-back. The body textarea isn't handled here: while it has focus the global
+  // listener just blurs it, so it takes a second press to reach this.
+  useEscapeLayer(true, handleClose, zIndex)
+  // Its own delete confirm sits above it (matching the modal's zIndex + 10).
+  useEscapeLayer(showDeleteConfirm, () => setShowDeleteConfirm(false), zIndex + 10)
 
   function pushHistory(prevText) {
     setPast(p => [...p.slice(-49), prevText])
@@ -274,7 +285,14 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
 
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0
   const displayTitle = getNoteTitle(text) // first non-empty line, for the header label
-  const connectableNotes = project.notes.filter(n => n.id !== note.id)
+  // A locked note's title must not surface through the connections UI either — it's
+  // shown as "Locked" in existing connections, and can't be picked as a new one.
+  const lockIndex = buildLockIndex(project.bubbles, project.notes, unlockedIds)
+  const connectableNotes = project.notes.filter(
+    n => n.id !== note.id && !lockIndex.gatedNoteIds.has(n.id)
+  )
+  const titleOf = (n) =>
+    lockIndex.gatedNoteIds.has(n.id) ? 'Locked' : (getNoteTitle(n.content) || 'Untitled')
   const swipeTransition = swipeRef.current.active
     ? 'none'
     : 'transform 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94)'
@@ -498,7 +516,8 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             {connections.map((conn, idx) => {
               const otherNote = project.notes.find(n => n.id === conn.note_id)
               const thisTitle = getNoteTitle(note.content) || 'Untitled'
-              const otherTitle = otherNote ? (getNoteTitle(otherNote.content) || 'Untitled') : null
+              const otherTitle = otherNote ? titleOf(otherNote) : null
+              const otherLocked = otherNote ? lockIndex.gatedNoteIds.has(otherNote.id) : false
               return (
                 <div key={`fwd-${idx}`} className="flex items-center gap-2 bg-white/6 rounded-lg px-3 py-2 mb-1.5">
                   <div className="flex-1 min-w-0 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-xs">
@@ -506,8 +525,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                     <span className="text-gray-500 italic flex-shrink-0">{conn.relationship_type}</span>
                     {otherNote ? (
                       <button
-                        onClick={() => handleNavigateToConnectedNote(otherNote)}
-                        className="text-indigo-400 hover:text-indigo-300 transition-colors truncate max-w-[120px]"
+                        onClick={() => otherLocked
+                          ? requestUnlock(lockIndex.gatingIdsFor({ ...otherNote, type: 'note' }))
+                          : handleNavigateToConnectedNote(otherNote)}
+                        className={`transition-colors truncate max-w-[120px] ${otherLocked ? 'text-gray-500' : 'text-indigo-400 hover:text-indigo-300'}`}
                       >
                         {otherTitle}
                       </button>
@@ -526,14 +547,17 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
               return n.connections
                 .filter(c => c.note_id === note.id)
                 .map((conn, i) => {
-                  const otherTitle = getNoteTitle(n.content) || 'Untitled'
+                  const otherTitle = titleOf(n)
+                  const otherLocked = lockIndex.gatedNoteIds.has(n.id)
                   const thisTitle = getNoteTitle(note.content) || 'Untitled'
                   return (
                     <div key={`rev-${n.id}-${i}`} className="flex items-center gap-2 bg-white/6 rounded-lg px-3 py-2 mb-1.5">
                       <div className="flex-1 min-w-0 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-xs">
                         <button
-                          onClick={() => handleNavigateToConnectedNote(n)}
-                          className="text-indigo-400 hover:text-indigo-300 transition-colors truncate max-w-[120px]"
+                          onClick={() => otherLocked
+                            ? requestUnlock(lockIndex.gatingIdsFor({ ...n, type: 'note' }))
+                            : handleNavigateToConnectedNote(n)}
+                          className={`transition-colors truncate max-w-[120px] ${otherLocked ? 'text-gray-500' : 'text-indigo-400 hover:text-indigo-300'}`}
                         >
                           {otherTitle}
                         </button>
@@ -555,7 +579,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                   <option value="">Select a note…</option>
                   {connectableNotes.map(n => (
                     <option key={n.id} value={n.id}>
-                      {(getNoteTitle(n.content) || 'Untitled').slice(0, 60)}
+                      {titleOf(n).slice(0, 60)}
                     </option>
                   ))}
                 </select>

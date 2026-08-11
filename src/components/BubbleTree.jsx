@@ -1,7 +1,10 @@
-import { useState, useRef, useEffect, useContext, createContext, Fragment } from 'react'
+import { useState, useRef, useEffect, useMemo, useContext, createContext, Fragment } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { getNoteCountForBubble } from '../utils/helpers'
+import { buildLockIndex } from '../utils/locks'
+import { useLock } from '../contexts/LockContext'
+import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 
 // Shared drag state for the whole tree. Provided by BubbleTree, consumed by every
 // BubbleNode and RootDropZone so they can start drags and render drop indicators.
@@ -18,6 +21,8 @@ function BubbleNode({
   onRenameBubble,
   onDeleteBubble,
   onAddChildBubble,
+  lockIndex,
+  onRequestUnlock,
 }) {
   const [expanded, setExpanded] = useState(true)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -26,11 +31,18 @@ function BubbleNode({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const { draggingId, dropTarget, startDrag } = useContext(DragContext)
   const children = bubbles.filter(b => b.parent_id === bubble.id)
-  const noteCount = getNoteCountForBubble(notes, bubble.id, bubbles)
+  // A locked bubble is hidden here too, or the sidebar would be a way around the
+  // lock: its name, its note count and (by selecting it) its whole contents.
+  const gated = !!lockIndex?.gatedBubbleIds.has(bubble.id)
+  const noteCount = gated ? 0 : getNoteCountForBubble(notes, bubble.id, bubbles)
   const isSelected = activeBubbleId === bubble.id
-  const showChildren = expanded || forceExpandIds.has(bubble.id)
+  // Children of a locked bubble aren't listed at all — even as "Locked" rows they'd
+  // give away how much is nested inside.
+  const showChildren = (expanded || forceExpandIds.has(bubble.id)) && !gated
   const isDragging = draggingId === bubble.id
   const isNestTarget = dropTarget?.kind === 'nest' && dropTarget.id === bubble.id
+
+  useEscapeLayer(showDeleteConfirm, () => setShowDeleteConfirm(false), ESC_LEVEL.modal)
 
   function handleRename() {
     const name = renameValue.trim()
@@ -75,7 +87,7 @@ function BubbleNode({
         </button>
 
         {/* Expand/collapse toggle */}
-        {children.length > 0 ? (
+        {children.length > 0 && !gated ? (
           <button
             onClick={() => setExpanded(e => !e)}
             className="w-4 h-4 flex items-center justify-center text-gray-600 hover:text-gray-400 flex-shrink-0"
@@ -105,16 +117,26 @@ function BubbleNode({
           </div>
         ) : (
           <button
-            onClick={() => onSelectBubble(bubble.id)}
+            onClick={() => gated ? onRequestUnlock?.(bubble) : onSelectBubble(bubble.id)}
             className={`flex-1 flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-sm transition-colors text-left min-w-0 ${
               isSelected ? 'bg-indigo-950 text-indigo-400 font-medium' : 'text-gray-300 hover:bg-gray-800'
             }`}
           >
             <span
               className="w-2.5 h-2.5 rounded-full flex-shrink-0"
-              style={{ backgroundColor: bubble.color }}
+              style={{ backgroundColor: gated ? 'var(--text-faint)' : bubble.color }}
             />
-            <span className="truncate">{bubble.name}</span>
+            {gated ? (
+              <>
+                <svg className="w-3 h-3 flex-shrink-0 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+                <span className="truncate text-gray-500">Locked</span>
+              </>
+            ) : (
+              <span className="truncate">{bubble.name}</span>
+            )}
             <span className="ml-auto text-xs text-gray-400 flex-shrink-0">{noteCount || ''}</span>
           </button>
         )}
@@ -137,6 +159,17 @@ function BubbleNode({
           <>
             <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
             <div className="absolute right-0 top-full mt-0.5 flex flex-col bg-gray-900 rounded-lg shadow-lg border border-gray-800 z-20 py-1 min-w-[130px]">
+              {gated ? (
+                /* Add child / Rename are withheld while locked — the rename field
+                   would put the hidden name straight back on screen. */
+                <button
+                  onClick={() => { onRequestUnlock?.(bubble); setMenuOpen(false) }}
+                  className="text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
+                >
+                  Unlock
+                </button>
+              ) : (
+                <>
               <button
                 onClick={() => { onAddChildBubble(bubble.id); setMenuOpen(false) }}
                 className="text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
@@ -149,6 +182,8 @@ function BubbleNode({
               >
                 Rename
               </button>
+                </>
+              )}
               <button
                 onClick={() => { handleDelete(); setMenuOpen(false) }}
                 className="text-left px-3 py-2 text-sm text-red-500 hover:bg-red-950"
@@ -175,6 +210,8 @@ function BubbleNode({
               onRenameBubble={onRenameBubble}
               onDeleteBubble={onDeleteBubble}
               onAddChildBubble={onAddChildBubble}
+              lockIndex={lockIndex}
+              onRequestUnlock={onRequestUnlock}
             />
           ))}
         </div>
@@ -283,6 +320,15 @@ export default function BubbleTree({
 }) {
   const rootBubbles = bubbles.filter(b => b.parent_id === parentId)
   const forceExpandIds = getAncestorIds(bubbles, activeBubbleId)
+  const { unlockedIds, requestUnlock } = useLock()
+  const lockIndex = useMemo(
+    () => buildLockIndex(bubbles, notes, unlockedIds),
+    [bubbles, notes, unlockedIds]
+  )
+  // Unlocking from the sidebar reveals the bubble in place; it doesn't navigate.
+  function handleRequestUnlock(bubble) {
+    requestUnlock(lockIndex.gatingIdsFor({ ...bubble, type: 'bubble' }))
+  }
 
   // drag = { id, name, color, x, y } while a drag is in progress, else null.
   const [drag, setDrag] = useState(null)
@@ -394,6 +440,8 @@ export default function BubbleTree({
               onRenameBubble={onRenameBubble}
               onDeleteBubble={onDeleteBubble}
               onAddChildBubble={onAddChildBubble}
+              lockIndex={lockIndex}
+              onRequestUnlock={handleRequestUnlock}
             />
             <RootDropZone zoneId={String(i + 1)} />
           </Fragment>

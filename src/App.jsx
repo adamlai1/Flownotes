@@ -55,7 +55,9 @@ import Settings from './components/Settings'
 import Onboarding from './components/Onboarding'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { PreferencesProvider } from './contexts/PreferencesContext'
+import { LockProvider } from './contexts/LockContext'
 import { useAuth } from './contexts/AuthContext'
+import { useEscapeShortcut } from './lib/escapeStack'
 
 // ── One-time "leading newline" bug migration ────────────────────────────────
 // The old title/body editor stored a note whose title line was empty as
@@ -138,6 +140,8 @@ function LoginScreen() {
 
 export default function App() {
   const { user, loading, guestMode } = useAuth()
+  // Single Escape listener for the whole app; layers register themselves.
+  useEscapeShortcut()
   // 'offline' = we have unsent work and no connection; it's a normal resting state,
   // not a failure, so it reads differently from 'error' in the UI.
   const [syncStatus, setSyncStatus] = useState('idle') // 'idle' | 'syncing' | 'synced' | 'error' | 'offline'
@@ -523,6 +527,7 @@ export default function App() {
       bubble_ids: noteData.bubble_ids || [],
       tags: noteData.tags || [],
       connections: [],
+      locked: false,
     }
     const updated = { ...activeProject, notes: [note, ...activeProject.notes] }
     updateProject(updated)
@@ -539,6 +544,58 @@ export default function App() {
       ),
     }
     updateProject(updated)
+  }
+
+  // ── Locking ─────────────────────────────────────────────────────────────────
+  // `locked` is a UI gate only: the content is still stored (and synced) in plain
+  // text exactly like an unlocked item — see src/utils/locks.js. Locking a bubble
+  // hides everything inside it via inheritance, so children keep their own flags
+  // untouched and reappear as they were when the parent is unlocked.
+  //
+  // Deliberately not routed through updateNote(): a lock isn't an edit, so it
+  // shouldn't bump updated_at and reshuffle the "Recently edited" sort.
+  function setNoteLocked(noteId, locked) {
+    const current = activeProjectRef.current
+    updateProject({
+      ...current,
+      notes: current.notes.map(n => n.id === noteId ? { ...n, locked } : n),
+    })
+  }
+
+  function setBubbleLocked(bubbleId, locked) {
+    const current = activeProjectRef.current
+    updateProject({
+      ...current,
+      bubbles: current.bubbles.map(b => b.id === bubbleId ? { ...b, locked } : b),
+    })
+  }
+
+  // Clear every lock in every project — used when the password is removed, since
+  // locked items would otherwise stay hidden with no password left to reveal them.
+  function clearAllLocks() {
+    // A queued debounced save still holds the pre-clear project; let it fire and it
+    // would write the locked flags straight back.
+    cancelPendingSaves()
+    const uid = userRef.current?.id
+    let touchedAny = false
+    for (const meta of projectList) {
+      const project = meta.id === activeProjectRef.current?.id
+        ? activeProjectRef.current
+        : loadProject(meta.id)
+      if (!project) continue
+      const notes = (project.notes ?? []).map(n => n.locked ? { ...n, locked: false } : n)
+      const bubbles = (project.bubbles ?? []).map(b => b.locked ? { ...b, locked: false } : b)
+      const changed =
+        notes.some((n, i) => n !== project.notes[i]) ||
+        bubbles.some((b, i) => b !== project.bubbles[i])
+      if (!changed) continue
+      touchedAny = true
+      const updated = { ...project, notes, bubbles }
+      saveProject(updated)
+      if (activeProjectRef.current?.id === updated.id) setActiveProject(updated)
+      if (uid) markProjectDirty(uid, updated.id)
+    }
+    if (uid && touchedAny) runFlush()
   }
 
   function deleteNote(noteId) {
@@ -725,6 +782,7 @@ export default function App() {
   return (
     <ThemeProvider>
     <PreferencesProvider>
+    <LockProvider onRemoveAllLocks={clearAllLocks}>
     <div className="flex flex-col h-dvh overflow-hidden" style={{ background: 'var(--bg)' }}>
       <TopNav
         projectList={projectList}
@@ -774,6 +832,8 @@ export default function App() {
             onSelectNote={openNote}
             onDeleteNote={deleteNote}
             onDeleteItems={deleteItems}
+            onSetNoteLocked={setNoteLocked}
+            onSetBubbleLocked={setBubbleLocked}
             onCurrentBubbleChange={setCurrentBubbleId}
             navigateBubbleId={navigateBubbleId}
             onRefresh={handleRefresh}
@@ -843,6 +903,7 @@ export default function App() {
         )}
       </AnimatePresence>
     </div>
+    </LockProvider>
     </PreferencesProvider>
     </ThemeProvider>
   )

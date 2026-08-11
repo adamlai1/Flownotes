@@ -3,6 +3,8 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { useTheme } from '../contexts/ThemeContext'
 import { usePreferences } from '../contexts/PreferencesContext'
 import { useAuth } from '../contexts/AuthContext'
+import { useLock } from '../contexts/LockContext'
+import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import ImportNotes from './ImportNotes'
 
 function Toast({ message }) {
@@ -61,10 +63,20 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes 
   const { theme, toggleTheme } = useTheme()
   const { noteSize, setNoteSize } = usePreferences()
   const { user, guestMode, signInWithGoogle, signOut } = useAuth()
+  const {
+    hasPassword,
+    requestCreatePassword,
+    requestChangePassword,
+    requestRemovePassword,
+    requestUnlockAll,
+  } = useLock()
   const isLight = theme === 'light'
   const [toast, setToast] = useState('')
   const [importOpen, setImportOpen] = useState(false)
   const toastTimer = useState(null)
+
+  // Settings only mounts while it's open, so this is unconditional.
+  useEscapeLayer(true, onClose, ESC_LEVEL.settings)
 
   function showToast(msg) {
     setToast(msg)
@@ -215,6 +227,69 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes 
                 </button>
               )}
             </Card>
+          </div>
+
+          {/* PRIVACY */}
+          <div>
+            <SectionHeader label="Privacy" />
+            <Card>
+              <button
+                onClick={() => hasPassword
+                  ? requestChangePassword(() => showToast('Password changed'))
+                  : requestCreatePassword(() => showToast('Lock password set'))}
+                className="w-full flex items-center justify-between px-4 py-3.5 active:opacity-70 transition-opacity"
+              >
+                <div className="text-left">
+                  <p className="text-sm font-medium" style={{ color: 'var(--text)' }}>
+                    {hasPassword ? 'Change Lock Password' : 'Set Lock Password'}
+                  </p>
+                  <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                    {hasPassword
+                      ? 'Requires your current password'
+                      : 'Hide bubbles and notes behind a password'}
+                  </p>
+                </div>
+                <svg className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--text-muted)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                </svg>
+              </button>
+
+              {hasPassword && (
+                <>
+                  <Divider />
+                  <button
+                    onClick={() => requestUnlockAll(() => showToast('Everything unlocked for this session'))}
+                    className="w-full flex items-center justify-between px-4 py-3.5 active:opacity-70 transition-opacity"
+                  >
+                    <div className="text-left">
+                      <p className="text-sm font-medium" style={{ color: 'var(--text)' }}>Unlock All</p>
+                      <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                        Reveal everything until the app is closed
+                      </p>
+                    </div>
+                    <svg className="w-4 h-4 flex-shrink-0" style={{ color: 'var(--text-muted)' }} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                    </svg>
+                  </button>
+                  <Divider />
+                  <button
+                    onClick={() => requestRemovePassword(() => showToast('Lock password removed'))}
+                    className="w-full flex items-center px-4 py-3.5 active:opacity-70 transition-opacity"
+                  >
+                    <div className="text-left">
+                      <p className="text-sm font-medium text-red-400">Remove Lock Password</p>
+                      <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                        Unlocks every locked bubble and note
+                      </p>
+                    </div>
+                  </button>
+                </>
+              )}
+            </Card>
+            <p className="text-[11px] mt-2 px-1 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
+              Locking hides items in the app. It isn't encryption — locked notes are
+              still stored normally on this device and in your account.
+            </p>
           </div>
 
           {/* AI FEATURES */}

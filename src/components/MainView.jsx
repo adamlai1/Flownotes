@@ -3,6 +3,9 @@ import NoteCard from './NoteCard'
 import BubbleVisualization from './BubbleVisualization'
 import ConfirmDialog from './ConfirmDialog'
 import { formatDateGroup } from '../utils/helpers'
+import { buildLockIndex } from '../utils/locks'
+import { useLock } from '../contexts/LockContext'
+import { useEscapeInput } from '../lib/escapeStack'
 import { TAG_COLORS } from '../data/defaultData'
 
 const SORT_MODES = [
@@ -19,15 +22,46 @@ export default function MainView({
   onSelectNote,
   onDeleteNote,
   onDeleteItems,
+  onSetNoteLocked,
+  onSetBubbleLocked,
   onCurrentBubbleChange,
   navigateBubbleId,
   onRefresh,
   sidebarOpen,
   onToggleSidebar,
 }) {
+  const { unlockedIds, ensurePassword, requestUnlock, relockIds } = useLock()
+  const lockIndex = useMemo(
+    () => buildLockIndex(project.bubbles, project.notes, unlockedIds),
+    [project.bubbles, project.notes, unlockedIds]
+  )
+
+  // A locked note opens the password prompt instead of the editor.
+  function handleSelectNote(note) {
+    if (lockIndex.gatedNoteIds.has(note.id)) {
+      requestUnlock(lockIndex.gatingIdsFor({ ...note, type: 'note' }))
+      return
+    }
+    onSelectNote(note)
+  }
+
+  // Menu action. Locking needs a password to exist first; unlocking a note that's
+  // currently hidden goes through the prompt, and one that's already revealed this
+  // session can have its lock removed outright.
+  function handleToggleLock(note) {
+    // Hidden right now (own lock or inherited from a locked bubble) → password prompt.
+    if (lockIndex.gatedNoteIds.has(note.id)) {
+      requestUnlock(lockIndex.gatingIdsFor({ ...note, type: 'note' }))
+      return
+    }
+    if (note.locked) { onSetNoteLocked?.(note.id, false); return }
+    ensurePassword(() => { relockIds(note.id); onSetNoteLocked?.(note.id, true) })
+  }
+
   const [activeBubbleId, setActiveBubbleId] = useState('')
   const [activeTag, setActiveTag] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
+  const searchInputRef = useRef(null)
   const [sortMode, setSortMode] = useState(() => localStorage.getItem('mindmap-sort') || 'newest')
   const [showSortMenu, setShowSortMenu] = useState(false)
   const sortMenuRef = useRef(null)
@@ -35,6 +69,13 @@ export default function MainView({
   const [selectMode, setSelectMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState(() => new Set())
   const [confirmDelete, setConfirmDelete] = useState(false)
+
+  // Escape in the search box clears the query first; once it's empty it just gives up
+  // focus, so a further press can reach the view underneath.
+  useEscapeInput(searchInputRef, () => {
+    if (searchQuery) setSearchQuery('')
+    else searchInputRef.current?.blur()
+  })
 
   function toggleSelect(id) {
     setSelectedIds(prev => {
@@ -112,8 +153,12 @@ export default function MainView({
   const searchedNotes = useMemo(() => {
     const q = searchQuery.trim().toLowerCase()
     if (!q) return sortedNotes
-    return sortedNotes.filter(note => note.content.toLowerCase().includes(q))
-  }, [sortedNotes, searchQuery])
+    // Locked notes are excluded from search rather than matched: a hit would reveal
+    // that hidden content contains the query, which is exactly what the lock hides.
+    return sortedNotes.filter(note =>
+      !lockIndex.gatedNoteIds.has(note.id) && note.content.toLowerCase().includes(q)
+    )
+  }, [sortedNotes, searchQuery, lockIndex])
 
   const hasFilters = activeBubbleId !== '' || activeTag !== '' || searchQuery.trim() !== ''
 
@@ -163,6 +208,8 @@ export default function MainView({
           project={project}
           onSelectNote={onSelectNote}
           onDeleteItems={onDeleteItems}
+          onSetNoteLocked={onSetNoteLocked}
+          onSetBubbleLocked={onSetBubbleLocked}
           viewMode={viewMode}
           onSetViewMode={onSetViewMode}
           onCurrentBubbleChange={onCurrentBubbleChange}
@@ -330,6 +377,7 @@ export default function MainView({
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
               </svg>
               <input
+                ref={searchInputRef}
                 type="text"
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
@@ -479,9 +527,11 @@ export default function MainView({
                       note={note}
                       bubbles={project.bubbles}
                       allNotes={project.notes}
-                      onClick={() => onSelectNote(note)}
+                      onClick={() => handleSelectNote(note)}
                       onDelete={() => onDeleteNote(note.id)}
                       onTogglePin={() => togglePin(note.id)}
+                      onToggleLock={() => handleToggleLock(note)}
+                      locked={lockIndex.gatedNoteIds.has(note.id)}
                       pinned
                       customTagColors={project.customTagColors || {}}
                       selectMode={selectMode}
@@ -505,9 +555,11 @@ export default function MainView({
                       note={note}
                       bubbles={project.bubbles}
                       allNotes={project.notes}
-                      onClick={() => onSelectNote(note)}
+                      onClick={() => handleSelectNote(note)}
                       onDelete={() => onDeleteNote(note.id)}
                       onTogglePin={() => togglePin(note.id)}
+                      onToggleLock={() => handleToggleLock(note)}
+                      locked={lockIndex.gatedNoteIds.has(note.id)}
                       pinned={pinnedIds.has(note.id)}
                       customTagColors={project.customTagColors || {}}
                       selectMode={selectMode}
