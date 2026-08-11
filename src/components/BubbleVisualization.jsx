@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useRef, useMemo } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, createContext, useContext } from 'react'
 import { flushSync } from 'react-dom'
 import { motion, AnimatePresence, useMotionValue, animate } from 'framer-motion'
 import { getNoteCountForBubble, getBubbleDescendantIds, getNoteTitle, contrastColor } from '../utils/helpers'
@@ -1282,6 +1282,42 @@ function TrashGlyph({ size = 14, color = 'currentColor', style }) {
 
 // Bubble name/count type metrics live in utils/bubbleText.js (pure, and tested).
 
+// ─── Shared name size ─────────────────────────────────────────────────────────
+//
+// A dozen names each at their own best size makes a page look like a ransom note, so
+// the bubbles on one screen all render at the same size: the smallest that any of them
+// needed. Each bubble still works out its own fit — the size at which its name stays on
+// one line — and reports it here; the scope hands back the minimum of the reports.
+//
+// One scope covers the whole level, pages included. Scoping it per page instead looks
+// right on a desktop — which is wide enough that a level rarely paginates at all, so
+// there is only ever one page — but on a phone the same level splits across pages, and
+// a name that had to shrink on page 1 left the same-sized name on page 2 rendering
+// larger. The pages are one screenful of content that happens to swipe, so they share
+// a size. Only bubbles report: note cards size their text by their own rules.
+const BubbleNameFontContext = createContext(null)
+
+function BubbleNameFontScope({ children }) {
+  const [minFont, setMinFont] = useState(null)
+  const fits = useRef(new Map())
+
+  // Stable across renders: the measuring effect depends on it, and an identity that
+  // changed with `minFont` would re-run every measurement each time the shared size
+  // moved — which is what the measurement decides in the first place.
+  const report = useCallback((id, size) => {
+    if (size == null) {
+      if (!fits.current.delete(id)) return
+    } else {
+      if (fits.current.get(id) === size) return
+      fits.current.set(id, size)
+    }
+    setMinFont(fits.current.size ? Math.min(...fits.current.values()) : null)
+  }, [])
+
+  const value = useMemo(() => ({ minFont, report }), [minFont, report])
+  return <BubbleNameFontContext.Provider value={value}>{children}</BubbleNameFontContext.Provider>
+}
+
 // ─── BubbleCircle ─────────────────────────────────────────────────────────────
 
 function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectable = false, selected = false }) {
@@ -1309,10 +1345,17 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectab
   const lineW = Math.max(W - TEXT_PAD * 2, 1)   // usable width, every line
   const nameBoxH = nameBoxHeight(H, showSub ? countLines : 0)
 
-  // Starting size: the largest that the name is *estimated* to fit at. Wrapping is
-  // preferred over shrinking — at each candidate size the name may use as many lines
-  // as the height allows, so the font only drops when even a wrapped name is too tall.
-  // The measured pass below corrects this against the real glyph widths.
+  // Width the name itself gets, which on a gated bubble is what the lock glyph and its
+  // gap leave of the line. The gap is figured at the cap rather than the current size so
+  // this doesn't move with the very font size it's used to choose.
+  const measureW = Math.max(
+    lineW - (gated ? Math.max(Math.min(item.r * 0.3, 18), 10) + Math.max(NAME_MAX_FONT * 0.35, 4) : 0),
+    1,
+  )
+
+  // Starting size: the largest the name is *estimated* to fit at on a single line,
+  // shrinking rather than wrapping to get there. The measured pass below corrects it
+  // against the real glyph widths.
   const estimatedFont = useMemo(
     () => fitNameFont(name, lineW, nameBoxH),
     [name, lineW, nameBoxH]
@@ -1320,29 +1363,79 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectab
 
   const nameRef = useRef(null)
   const [nameFont, setNameFont] = useState(estimatedFont)
+  const shared = useContext(BubbleNameFontContext)
+  const reportFit = shared?.report
 
   // Correct the estimate against what the browser actually renders, so a name is only
-  // ever truncated when it genuinely doesn't fit at the floor — not because the glyph
-  // width guess was off. Clamping is lifted for the measurement so scrollHeight
-  // reports the full wrapped height, then restored.
+  // ever wrapped or truncated when it genuinely doesn't fit at the floor — not because
+  // the glyph width guess was off.
+  //
+  // One line is the goal, so what's tested at each size is the thing itself — does the
+  // name render on a single line — rather than a width model of it. Predicting the line
+  // from measured text width failed twice over (scrollWidth on a -webkit-box reports the
+  // padding box, and any client rect is scaled by the bubble's mount/drag transform while
+  // the layout width it'd be compared against isn't), and both failures read as "fits at
+  // any size". scrollHeight has neither problem: it's layout, so no transform, and with
+  // the clamp lifted it counts every line the name really took.
   useLayoutEffect(() => {
     const el = nameRef.current
     if (!el || !name) return
-    const restore = el.style.webkitLineClamp
+    const restoreClamp = el.style.webkitLineClamp
+    const restoreWidth = el.style.width
+    const restoreMaxWidth = el.style.maxWidth
+    // Put back the size React wrote, not the empty string: clearing the property leaves
+    // React believing it is still set, so it skips the DOM write whenever the size it
+    // renders next is the one it last wrote — and the name is left with no font-size at
+    // all, at the browser's 16px. It bites exactly the bubble whose own fit is the
+    // shared minimum, since that is the one whose value never changes.
+    const restoreFont = el.style.fontSize
     el.style.webkitLineClamp = 'unset'
-    const fits = (px) => {
-      el.style.fontSize = `${px}px`
-      return el.scrollHeight <= nameBoxH + 0.5
-    }
-    let size = Math.min(NAME_MAX_FONT, Math.max(NAME_MIN_FONT, estimatedFont))
-    while (size > NAME_MIN_FONT && !fits(size)) size = Math.max(NAME_MIN_FONT, size - 0.5)
-    while (size < NAME_MAX_FONT && fits(size + 0.5)) size += 0.5
-    el.style.fontSize = ''
-    el.style.webkitLineClamp = restore
-    setNameFont(size)
-  }, [name, lineW, nameBoxH, estimatedFont])
 
-  const fontSize = nameFont
+    // Measure against the box the bubble is settling INTO, not the one it has right
+    // now. The wrapper CSS-transitions its width over 350ms whenever a page re-layouts,
+    // so this effect runs mid-animation, and a name measured against the old, wider box
+    // comes back as fitting on one line and then wraps once the box finishes shrinking.
+    // maxWidth has to go with it, or it clamps the forced width back to the animating
+    // container. Wide enough desktop bubbles hid this: there, both widths fit.
+    el.style.maxWidth = 'none'
+    el.style.width = `${measureW}px`
+
+    const heightAt = (px) => { el.style.fontSize = `${px}px`; return el.scrollHeight }
+    // scrollHeight is rounded, so one line is told from two by the halfway mark rather
+    // than an exact match. A line that doesn't fit the height budget doesn't count.
+    const oneLineAt = (px) =>
+      px * NAME_LINE_H <= nameBoxH + 0.5 && heightAt(px) < px * NAME_LINE_H * 1.5
+
+    const seed = Math.min(NAME_MAX_FONT, Math.max(NAME_MIN_FONT, estimatedFont))
+    let size = seed
+    // Down to the floor if that's what one line takes, then back up to the largest size
+    // that still holds it.
+    while (size > NAME_MIN_FONT && !oneLineAt(size)) size = Math.max(NAME_MIN_FONT, size - 0.5)
+    if (oneLineAt(size)) {
+      while (size < NAME_MAX_FONT && oneLineAt(size + 0.5)) size += 0.5
+    } else {
+      // Not even the floor keeps it on one line — wrap, at the largest size that fits.
+      const fits = (px) => heightAt(px) <= nameBoxH + 0.5
+      size = seed
+      while (size > NAME_MIN_FONT && !fits(size)) size = Math.max(NAME_MIN_FONT, size - 0.5)
+      while (size < NAME_MAX_FONT && fits(size + 0.5)) size += 0.5
+    }
+
+    el.style.fontSize = restoreFont
+    el.style.width = restoreWidth
+    el.style.maxWidth = restoreMaxWidth
+    el.style.webkitLineClamp = restoreClamp
+    setNameFont(size)
+    reportFit?.(item.id, size)
+  }, [name, measureW, nameBoxH, estimatedFont, reportFit, item.id])
+
+  // Withdraw from the screen's minimum on the way out, so a bubble that has been
+  // deleted, filtered away or swiped past can't hold every other title small.
+  useEffect(() => () => reportFit?.(item.id, null), [reportFit, item.id])
+
+  // The screen's shared size, which is the smallest fit on it — never larger than this
+  // bubble's own fit, so a name that fitted on one line still does.
+  const fontSize = shared?.minFont ?? nameFont
   // Lines this font may occupy. Text is only ellipsised at the floor.
   const nameLines = Math.max(1, Math.floor(nameBoxH / (fontSize * NAME_LINE_H)))
 
@@ -1446,9 +1539,9 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectab
             textShadow: isLight ? 'none' : '0 1px 4px rgba(0,0,0,0.55)',
             lineHeight: NAME_LINE_H,
             maxWidth: '100%',
-            // Wrap at spaces first (and the font shrinks to fit whole words); if a
-            // single word is still too long, break it onto the next line rather than
-            // letting it overflow/clip. Ellipsis only if it still can't fit.
+            // The font is sized to hold the name on one line, so this is the fallback
+            // for a name too long for the bubble at the floor: wrap at spaces, and
+            // break mid-word rather than overflow. Ellipsis only if it still can't fit.
             wordBreak: 'normal',
             overflowWrap: 'anywhere',
             overflow: 'hidden',
@@ -1467,7 +1560,11 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectab
               left: TEXT_PAD,
               right: TEXT_PAD,
               marginTop: NAME_COUNT_GAP,
-              fontSize: COUNT_FONT,
+              // Fixed, except that it never outgrows the name above it: a long name in a
+              // small bubble can be sized down past COUNT_FONT, and a count bigger than
+              // the title it belongs to reads as the more important of the two. The
+              // height budget still reserves COUNT_FONT, so this only ever frees space.
+              fontSize: Math.min(COUNT_FONT, fontSize),
               color: isLight ? (solidText === '#ffffff' ? 'rgba(255,255,255,0.65)' : 'rgba(31,41,55,0.55)') : 'rgba(255,255,255,0.48)',
               fontWeight: 500,
               textAlign: 'center',
@@ -3463,6 +3560,7 @@ export default function BubbleVisualization({
                   onPointerCancel={onPagedPointerUp}
                 >
                   <motion.div style={{ x: pageX, display: 'flex', height: '100%', width: pages.length * size.width }}>
+                    <BubbleNameFontScope>
                     {pages.map((pageItems, pi) => (
                       <div key={pi} style={{ position: 'relative', width: size.width, height: '100%', flexShrink: 0 }}>
                         {pageItems.map((item, i) =>
@@ -3492,10 +3590,14 @@ export default function BubbleVisualization({
                         )}
                       </div>
                     ))}
+                    </BubbleNameFontScope>
                   </motion.div>
                 </div>
               ) : (
                 /* ── Single-page organic layout (free drag + saved positions) ──── */
+                /* The scope wraps AnimatePresence rather than sitting inside it: its
+                   children have to stay the motion elements for exit to be tracked. */
+                <BubbleNameFontScope>
                 <AnimatePresence>
                   {laidWithOverrides.map((item, i) =>
                     item.type === 'note' ? (
@@ -3523,6 +3625,7 @@ export default function BubbleVisualization({
                     )
                   )}
                 </AnimatePresence>
+                </BubbleNameFontScope>
               )}
             </div>
           </motion.div>
