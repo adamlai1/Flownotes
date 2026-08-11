@@ -135,6 +135,13 @@ export async function savePreferencesToCloud(userId, prefs) {
 }
 
 // ── Feedback ──────────────────────────────────────────────────────────────────
+//
+// __APP_VERSION__ is package.json's version, substituted as a literal by Vite at build
+// time (see vite.config.js). The fallback covers anything that evaluates this module
+// outside a Vite build — the test harnesses bundle straight through esbuild, where the
+// define doesn't exist and a bare reference would throw a ReferenceError on import.
+const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : null
+
 // One insert into the feedback table (see supabase/feedback.sql). Unlike the sync
 // helpers this one does NOT swallow its error: the user pressed Send and is waiting to
 // be told whether it arrived, so a failure has to reach them rather than vanish.
@@ -147,6 +154,7 @@ export async function submitFeedback(userId, message) {
     user_id: userId ?? null,
     message: text.slice(0, 5000),
     user_agent: typeof navigator === 'undefined' ? null : navigator.userAgent,
+    app_version: APP_VERSION,
   })
   if (error) throw error
 }

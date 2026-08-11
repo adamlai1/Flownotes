@@ -13,6 +13,17 @@ create table if not exists public.feedback (
 
 create index if not exists feedback_created_at_idx on public.feedback (created_at desc);
 
+-- RLS decides WHICH rows a role may write; it does not grant the right to write at all.
+-- Without this the anon role fails with "permission denied for table feedback" before
+-- the policy below is ever evaluated. Supabase's default privileges usually cover new
+-- public tables, but that depends on the project, so state it outright.
+--
+-- INSERT only, deliberately: submitFeedback calls .insert() with no .select() chained,
+-- which supabase-js v2 sends as `Prefer: return=minimal`. Nothing is read back, so no
+-- SELECT grant is needed — and withholding it is what keeps one user's feedback from
+-- being readable by another. Read the table from the dashboard, which bypasses RLS.
+grant insert on public.feedback to anon, authenticated;
+
 alter table public.feedback enable row level security;
 
 -- Anyone using the app may leave feedback, signed in or not (guest mode has no user).

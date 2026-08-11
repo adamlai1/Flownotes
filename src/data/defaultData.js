@@ -2,13 +2,8 @@ import { generateId } from '../utils/helpers'
 
 const ideasId = generateId()
 const ideasSelfId = generateId()
-const ideasOtherId = generateId()
-const ideasSocietyId = generateId()
-const ideasRelationshipsId = generateId()
-const ideasSchoolId = generateId()
-const ideasSchoolEntrepreneurialId = generateId()
-const remindersId = generateId()
-const pastMemoriesId = generateId()
+const toDoId = generateId()
+const journalId = generateId()
 const defaultProjectId = generateId()
 
 // Sentinel ID used when a note is explicitly pinned to the root level
@@ -39,6 +34,14 @@ export const BUBBLE_COLORS = [
   '#3b82f6', // blue
 ]
 
+// The starting structure a brand-new install is seeded with. Kept deliberately small
+// and unopinionated — it is scaffolding to show what bubbles ARE, not a filing system
+// anyone has to adopt. "Self" is the one nested bubble, there purely to demonstrate that
+// bubbles hold bubbles; everything else the user invents themselves.
+//
+// This runs only when there is no local project list at all (see initializeData in
+// App.jsx). Changing it never reaches an existing install: local data loads from
+// storage, and cloud data overwrites local on sign-in. Nothing here migrates anybody.
 export function createDefaultProject() {
   const now = new Date().toISOString()
   return {
@@ -59,44 +62,14 @@ export function createDefaultProject() {
         color: '#8b5cf6',
       },
       {
-        id: ideasOtherId,
-        name: 'Other People',
-        parent_id: ideasId,
-        color: '#ec4899',
-      },
-      {
-        id: ideasSocietyId,
-        name: 'Society',
-        parent_id: ideasId,
-        color: '#f43f5e',
-      },
-      {
-        id: ideasRelationshipsId,
-        name: 'Relationships',
-        parent_id: ideasId,
-        color: '#f97316',
-      },
-      {
-        id: ideasSchoolId,
-        name: 'School',
-        parent_id: ideasId,
-        color: '#eab308',
-      },
-      {
-        id: ideasSchoolEntrepreneurialId,
-        name: 'Entrepreneurial Leadership',
-        parent_id: ideasSchoolId,
-        color: '#22c55e',
-      },
-      {
-        id: remindersId,
-        name: 'Reminders',
+        id: toDoId,
+        name: 'To Do',
         parent_id: null,
         color: '#22c55e',
       },
       {
-        id: pastMemoriesId,
-        name: 'Past Memories',
+        id: journalId,
+        name: 'Journal',
         parent_id: null,
         color: '#14b8a6',
       },
