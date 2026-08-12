@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import BubbleTree from './BubbleTree'
+import BubbleNameInput from './BubbleNameInput'
+import BubbleColorPicker from './BubbleColorPicker'
 import { BUBBLE_COLORS, CUSTOM_TAG_PALETTE } from '../data/defaultData'
 import { generateId } from '../utils/helpers'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
@@ -236,29 +238,26 @@ export default function Sidebar({
 
             {addingBubble && (
               <div className="space-y-2 mb-2">
-                <input
-                  ref={newBubbleInputRef}
+                <BubbleNameInput
+                  inputRef={newBubbleInputRef}
                   value={newBubbleName}
-                  onChange={e => setNewBubbleName(e.target.value)}
-                  onKeyDown={e => {
-                    if (e.key === 'Enter') handleAddBubble()
-                    if (e.key === 'Escape') { setAddingBubble(false); setNewBubbleName(''); setNewBubbleParentId(null) }
-                  }}
+                  onChange={setNewBubbleName}
+                  onSubmit={handleAddBubble}
+                  onCancel={() => { setAddingBubble(false); setNewBubbleName(''); setNewBubbleParentId(null) }}
+                  exclude={project.bubbles
+                    .filter(b => (b.parent_id ?? null) === (newBubbleParentId ?? null))
+                    .map(b => b.name)}
+                  listPosition="inline"
                   placeholder={newBubbleParentId
                     ? `Child of "${project.bubbles.find(b => b.id === newBubbleParentId)?.name}"`
                     : "Bubble name..."}
                   className="w-full px-2 py-1.5 text-sm border border-gray-700 rounded-lg outline-none focus:border-indigo-500 bg-gray-800 text-white"
                 />
-                <div className="flex gap-1 flex-wrap">
-                  {BUBBLE_COLORS.map(color => (
-                    <button
-                      key={color}
-                      onClick={() => setNewBubbleColor(color)}
-                      className={`w-5 h-5 rounded-full transition-transform ${newBubbleColor === color ? 'ring-2 ring-offset-1 ring-offset-gray-900 ring-white scale-110' : ''}`}
-                      style={{ backgroundColor: color }}
-                    />
-                  ))}
-                </div>
+                <BubbleColorPicker
+                  value={newBubbleColor}
+                  onChange={setNewBubbleColor}
+                  offsetColor="var(--sidebar)"
+                />
                 <div className="flex gap-2">
                   <button
                     onClick={handleAddBubble}

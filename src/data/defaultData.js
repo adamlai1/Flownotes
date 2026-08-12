@@ -34,6 +34,35 @@ export const BUBBLE_COLORS = [
   '#3b82f6', // blue
 ]
 
+// The colour a new bubble should start on: whichever is least spoken for where it is
+// being made. Colour is how a bubble is told apart at a glance, so defaulting to the
+// same one every time makes a level that all looks alike — and the level is exactly the
+// scope that matters, hence siblings first.
+//
+// Ties fall to the colour least used anywhere in the project, and then to palette order,
+// so the answer is always the same for the same input.
+export function leastUsedBubbleColor(siblingColors = [], projectColors = []) {
+  const tally = (list) => list.reduce((counts, c) => counts.set(c, (counts.get(c) || 0) + 1), new Map())
+  const amongSiblings = tally(siblingColors)
+  const amongProject = tally(projectColors)
+
+  let best = BUBBLE_COLORS[0]
+  let bestLocal = Infinity
+  let bestGlobal = Infinity
+  for (const color of BUBBLE_COLORS) {
+    const local = amongSiblings.get(color) || 0
+    const global = amongProject.get(color) || 0
+    // Strictly better only — an equal candidate later in the palette never displaces
+    // the earlier one, which is what makes palette order the final tie-break.
+    if (local < bestLocal || (local === bestLocal && global < bestGlobal)) {
+      best = color
+      bestLocal = local
+      bestGlobal = global
+    }
+  }
+  return best
+}
+
 // The starting structure a brand-new install is seeded with. Kept deliberately small
 // and unopinionated — it is scaffolding to show what bubbles ARE, not a filing system
 // anyone has to adopt. "Self" is the one nested bubble, there purely to demonstrate that

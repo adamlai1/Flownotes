@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useMemo, useContext, createContext, Fragme
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { getNoteCountForBubble } from '../utils/helpers'
+import BubbleNameInput from './BubbleNameInput'
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
@@ -103,16 +104,22 @@ function BubbleNode({
 
         {renaming ? (
           <div className="flex-1 flex items-center gap-1 py-0.5">
-            <input
-              autoFocus
-              value={renameValue}
-              onChange={e => setRenameValue(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter') handleRename()
-                if (e.key === 'Escape') setRenaming(false)
-              }}
-              className="flex-1 px-1.5 py-0.5 text-xs border border-indigo-600 rounded outline-none bg-gray-800 text-white"
-            />
+            <div className="flex-1 min-w-0">
+              <BubbleNameInput
+                autoFocus
+                value={renameValue}
+                onChange={setRenameValue}
+                onSubmit={handleRename}
+                onCancel={() => setRenaming(false)}
+                // Its own name is a sibling, so the list won't offer the name it
+                // already has — nor any other name taken at this level.
+                exclude={bubbles
+                  .filter(b => (b.parent_id ?? null) === (bubble.parent_id ?? null))
+                  .map(b => b.name)}
+                ariaLabel="Rename bubble"
+                className="w-full px-1.5 py-0.5 text-xs border border-indigo-600 rounded outline-none bg-gray-800 text-white"
+              />
+            </div>
             <button onClick={handleRename} className="text-xs text-indigo-400 font-medium px-1">OK</button>
           </div>
         ) : (

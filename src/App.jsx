@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { AnimatePresence } from 'framer-motion'
-import { createDefaultProject } from './data/defaultData'
+import { createDefaultProject, leastUsedBubbleColor } from './data/defaultData'
 import { generateId } from './utils/helpers'
 import {
   loadProjectList,
@@ -54,6 +54,7 @@ import NoteEditor from './components/NoteEditor'
 import Settings from './components/Settings'
 import Onboarding from './components/Onboarding'
 import CreateBubbleSheet from './components/CreateBubbleSheet'
+import CreateButton from './components/CreateButton'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { PreferencesProvider } from './contexts/PreferencesContext'
 import { LockProvider } from './contexts/LockContext'
@@ -903,36 +904,27 @@ export default function App() {
       </div>
 
       {/* Floating Create Button — tap for a note, hold for a bubble */}
-      <button
+      <CreateButton
+        held={plusHeld}
+        holdMs={LONG_PRESS_MS}
         onClick={handlePlusClick}
         onPointerDown={beginPlusHold}
         onPointerUp={endPlusHold}
-        onPointerLeave={cancelPlusHold}
         onPointerCancel={cancelPlusHold}
-        onContextMenu={e => e.preventDefault()}
-        className="flex fixed right-6 w-14 h-14 bg-indigo-600 hover:bg-indigo-700 text-white rounded-full shadow-lg items-center justify-center text-2xl z-40 transition-colors"
-        style={{
-          bottom: 'calc(1.5rem + env(safe-area-inset-bottom))',
-          // Grows while the hold is registering, so a different action is visibly on its
-          // way; snaps back on release or cancel. Slower than the hold itself, so the
-          // growth reads as the gesture filling up rather than a press-down bounce.
-          transform: plusHeld ? 'scale(1.18)' : 'scale(1)',
-          transition: plusHeld
-            ? `transform ${LONG_PRESS_MS}ms cubic-bezier(0.4, 0, 0.6, 1), background-color 0.15s`
-            : 'transform 0.18s ease-out, background-color 0.15s',
-          touchAction: 'manipulation',
-          WebkitTouchCallout: 'none',
-          userSelect: 'none',
-          WebkitUserSelect: 'none',
-        }}
-        aria-label="Create note. Hold to create a bubble."
-      >
-        +
-      </button>
+      />
 
       <CreateBubbleSheet
         open={createBubbleOpen}
         parentName={activeProject.bubbles.find(b => b.id === currentBubbleId)?.name ?? null}
+        siblingNames={activeProject.bubbles
+          .filter(b => (b.parent_id ?? null) === (currentBubbleId ?? null))
+          .map(b => b.name)}
+        defaultColor={leastUsedBubbleColor(
+          activeProject.bubbles
+            .filter(b => (b.parent_id ?? null) === (currentBubbleId ?? null))
+            .map(b => b.color),
+          activeProject.bubbles.map(b => b.color),
+        )}
         focusNonce={sheetFocusNonce}
         onCreate={handleCreateBubble}
         onCancel={() => setCreateBubbleOpen(false)}

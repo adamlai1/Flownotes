@@ -308,9 +308,14 @@ function maxFittingBubbleR(width, availH) {
     (availH - EDGE_INSET * 2) / (2 * BUB_HH),
   )
 }
-// Corner rounding: ~22% of the box, resolved to px so the corners stay circular instead
-// of stretching into ellipses along the wide axis (which a `%` radius would do).
-const bubbleCornerPx = (r) => Math.round(r * BUB_HH * 2 * 0.22)
+// Corner rounding, as a fraction of the box's short side. Exported because it is what
+// makes a note square, a category bubble and the floating + button read as the same
+// family of shape — anything else adopting that silhouette should round by this, not by
+// a number that happens to match today.
+export const CORNER_RATIO = 0.22
+// Resolved to px so the corners stay circular instead of stretching into ellipses along
+// the wide axis (which a `%` radius would do).
+const bubbleCornerPx = (r) => Math.round(r * BUB_HH * 2 * CORNER_RATIO)
 
 // Rectangle (AABB) separation for a pair. Pushes the pair apart along the axis of least
 // penetration so their boxes keep gapX/gapY px between edges. Mutates whichever endpoints
@@ -1781,7 +1786,7 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
         style={{
           width: '100%',
           height: '100%',
-          borderRadius: '22%',
+          borderRadius: `${CORNER_RATIO * 100}%`,
           background: isLight
             ? solidBg
             : `radial-gradient(135deg, rgba(255,255,255,0.24) 0%, rgba(${rgb},0.22) 55%, rgba(${rgb},0.07) 100%)`,
