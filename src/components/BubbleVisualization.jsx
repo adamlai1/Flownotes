@@ -196,6 +196,30 @@ function layoutPage(pageItems, savedPositions, projectId, contextId, width, heig
   return separateOverlaps(settled, width, height, shouldPinBubbles(settled, anchored.size))
 }
 
+// Everything layoutPage's OUTPUT depends on, as one string — the cache key for a page.
+//
+// The rendered item objects carry far more than this: name, colour, tags, lock state,
+// note body, child/note counts. All of that changes without moving anything, which is
+// why the cache stores coordinates only and the caller re-merges the live item objects
+// onto them. What actually moves an item is: the page's item ids IN ORDER (computeLayout
+// places by index), each one's size input (the note flag, or a bubble's contentCount —
+// bubble radii are log-scaled against the busiest bubble ON THIS PAGE, so every
+// contentCount on the page belongs here), the page geometry, the note-size scale, the
+// page's layout seed, and any saved drag positions among them.
+//
+// Adding, removing or moving an item between pages changes some page's id list; a
+// resize or a note-size change alters the geometry for every page; a drop rewrites the
+// saved positions. Each of those falls out of the key on its own.
+function pageLayoutKey(group, savedPositions, projectId, contextId, width, height, noteScale, seed) {
+  let key = `${projectId}|${contextId ?? 'root'}|${width}x${height}|${noteScale}|${seed}`
+  for (const it of group) {
+    key += `|${it.id}:${it.type === 'note' ? 'n' : it.contentCount || 0}`
+    const saved = savedPositions[posKey(projectId, contextId, it.id)]
+    if (saved) key += `@${saved.xFrac.toFixed(5)},${saved.yFrac.toFixed(5)}`
+  }
+  return key
+}
+
 // ─── Utilities ───────────────────────────────────────────────────────────────
 
 function hexToRgb(hex) {
@@ -1297,15 +1321,25 @@ function TrashGlyph({ size = 14, color = 'currentColor', style }) {
 // a size. Only bubbles report: note cards size their text by their own rules.
 const BubbleNameFontContext = createContext(null)
 
-function BubbleNameFontScope({ children }) {
+// liveIds: every bubble id currently at this level, across all its pages. Only the pages
+// around the current one are mounted, so unmounting no longer means "gone" — a bubble two
+// pages away has simply been windowed out, and its measured fit must stay in the pool or
+// swiping would grow every remaining name mid-gesture. The shared size is one size for
+// the whole level, pages included, and that is what keeps it so. A bubble that really has
+// left the level is pruned by the effect below, since a windowed-out one never gets to
+// run its own cleanup.
+function BubbleNameFontScope({ children, liveIds = null }) {
   const [minFont, setMinFont] = useState(null)
   const fits = useRef(new Map())
+  const liveRef = useRef(liveIds)
+  liveRef.current = liveIds
 
   // Stable across renders: the measuring effect depends on it, and an identity that
   // changed with `minFont` would re-run every measurement each time the shared size
   // moved — which is what the measurement decides in the first place.
   const report = useCallback((id, size) => {
     if (size == null) {
+      if (liveRef.current?.has(id)) return // windowed out, not gone — keep its fit
       if (!fits.current.delete(id)) return
     } else {
       if (fits.current.get(id) === size) return
@@ -1314,13 +1348,27 @@ function BubbleNameFontScope({ children }) {
     setMinFont(fits.current.size ? Math.min(...fits.current.values()) : null)
   }, [])
 
+  useEffect(() => {
+    if (!liveIds) return
+    let dropped = false
+    for (const id of fits.current.keys()) {
+      if (!liveIds.has(id)) { fits.current.delete(id); dropped = true }
+    }
+    if (dropped) setMinFont(fits.current.size ? Math.min(...fits.current.values()) : null)
+  }, [liveIds])
+
   const value = useMemo(() => ({ minFont, report }), [minFont, report])
   return <BubbleNameFontContext.Provider value={value}>{children}</BubbleNameFontContext.Provider>
 }
 
 // ─── BubbleCircle ─────────────────────────────────────────────────────────────
 
-function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectable = false, selected = false }) {
+// `floating`: run the idle bob. False for items on a mounted-but-not-current page, and
+// for everything while a swipe is in flight — an off-screen bob is invisible work, and
+// during a swipe every float competes with the track for the same frames. The item
+// simply rests at its layout position; the layout's vertical gaps are measured from
+// there (the bob only ever travels UP), so a paused item can't overlap a neighbour.
+function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating = true, selectable = false, selected = false }) {
   const { theme } = useTheme()
   const isLight = theme === 'light'
   const rgb = hexToRgb(item.color)
@@ -1501,12 +1549,18 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, selectab
           transition: 'box-shadow 0.18s ease-out, border-color 0.18s ease-out',
         }}
         initial={{ scale: 0 }}
-        animate={isDragging ? { scale: 1.1, y: 0 } : { scale: 1, y: [0, -floatAmt, 0] }}
+        animate={isDragging
+          ? { scale: 1.1, y: 0 }
+          : { scale: 1, y: floating ? [0, -floatAmt, 0] : 0 }}
         transition={isDragging
           ? { duration: 0.18, ease: [0.34, 1.56, 0.64, 1] }
           : {
               scale: { type: 'spring', stiffness: 260, damping: 22, delay: index * 0.07 },
-              y: { duration: floatDuration, repeat: Infinity, ease: 'easeInOut', delay: floatDelay },
+              // Paused: ease back to rest over a beat rather than snapping — a swipe that
+              // ends where it started would otherwise show every bubble twitch on release.
+              y: floating
+                ? { duration: floatDuration, repeat: Infinity, ease: 'easeInOut', delay: floatDelay }
+                : { duration: 0.25, ease: 'easeOut' },
             }
         }
       >
@@ -1626,7 +1680,9 @@ function SelectionOverlay({ selected, radius }) {
 
 // ─── NoteCard ─────────────────────────────────────────────────────────────────
 
-function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout, selectable = false, selected = false }) {
+// `floating` — same contract as BubbleCircle's: run the idle bob only when this item is
+// on the current page and no swipe is in flight.
+function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout, floating = true, selectable = false, selected = false }) {
   const { theme } = useTheme()
   const isLight = theme === 'light'
   const rgb = hexToRgb(item.color)
@@ -1747,12 +1803,16 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
           transition: 'box-shadow 0.18s ease-out, border-color 0.18s ease-out',
         }}
         initial={{ scale: 0 }}
-        animate={isDragging ? { scale: 1.1, y: 0 } : { scale: 1, y: [0, -floatAmt, 0] }}
+        animate={isDragging
+          ? { scale: 1.1, y: 0 }
+          : { scale: 1, y: floating ? [0, -floatAmt, 0] : 0 }}
         transition={isDragging
           ? { duration: 0.18, ease: [0.34, 1.56, 0.64, 1] }
           : {
               scale: { type: 'spring', stiffness: 260, damping: 22, delay: index * 0.07 },
-              y: { duration: floatDuration, repeat: Infinity, ease: 'easeInOut', delay: floatDelay },
+              y: floating
+                ? { duration: floatDuration, repeat: Infinity, ease: 'easeInOut', delay: floatDelay }
+                : { duration: 0.25, ease: 'easeOut' },
             }
         }
       >
@@ -1940,6 +2000,12 @@ function LockMenu({ menu, gated, onLock, onDelete, onClose, width, height }) {
 const SUB_BAR_H = 52
 const BOTTOM_PAD = 0           // no bottom barrier — bubbles reach the bottom edge
 // Just clear the + button itself: button is 56px (radius 28) + a small ~8px margin.
+// TEMP (swipe performance investigation): timing for the swipe handler, the page-change
+// commit, and the per-render page layout. Set false to silence, or delete the marked
+// blocks. Note the app runs under StrictMode, so in dev every render body — including
+// the layout below — executes TWICE per commit; halve the layout figures accordingly.
+const DEBUG_SWIPE_PERF = true
+
 const PLUS_BTN_EXCL_R = 36    // no-go radius around the floating + button
 
 // Keep an item clear of the round + button (bottom-right), blocking overlap from ANY
@@ -2368,11 +2434,26 @@ export default function BubbleVisualization({
   const [pageIndex, setPageIndex] = useState(0)
   const pageIndexRef = useRef(0)
   pageIndexRef.current = pageIndex
+  // TEMP (swipe perf)
+  const swipeSamplesRef = useRef({ n: 0, total: 0, max: 0 })
+  const pageChangeTimingRef = useRef(false)
+  // True from the moment a press turns into a page swipe until the settle spring stops.
+  // Every float on every mounted page holds still for that window — the bob is a dozen
+  // independent framer springs writing transforms each frame, and the swipe wants those
+  // frames. swipeSettleRef tokenises the settle so a stale completion can't un-pause a
+  // gesture that has already started (see animateToPage).
+  const [swiping, setSwiping] = useState(false)
+  const swipeSettleRef = useRef(0)
   const pageX = useMotionValue(0)
   const [savedPages, setSavedPages] = useState({}) // { [posKey]: pageIndex }
   const savedPagesRef = useRef({})
   savedPagesRef.current = savedPages
   const pagesRef = useRef([])         // current pages (arrays of laid items)
+  // Layout memo (see the pagination block). pageIndex → { key, geom: [{id,cx,cy,r}] },
+  // and the id→page assignment behind it. Both are pure caches: a miss only costs the
+  // work that used to run unconditionally, so nothing has to invalidate them by hand.
+  const pageLayoutCacheRef = useRef(new Map())
+  const assignCacheRef = useRef({ key: null, pageOf: {} })
   const perPageRef = useRef(1)
   const paginatedRef = useRef(false)
   const pagedRef = useRef(null)       // active paged gesture state
@@ -2565,6 +2646,14 @@ export default function BubbleVisualization({
   const currentId = currentBubble?.id ?? null
 
   const visibleBubbles = project.bubbles.filter(b => b.parent_id === currentId)
+  // Every bubble at this level, mounted or not — the shared name size is scoped to the
+  // level, and page windowing means the scope can no longer infer that from what is
+  // mounted. Rebuilt only when the membership itself changes.
+  const levelBubbleIdSig = visibleBubbles.map(b => b.id).join(',')
+  const levelBubbleIds = useMemo(
+    () => new Set(levelBubbleIdSig ? levelBubbleIdSig.split(',') : []),
+    [levelBubbleIdSig],
+  )
 
   const directNotes = currentId
     ? project.notes.filter(n => n.bubble_ids.includes(currentId))
@@ -2595,10 +2684,15 @@ export default function BubbleVisualization({
   // when paged). More items than fit one screen at the minimum size → paginate.
   const noteN = layoutItems.filter(i => i.type === 'note').length
   const bubbleN = layoutItems.length - noteN
+  // Pure function of five numbers, and it runs two grid searches to get there — so it is
+  // memoized on exactly those numbers rather than re-solved on every render.
   const {
     pageLoad, perPage, notesPerPage, bubblesPerPage, rawNotesPerPage, rawBubblesPerPage,
     usableW, noteCols, noteRows,
-  } = pageLoadFor(bubbleN, noteN, size.width, size.height, noteScale)
+  } = useMemo(
+    () => pageLoadFor(bubbleN, noteN, size.width, size.height, noteScale),
+    [bubbleN, noteN, size.width, size.height, noteScale],
+  )
   const paginated = size.width > 0 && pageLoad > 1
 
   // Single-page organic layout (skipped when paginated — each page lays out its own).
@@ -2642,7 +2736,26 @@ export default function BubbleVisualization({
   // view — pagination only decides which page a bubble is on.
   let pages = []
   if (paginated) {
-    const pageOf = assignPages(layoutItems, savedPages, project.id, currentId, perPage)
+    // TEMP (swipe perf): performance.now rather than console.time — StrictMode runs this
+    // body twice per commit and a repeated console.time label warns instead of timing.
+    const t0 = DEBUG_SWIPE_PERF ? performance.now() : 0
+    // Page ASSIGNMENT is a pure function of the item ids/types, the saved assignments and
+    // the capacity — none of which a page change touches — so it is memoized on a
+    // signature of exactly those. Only the id→page map is kept: the groups themselves are
+    // rebuilt from the live item objects below, so nothing stale is ever rendered.
+    let assignKey = `${project.id}|${currentId ?? 'root'}|${perPage}`
+    for (const it of layoutItems) {
+      assignKey += `|${it.id}:${it.type === 'note' ? 'n' : 'b'}`
+      const p = savedPages[posKey(project.id, currentId, it.id)]
+      if (Number.isInteger(p)) assignKey += `=${p}`
+    }
+    if (assignCacheRef.current.key !== assignKey) {
+      assignCacheRef.current = {
+        key: assignKey,
+        pageOf: assignPages(layoutItems, savedPages, project.id, currentId, perPage),
+      }
+    }
+    const pageOf = assignCacheRef.current.pageOf
     const numPages = Math.max(
       Math.ceil(layoutItems.length / perPage),
       ...layoutItems.map(it => (pageOf[it.id] ?? 0) + 1),
@@ -2650,10 +2763,46 @@ export default function BubbleVisualization({
     )
     const groups = Array.from({ length: numPages }, () => [])
     for (const it of layoutItems) groups[pageOf[it.id] ?? 0].push(it)
-    pages = groups.map((group, pi) => layoutPage(
-      group, savedPositions, project.id, currentId,
-      size.width, size.height, noteScale, layoutSeed(currentId, pi),
-    ))
+
+    // Per-page layout cache. A page change re-runs this render body, but only the pages
+    // whose own inputs moved need computeLayout / lloydSpread / separateOverlaps again —
+    // and on a page change that is none of them. See pageLayoutKey for what counts as an
+    // input; everything else about an item is re-merged onto the cached coordinates, so a
+    // rename, a lock, an edited note body or a theme change costs nothing here.
+    const cache = pageLayoutCacheRef.current
+    let recomputed = 0
+    pages = groups.map((group, pi) => {
+      const key = pageLayoutKey(
+        group, savedPositions, project.id, currentId,
+        size.width, size.height, noteScale, layoutSeed(currentId, pi),
+      )
+      const hit = cache.get(pi)
+      if (hit && hit.key === key) {
+        // Same ids in the same order (the key says so), so this is a straight zip of the
+        // live items onto their cached geometry — and it preserves the order layoutPage
+        // returned, which is what `index` (float phase) and the drag loop both read.
+        const byId = new Map(group.map(it => [it.id, it]))
+        return hit.geom.map(g => ({ ...byId.get(g.id), cx: g.cx, cy: g.cy, r: g.r }))
+      }
+      recomputed++
+      const laidPage = layoutPage(
+        group, savedPositions, project.id, currentId,
+        size.width, size.height, noteScale, layoutSeed(currentId, pi),
+      )
+      cache.set(pi, { key, geom: laidPage.map(p => ({ id: p.id, cx: p.cx, cy: p.cy, r: p.r })) })
+      return laidPage
+    })
+    // Drop entries for pages that no longer exist, so a level that shrinks doesn't keep
+    // paying for the pages it used to have.
+    for (const pi of cache.keys()) if (pi >= groups.length) cache.delete(pi)
+    if (DEBUG_SWIPE_PERF) {
+      console.log(
+        `[perf] layoutPages ${(performance.now() - t0).toFixed(1)}ms — ` +
+        `${pages.length} pages, ${layoutItems.length} items ` +
+        `(${bubbleN} bubbles + ${noteN} notes), ` +
+        `${recomputed} recomputed / ${pages.length - recomputed} from cache`
+      )
+    }
   }
   const clampedPageIndex = pages.length > 0 ? Math.min(pageIndex, pages.length - 1) : 0
 
@@ -2775,6 +2924,14 @@ export default function BubbleVisualization({
   useEffect(() => {
     if (pages.length > 0 && pageIndex > pages.length - 1) setPageIndex(pages.length - 1)
   }, [pages.length]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // TEMP (swipe perf): closes the timer animateToPage opened, once the commit it caused
+  // has been applied to the DOM.
+  useLayoutEffect(() => {
+    if (!DEBUG_SWIPE_PERF || !pageChangeTimingRef.current) return
+    pageChangeTimingRef.current = false
+    console.timeEnd('[perf] pageChange→commit')
+  }, [pageIndex])
 
   // ── Placing a just-created bubble ─────────────────────────────────────────────
   //
@@ -2938,9 +3095,24 @@ export default function BubbleVisualization({
   // ── Paged interactions (swipe between pages + drag with cross-page move) ───────
   function animateToPage(idx) {
     const clamped = Math.max(0, Math.min(idx, pagesRef.current.length - 1))
+    // TEMP (swipe perf): opened here and closed in the layout effect below, so it spans
+    // the state change AND the render + commit it causes — which is where the page
+    // layout is recomputed.
+    if (DEBUG_SWIPE_PERF && clamped !== pageIndexRef.current) {
+      console.time('[perf] pageChange→commit')
+      pageChangeTimingRef.current = true
+    }
     pageIndexRef.current = clamped
     setPageIndex(clamped)
-    animate(pageX, -clamped * sizeRef.current.width, { type: 'spring', stiffness: 320, damping: 34 })
+    // Floats resume once the track has actually come to rest, not the moment the finger
+    // lifts — the settle spring is the tail of the swipe and wants the frames too. The
+    // token guards against a stale completion (a new gesture started mid-settle) clearing
+    // the pause the new gesture has just set.
+    const token = ++swipeSettleRef.current
+    animate(pageX, -clamped * sizeRef.current.width, {
+      type: 'spring', stiffness: 320, damping: 34,
+      onComplete: () => { if (swipeSettleRef.current === token) setSwiping(false) },
+    })
   }
 
   const clearAllDragTransforms = () => {
@@ -2997,6 +3169,21 @@ export default function BubbleVisualization({
       Math.abs(localY - item.cy) <= halfHeightOf(item))
     const st = { mode: 'pending', startX: e.clientX, startY: e.clientY, itemId: hit?.id ?? null, lpTimer: null }
     pagedRef.current = st
+    if (DEBUG_SWIPE_PERF) {
+      // TEMP (swipe perf): what is actually on screen when the gesture starts. Counts the
+      // whole container — which now holds only the mounted window of pages, so the item
+      // count should track the visible page rather than the whole level.
+      swipeSamplesRef.current = { n: 0, total: 0, max: 0 }
+      const root = containerRef.current
+      const total = pagesRef.current.length
+      const mounted = Math.min(total, pageIndexRef.current === 0 || pageIndexRef.current === total - 1 ? 2 : 3)
+      console.log(
+        `[perf] swipe start — ${root?.querySelectorAll('*').length ?? 0} DOM nodes in the ` +
+        `bubble container, ${root?.querySelectorAll('[data-item-id]').length ?? 0} items ` +
+        `across ${mounted} mounted of ${total} pages ` +
+        `(page ${pageIndexRef.current} visible, ${(pagesRef.current[pageIndexRef.current] || []).length} items on it)`
+      )
+    }
     pageX.stop()
     if (hit && !selectModeRef.current) {
       // Press-and-hold to pick a bubble up — it then drags with the SAME free-form
@@ -3029,8 +3216,10 @@ export default function BubbleVisualization({
     const st = pagedRef.current
     if (!st) return
     if (st.mode === 'menu') return
-    const rect = containerRef.current?.getBoundingClientRect()
-    if (!rect) return
+    // TEMP (swipe perf): times this handler only. Per-move logging would flood a 120Hz
+    // touch stream, so the samples are accumulated and reported once on release.
+    const tMove = DEBUG_SWIPE_PERF ? performance.now() : 0
+    try {
     const dx = e.clientX - st.startX
     const dy = e.clientY - st.startY
     // Moved at all → this press is a swipe or a drag, never a menu.
@@ -3038,13 +3227,14 @@ export default function BubbleVisualization({
       clearTimeout(st.menuTimer)
       st.menuTimer = null
     }
-    const localX = e.clientX - rect.left
-    const localY = e.clientY - rect.top
     const { width: W, height: H } = sizeRef.current
     if (st.mode === 'pending') {
       if (Math.hypot(dx, dy) <= 8) return
       if (st.lpTimer) { clearTimeout(st.lpTimer); st.lpTimer = null }
       st.mode = 'swipe' // moved before the long-press fired → treat as a page swipe
+      // Hold every float still for the duration of the gesture (see `swiping`).
+      swipeSettleRef.current++
+      setSwiping(true)
     }
     if (st.mode === 'swipe') {
       let base = -pageIndexRef.current * W + dx
@@ -3056,6 +3246,14 @@ export default function BubbleVisualization({
       // Feed the pointer into the RAF physics loop (same as single-page dragging).
       const drag = dragInfoRef.current
       if (!drag) return
+      // The container rect is read HERE, not at the top of the handler: it is a forced
+      // layout read, and only this branch (and the edge glow below it) needs local
+      // coordinates. On the swipe path — the one that has to keep up with a 120Hz touch
+      // stream — the handler now touches no layout at all.
+      const rect = containerRef.current?.getBoundingClientRect()
+      if (!rect) return
+      const localX = e.clientX - rect.left
+      const localY = e.clientY - rect.top
       const dhw = halfWidthOf(drag), dhh = halfHeightOf(drag)
       dragInfoRef.current = {
         ...drag,
@@ -3068,12 +3266,34 @@ export default function BubbleVisualization({
         : (localX > W - 44 && cur < pagesRef.current.length - 1) ? 'right' : null
       if (side !== st.edgeSide) { st.edgeSide = side; setEdgeGlow(side) } // only re-render on change
     }
+    } finally {
+      if (DEBUG_SWIPE_PERF) {
+        const ms = performance.now() - tMove
+        const s = swipeSamplesRef.current
+        s.n++
+        s.total += ms
+        if (ms > s.max) s.max = ms
+      }
+    }
   }
 
   function onPagedPointerUp(e) {
     const st = pagedRef.current
     if (!st) return
+    if (DEBUG_SWIPE_PERF) {
+      const s = swipeSamplesRef.current
+      if (s.n) {
+        console.log(
+          `[perf] swipe handler — ${s.n} moves, ${s.total.toFixed(1)}ms total, ` +
+          `${(s.total / s.n).toFixed(2)}ms avg, ${s.max.toFixed(2)}ms worst ` +
+          `(handler only; excludes the paint/composite each move triggers)`
+        )
+      }
+    }
     pagedRef.current = null
+    // Anything that isn't a swipe releases the float pause here: only the swipe path
+    // ends in animateToPage, whose settle completion is what normally resumes them.
+    if (st.mode !== 'swipe') { swipeSettleRef.current++; setSwiping(false) }
     if (st.lpTimer) { clearTimeout(st.lpTimer); st.lpTimer = null }
     if (st.menuTimer) { clearTimeout(st.menuTimer); st.menuTimer = null }
     if (st.edgeSide) setEdgeGlow(null)
@@ -3604,10 +3824,27 @@ export default function BubbleVisualization({
                   onPointerUp={onPagedPointerUp}
                   onPointerCancel={onPagedPointerUp}
                 >
-                  <motion.div style={{ x: pageX, display: 'flex', height: '100%', width: pages.length * size.width }}>
-                    <BubbleNameFontScope>
-                    {pages.map((pageItems, pi) => (
-                      <div key={pi} style={{ position: 'relative', width: size.width, height: '100%', flexShrink: 0 }}>
+                  {/* Only the current page and its immediate neighbours are mounted.
+                      A swipe moves exactly one page (animateToPage clamps to ±1 from
+                      the release), so those three are all a gesture can ever bring into
+                      view — and the neighbour is already mounted when the finger lands,
+                      which is what keeps the incoming page from flashing in blank.
+                      Everything further out unmounts, so the DOM now costs what the
+                      visible page holds rather than what the whole level does.
+
+                      Pages are positioned by index instead of flowed in a flex row:
+                      an unmounted page must not shift the ones after it, and the track's
+                      x-translation is -pageIndex * width, which assumes page `pi` sits at
+                      exactly pi * width. */}
+                  <motion.div style={{ x: pageX, position: 'relative', height: '100%', width: pages.length * size.width }}>
+                    <BubbleNameFontScope liveIds={levelBubbleIds}>
+                    {pages.map((pageItems, pi) => {
+                      if (Math.abs(pi - clampedPageIndex) > 1) return null
+                      // The idle bob runs on the current page only, and stops on every
+                      // page for the length of a swipe.
+                      const floating = pi === clampedPageIndex && !swiping
+                      return (
+                      <div key={pi} style={{ position: 'absolute', left: pi * size.width, top: 0, width: size.width, height: '100%' }}>
                         {pageItems.map((item, i) =>
                           item.type === 'note' ? (
                             <NoteCard
@@ -3617,6 +3854,7 @@ export default function BubbleVisualization({
                               customTagColors={project.customTagColors || {}}
                               isDragging={draggingId === item.id}
                               animateLayout={animatingLayout && draggingId !== item.id}
+                              floating={floating}
                               selectable={selectMode}
                               selected={selectedIds.has(item.id)}
                             />
@@ -3628,13 +3866,15 @@ export default function BubbleVisualization({
                               hidden={expandAnim?.id === item.id}
                               isDragging={draggingId === item.id}
                               animateLayout={animatingLayout && draggingId !== item.id}
+                              floating={floating}
                               selectable={selectMode}
                               selected={selectedIds.has(item.id)}
                             />
                           )
                         )}
                       </div>
-                    ))}
+                      )
+                    })}
                     </BubbleNameFontScope>
                   </motion.div>
                 </div>
@@ -3642,7 +3882,7 @@ export default function BubbleVisualization({
                 /* ── Single-page organic layout (free drag + saved positions) ──── */
                 /* The scope wraps AnimatePresence rather than sitting inside it: its
                    children have to stay the motion elements for exit to be tracked. */
-                <BubbleNameFontScope>
+                <BubbleNameFontScope liveIds={levelBubbleIds}>
                 <AnimatePresence>
                   {laidWithOverrides.map((item, i) =>
                     item.type === 'note' ? (
