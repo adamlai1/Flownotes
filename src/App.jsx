@@ -57,9 +57,10 @@ import CreateBubbleSheet from './components/CreateBubbleSheet'
 import CreateButton from './components/CreateButton'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { PreferencesProvider } from './contexts/PreferencesContext'
+import { ToastProvider } from './contexts/ToastContext'
 import { LockProvider } from './contexts/LockContext'
 import { useAuth } from './contexts/AuthContext'
-import { useEscapeShortcut } from './lib/escapeStack'
+import { useEscapeShortcut, useKeyShortcuts } from './lib/escapeStack'
 
 // How long the + button has to be held before it creates a bubble instead of a note.
 // Deliberately the same figure as the bubble view's LONG_PRESS_MENU_MS: the app has one
@@ -147,7 +148,8 @@ function LoginScreen() {
 
 export default function App() {
   const { user, loading, guestMode } = useAuth()
-  // Single Escape listener for the whole app; layers register themselves.
+  // Single keydown listener for the whole app — Escape (layers register themselves) and
+  // the bare-key shortcuts wired up further down.
   useEscapeShortcut()
   // 'offline' = we have unsent work and no connection; it's a normal resting state,
   // not a failure, so it reads differently from 'error' in the UI.
@@ -191,6 +193,10 @@ export default function App() {
   // Id of a bubble just created here, handed to the bubble view to place on the page
   // the user is looking at. Command prop, like navigateBubbleId.
   const [placeBubbleId, setPlaceBubbleId] = useState(null)
+  // Keyboard-shortcut command props, both carrying a nonce so the same request twice in
+  // a row still reads as two — the same shape as sheetFocusNonce.
+  const [searchFocusNonce, setSearchFocusNonce] = useState(0)
+  const [pageStep, setPageStep] = useState(null) // { dir: -1 | 1, nonce }
   const saveTimerRef = useRef(null)
   // Always-current ref so deferred callbacks (debounced saves) never read stale state
   const activeProjectRef = useRef(null)
@@ -813,6 +819,48 @@ export default function App() {
     handleCreateNote()
   }
 
+  // ── Keyboard shortcuts (desktop) ─────────────────────────────────────────────
+  //
+  // The same two things the + button does — tap for a note, hold for a bubble — plus
+  // jumping to search and turning pages. Every guard that matters lives in the listener
+  // (see resolveShortcut); what's left here is which action runs what.
+  //
+  // `enabled` covers the two states the layer stack can't see: there is no project yet,
+  // or onboarding is up. Onboarding is the one full-screen thing that doesn't register
+  // an Escape layer, so it has to be named.
+  function runShortcut(action) {
+    switch (action) {
+      case 'note':
+        handleCreateNote()
+        break
+      case 'bubble':
+        // The sheet focuses its own name field when it opens, so unlike the hold gesture
+        // this needs no follow-up nonce to get the caret into it.
+        setCreateBubbleOpen(true)
+        break
+      case 'search':
+        // The search field only exists in the chronological view, so the switch has to
+        // land before the focus request — hence the nonce rather than a direct call.
+        setViewMode('chronological')
+        setSearchFocusNonce(n => n + 1)
+        break
+      case 'prev-page':
+        setPageStep(s => ({ dir: -1, nonce: (s?.nonce ?? 0) + 1 }))
+        break
+      case 'next-page':
+        setPageStep(s => ({ dir: 1, nonce: (s?.nonce ?? 0) + 1 }))
+        break
+      default:
+        break
+    }
+  }
+
+  useKeyShortcuts({
+    enabled: !!activeProject && !showOnboarding,
+    arrows: viewMode === 'bubble',
+    onAction: runShortcut,
+  })
+
   function handleCreateBubble(name, color) {
     const bubble = { id: generateId(), name, parent_id: currentBubbleId, color }
     addBubble(bubble)
@@ -841,6 +889,7 @@ export default function App() {
   return (
     <ThemeProvider>
     <PreferencesProvider>
+    <ToastProvider>
     <LockProvider onRemoveAllLocks={clearAllLocks}>
     <div className="flex flex-col h-dvh overflow-hidden" style={{ background: 'var(--bg)' }}>
       <TopNav
@@ -896,6 +945,8 @@ export default function App() {
             onCurrentBubbleChange={setCurrentBubbleId}
             navigateBubbleId={navigateBubbleId}
             placeBubbleId={placeBubbleId}
+            searchFocusNonce={searchFocusNonce}
+            pageStep={pageStep}
             onRefresh={handleRefresh}
             sidebarOpen={sidebarOpen}
             onToggleSidebar={() => setSidebarOpen(o => !o)}
@@ -981,6 +1032,7 @@ export default function App() {
       </AnimatePresence>
     </div>
     </LockProvider>
+    </ToastProvider>
     </PreferencesProvider>
     </ThemeProvider>
   )

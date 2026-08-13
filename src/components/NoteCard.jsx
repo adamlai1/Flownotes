@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { formatDate, getNoteTitle, contrastColor } from '../utils/helpers'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
+import { useToast } from '../contexts/ToastContext'
+import { canShareNotes, copyNoteText, shareNoteText } from '../utils/noteShare'
 import { TAG_COLORS } from '../data/defaultData'
 
 export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, onTogglePin, onToggleLock, locked = false, pinned = false, customTagColors = {}, selectMode = false, selected = false, onToggleSelect }) {
@@ -26,6 +28,25 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
   const totalConnectionCount = locked ? 0 : note.connections.length + reverseConnectionCount
 
   useEscapeLayer(showDeleteConfirm, () => setShowDeleteConfirm(false), ESC_LEVEL.modal)
+
+  const showToast = useToast()
+  // Share is only offered where a share sheet exists; read once, since it can't appear
+  // partway through the life of a card.
+  const canShare = canShareNotes()
+
+  // Both actions close the menu first and report through the toast, because the menu is
+  // gone by the time the clipboard write or the share sheet settles.
+  function handleCopy(e) {
+    e.stopPropagation()
+    setShowMenu(false)
+    copyNoteText(note).then(showToast)
+  }
+
+  function handleShare(e) {
+    e.stopPropagation()
+    setShowMenu(false)
+    shareNoteText(note).then(showToast)
+  }
 
   function handleDelete(e) {
     e.stopPropagation()
@@ -87,6 +108,25 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
             >
               {pinned ? 'Unpin' : 'Pin'}
             </button>
+            {/* Withheld while the note is hidden: the whole point of the lock is that the
+                content is out of reach, and a Copy one tap away would be a way around it
+                rather than a shortcut through it. */}
+            {!locked && (
+              <button
+                onClick={handleCopy}
+                className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
+              >
+                Copy
+              </button>
+            )}
+            {!locked && canShare && (
+              <button
+                onClick={handleShare}
+                className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
+              >
+                Share
+              </button>
+            )}
             <button
               onClick={e => { e.stopPropagation(); onToggleLock?.(); setShowMenu(false) }}
               className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"

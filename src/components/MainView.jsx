@@ -27,6 +27,8 @@ export default function MainView({
   onCurrentBubbleChange,
   navigateBubbleId,
   placeBubbleId,
+  searchFocusNonce,
+  pageStep,
   onRefresh,
   sidebarOpen,
   onToggleSidebar,
@@ -77,6 +79,19 @@ export default function MainView({
     if (searchQuery) setSearchQuery('')
     else searchInputRef.current?.blur()
   })
+
+  // K from anywhere: the app root switches the view, and the bump lands here. The field
+  // only exists once this view is the rendered one, so the focus waits for the commit
+  // that mounts it rather than being called at the keypress. Skipped on the first render
+  // so an ordinary visit to this view doesn't steal focus.
+  const searchFocusSeenRef = useRef(searchFocusNonce)
+  useEffect(() => {
+    if (searchFocusSeenRef.current === searchFocusNonce) return
+    searchFocusSeenRef.current = searchFocusNonce
+    if (viewMode !== 'chronological') return
+    searchInputRef.current?.focus()
+    searchInputRef.current?.select()
+  }, [searchFocusNonce, viewMode])
 
   function toggleSelect(id) {
     setSelectedIds(prev => {
@@ -216,6 +231,7 @@ export default function MainView({
           onCurrentBubbleChange={onCurrentBubbleChange}
           navigateToBubbleId={navigateBubbleId}
           placeBubbleId={placeBubbleId}
+          pageStep={pageStep}
           onRefresh={onRefresh}
         />
       ) : (

@@ -8,7 +8,7 @@ const TIPS = [
         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3" />
       </svg>
     ),
-    text: 'Tap a bubble to dive in',
+    text: 'Tap a bubble to dive in — bubbles hold notes and other bubbles',
   },
   {
     icon: (
@@ -17,7 +17,7 @@ const TIPS = [
           d="M7 11V7a5 5 0 0110 0v4M5 11h14l-1 9H6L5 11z" />
       </svg>
     ),
-    text: 'Hold and drag to rearrange',
+    text: 'Hold a note, bubble, or the + button for more options',
   },
   {
     icon: (

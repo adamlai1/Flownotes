@@ -4,6 +4,8 @@ import { CONNECTION_TYPES, CUSTOM_TAG_PALETTE, ROOT_BUBBLE_ID } from '../data/de
 import { getNoteTitle } from '../utils/helpers'
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
+import { useToast } from '../contexts/ToastContext'
+import { copyNoteText } from '../utils/noteShare'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 
 
@@ -16,6 +18,7 @@ function formatNoteDate(isoStr) {
 
 export default function NoteEditor({ note, project, onClose, onUpdateNote, onDeleteNote, onUpdateCustomTagColors, onNavigateToNote, onSwipeProgress, backLabel = 'Notes', zIndex = 50 }) {
   const { unlockedIds, requestUnlock } = useLock()
+  const showToast = useToast()
   const [isDesktop, setIsDesktop] = useState(() => window.matchMedia('(min-width: 768px)').matches)
   useEffect(() => {
     const mq = window.matchMedia('(min-width: 768px)')
@@ -369,6 +372,20 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         </div>
 
         <div className="flex-1" />
+
+        {/* Copy — the text as it stands in the editor, not the last saved version, so
+            what lands on the clipboard is what's on screen. */}
+        <button
+          onClick={() => copyNoteText({ content: text }).then(showToast)}
+          disabled={!text.trim()}
+          className="p-1.5 rounded-lg transition-opacity flex-shrink-0 z-10 text-gray-400 disabled:opacity-25"
+          title="Copy note"
+        >
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M8 8V5a1 1 0 011-1h10a1 1 0 011 1v10a1 1 0 01-1 1h-3M5 8h10a1 1 0 011 1v10a1 1 0 01-1 1H5a1 1 0 01-1-1V9a1 1 0 011-1z" />
+          </svg>
+        </button>
 
         {/* Undo / Redo */}
         <button

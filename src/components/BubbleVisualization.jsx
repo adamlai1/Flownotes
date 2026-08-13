@@ -12,6 +12,8 @@ import { TAG_COLORS, ROOT_BUBBLE_ID } from '../data/defaultData'
 import { useTheme } from '../contexts/ThemeContext'
 import { usePreferences, NOTE_SIZE_SCALE } from '../contexts/PreferencesContext'
 import { useLock } from '../contexts/LockContext'
+import { useToast } from '../contexts/ToastContext'
+import { canShareNotes, copyNoteText, shareNoteText } from '../utils/noteShare'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import ConfirmDialog from './ConfirmDialog'
 
@@ -1295,6 +1297,34 @@ function LockGlyph({ size = 14, color = 'rgba(255,255,255,0.8)', style }) {
   )
 }
 
+// Two overlapping sheets — the long-press menu's copy row.
+function CopyGlyph({ size = 14, color = 'currentColor', style }) {
+  return (
+    <svg
+      width={size} height={size} viewBox="0 0 24 24"
+      fill="none" stroke={color} strokeWidth={2.2}
+      style={{ flexShrink: 0, pointerEvents: 'none', ...style }}
+    >
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M8 8V5a1 1 0 011-1h10a1 1 0 011 1v10a1 1 0 01-1 1h-3M5 8h10a1 1 0 011 1v10a1 1 0 01-1 1H5a1 1 0 01-1-1V9a1 1 0 011-1z" />
+    </svg>
+  )
+}
+
+// Arrow leaving a tray — the long-press menu's share row.
+function ShareGlyph({ size = 14, color = 'currentColor', style }) {
+  return (
+    <svg
+      width={size} height={size} viewBox="0 0 24 24"
+      fill="none" stroke={color} strokeWidth={2.2}
+      style={{ flexShrink: 0, pointerEvents: 'none', ...style }}
+    >
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M12 15V3m0 0L8 7m4-4l4 4M4 13v6a2 2 0 002 2h12a2 2 0 002-2v-6" />
+    </svg>
+  )
+}
+
 // Bin icon for the long-press menu's delete row.
 function TrashGlyph({ size = 14, color = 'currentColor', style }) {
   return (
@@ -1946,13 +1976,24 @@ const LONG_PRESS_MENU_MS = 750
 // Anchored at the press point and clamped to stay on screen. Stops its own pointer
 // events so the canvas's drag handlers underneath don't pick them up.
 
-function LockMenu({ menu, gated, onLock, onDelete, onClose, width, height }) {
+function LockMenu({ menu, gated, onLock, onCopy, onShare, onDelete, onClose, width, height }) {
   if (!menu) return null
+  const item = menu.item
+  // Copy/Share are for notes, and never for a hidden one — the lock exists to keep the
+  // content out of reach, and a Copy one tap away would be a way around it.
+  const showCopy = item.type === 'note' && !gated
+  const showShare = showCopy && canShareNotes()
   const MENU_W = 176
-  const MENU_H = 138 // header + two rows
+  // Measured from the rendered rows rather than a fixed figure, since the menu is now
+  // two, three or four rows deep depending on what the item is. Only used to keep the
+  // menu on screen, so it has to track the real height or a note's menu hangs off the
+  // bottom edge exactly where a long-press near the bottom puts it.
+  const HEADER_H = 30
+  const ROW_H = 54
+  const rows = 2 + (showCopy ? 1 : 0) + (showShare ? 1 : 0)
+  const MENU_H = HEADER_H + rows * ROW_H
   const x = Math.max(8, Math.min(menu.x, width - MENU_W - 8))
   const y = Math.max(SUB_BAR_H + 8, Math.min(menu.y, height - MENU_H - 8))
-  const item = menu.item
   const label = gated ? 'Unlock' : item.locked ? 'Remove Lock' : 'Lock'
 
   return (
@@ -1980,6 +2021,32 @@ function LockMenu({ menu, gated, onLock, onDelete, onClose, width, height }) {
         >
           {gated ? 'Locked' : (item.type === 'note' ? (getNoteTitle(item.content) || 'New note') : item.name)}
         </div>
+        {showCopy && (
+          <>
+            <button
+              onClick={e => { e.stopPropagation(); onCopy() }}
+              className="w-full flex items-center gap-2 px-3 py-3 text-sm text-left active:opacity-70"
+              style={{ color: 'var(--text)' }}
+            >
+              <CopyGlyph size={15} color="currentColor" />
+              Copy
+            </button>
+            <div style={{ height: 1, background: 'var(--border)' }} />
+          </>
+        )}
+        {showShare && (
+          <>
+            <button
+              onClick={e => { e.stopPropagation(); onShare() }}
+              className="w-full flex items-center gap-2 px-3 py-3 text-sm text-left active:opacity-70"
+              style={{ color: 'var(--text)' }}
+            >
+              <ShareGlyph size={15} color="currentColor" />
+              Share
+            </button>
+            <div style={{ height: 1, background: 'var(--border)' }} />
+          </>
+        )}
         <button
           onClick={e => { e.stopPropagation(); onLock() }}
           className="w-full flex items-center gap-2 px-3 py-3 text-sm text-left active:opacity-70"
@@ -2320,6 +2387,7 @@ export default function BubbleVisualization({
   onCurrentBubbleChange,
   navigateToBubbleId,
   placeBubbleId,
+  pageStep,
   onRefresh,
 }) {
   const containerRef = useRef(null)
@@ -2367,6 +2435,7 @@ export default function BubbleVisualization({
   // lockMenu: null | { item, x, y } — the long-press menu (see handlePointerDown).
   const [lockMenu, setLockMenu] = useState(null)
   const { unlockedIds, ensurePassword, requestUnlock, relockIds } = useLock()
+  const showToast = useToast()
   const lockIndex = useMemo(
     () => buildLockIndex(project.bubbles, project.notes, unlockedIds),
     [project.bubbles, project.notes, unlockedIds]
@@ -2381,6 +2450,17 @@ export default function BubbleVisualization({
     if (!lockIndexRef.current.isGated(item)) return false
     requestUnlock(lockIndexRef.current.gatingIdsFor(item))
     return true
+  }
+
+  // Copy / Share from the long-press menu. The menu closes on the action, so the result
+  // is reported by the toast rather than in place. Both are gated on the item being an
+  // unhidden note by LockMenu, which is what decides whether the rows exist at all.
+  function copyItem(item) {
+    copyNoteText(item).then(showToast)
+  }
+
+  function shareItem(item) {
+    shareNoteText(item).then(showToast)
   }
 
   // Delete one item from its long-press menu. A locked item asks for the password first:
@@ -3119,6 +3199,19 @@ export default function BubbleVisualization({
       onComplete: () => { if (swipeSettleRef.current === token) setSwiping(false) },
     })
   }
+
+  // Left/Right on the keyboard turn pages. Deliberately routed through the very same
+  // animateToPage a swipe release calls, rather than a second path that "looks like" it —
+  // the spring, the clamping at both ends and the perf timing are then identical by
+  // construction. A no-op on an unpaginated level, and at either end, since animateToPage
+  // clamps to the pages that exist.
+  const pageStepSeenRef = useRef(pageStep?.nonce ?? 0)
+  useEffect(() => {
+    if (!pageStep || pageStepSeenRef.current === pageStep.nonce) return
+    pageStepSeenRef.current = pageStep.nonce
+    if (!paginatedRef.current) return
+    animateToPage(pageIndexRef.current + pageStep.dir)
+  }, [pageStep]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const clearAllDragTransforms = () => {
     containerRef.current?.querySelectorAll('[data-item-id]').forEach(el => {
@@ -3966,6 +4059,8 @@ export default function BubbleVisualization({
             height={size.height}
             onClose={closeLockMenu}
             onLock={() => { closeLockMenu(); toggleItemLock(lockMenu.item) }}
+            onCopy={() => { closeLockMenu(); copyItem(lockMenu.item) }}
+            onShare={() => { closeLockMenu(); shareItem(lockMenu.item) }}
             onDelete={() => { closeLockMenu(); requestDeleteItem(lockMenu.item) }}
           />
       )}
