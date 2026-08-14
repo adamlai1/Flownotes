@@ -35,7 +35,11 @@ export function AuthProvider({ children }) {
       // not a page redirect — so ask Supabase for the URL and open it ourselves.
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
-        options: { redirectTo: AUTH_CALLBACK_URL, skipBrowserRedirect: true },
+        options: {
+          redirectTo: AUTH_CALLBACK_URL,
+          skipBrowserRedirect: true,
+          queryParams: { prompt: 'select_account' },
+        },
       })
       if (error) throw error
       await Browser.open({ url: data.url })
@@ -43,7 +47,10 @@ export function AuthProvider({ children }) {
     }
     return supabase.auth.signInWithOAuth({
       provider: 'google',
-      options: { redirectTo: window.location.origin },
+      options: {
+        redirectTo: window.location.origin,
+        queryParams: { prompt: 'select_account' },
+      },
     })
   }
 
