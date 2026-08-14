@@ -30,7 +30,7 @@ export async function saveProjectsToCloud(userId, projects) {
   const rows = projects.map(p => ({
     id: p.id, user_id: userId, name: p.name, created_at: p.created_at,
   }))
-  const { error } = await supabase.from('projects').upsert(rows, { onConflict: 'id' })
+  const { error } = await supabase.from('projects').upsert(rows, { onConflict: 'user_id,id' })
   if (error) throw error
 }
 
@@ -42,7 +42,7 @@ export async function saveBubblesToCloud(userId, projectId, bubbles) {
     position_x: b.position_x ?? null, position_y: b.position_y ?? null,
     locked: b.locked ?? false,
   }))
-  await upsertRows('bubbles', rows, 'id', 'locked')
+  await upsertRows('bubbles', rows, 'user_id,id', 'locked')
 }
 
 export async function saveNotesToCloud(userId, notes) {
@@ -56,7 +56,7 @@ export async function saveNotesToCloud(userId, notes) {
     pinned: n.pinned ?? false,
     locked: n.locked ?? false,
   }))
-  await upsertRows('notes', rows, 'id', 'locked')
+  await upsertRows('notes', rows, 'user_id,id', 'locked')
 }
 
 export async function saveConnectionsToCloud(userId, notes) {

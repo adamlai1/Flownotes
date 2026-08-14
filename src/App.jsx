@@ -13,7 +13,16 @@ import {
 import {
   loadAllFromCloud,
   syncAllToCloud,
+  deleteBubblesFromCloud,
+  deleteProjectFromCloud,
 } from './lib/syncService'
+import {
+  SEED_PROJECT_ID,
+  SEED_IDEAS_ID,
+  SEED_IDEAS_SELF_ID,
+  SEED_TODO_ID,
+  SEED_JOURNAL_ID,
+} from './data/defaultData'
 import {
   enqueueDelete,
   markProjectDirty,
@@ -106,26 +115,82 @@ function countBubbles(projects) {
   return projects.reduce((sum, p) => sum + (p?.bubbles?.length ?? 0), 0)
 }
 
-// A bubble's identity beyond its id: the project name plus the chain of bubble
-// names from the root down to it. Ids are stable through the cloud round trip,
-// but the seeded starter bubbles get fresh random ids on every install — so an
-// id comparison alone calls a bubble "new" when the account already holds the
-// identical bubble. The name path is how a person judges "this already exists".
-function bubbleSignatures(project) {
-  const byId = new Map()
-  for (const b of project.bubbles ?? []) byId.set(b.id, b)
-  const path = (b, seen) => {
-    if (b.parent_id == null || seen.has(b.id)) return b.name ?? ''
-    seen.add(b.id)
-    const parent = byId.get(b.parent_id)
-    if (!parent) return b.name ?? ''
-    return `${path(parent, seen)}\u0000${b.name ?? ''}`
+// ── One-time legacy seed-id migration ───────────────────────────────────────
+// Installs prior to the fixed seed ids (see defaultData.js) generated random
+// ids for the seeded project and its four starter bubbles, so identical seed
+// items carry a different id on every install. Remap those legacy ids to the
+// canonical constants — scoped strictly to the seeded shape: the three root
+// bubbles by their seed names, "Self" only when its parent resolves to the
+// canonical Ideas id, and the seeded project by its seed name. Idempotent: a
+// canonical id never tests as legacy, so once remapped this is a no-op, and it
+// creates nothing — a deleted seed item stays deleted.
+
+const SEED_ROOT_BUBBLES = {
+  'Ideas': SEED_IDEAS_ID,
+  'To Do': SEED_TODO_ID,
+  'Journal': SEED_JOURNAL_ID,
+}
+const SEED_PROJECT_NAME = 'Personal Notes'
+
+// generateId() output only — never 'seed:*', never the '__root__' sentinel.
+const isLegacyId = id => typeof id === 'string' && /^[0-9a-z]+$/.test(id)
+
+// Pure: returns { projects, changed, oldBubbleIds, projectIdMap } and never
+// touches storage. oldBubbleIds / projectIdMap tell the caller which stale
+// cloud rows to delete — the upsert sync can never remove them itself.
+function migrateSeedIds(projects) {
+  let changed = false
+  const oldBubbleIds = []
+  const projectIdMap = new Map() // legacy project id → SEED_PROJECT_ID
+
+  // The seeded project: first legacy-id project with the seed name, and only
+  // when nothing already holds the canonical id.
+  if (!projects.some(p => p.id === SEED_PROJECT_ID)) {
+    const legacy = projects.find(p => p.name === SEED_PROJECT_NAME && isLegacyId(p.id))
+    if (legacy) projectIdMap.set(legacy.id, SEED_PROJECT_ID)
   }
-  const sigs = new Map() // bubble id → signature
-  for (const b of project.bubbles ?? []) {
-    sigs.set(b.id, `${project.name ?? ''}\u0001${path(b, new Set())}`)
-  }
-  return sigs
+
+  const out = projects.map(project => {
+    let p = project
+    if (projectIdMap.has(p.id)) {
+      changed = true
+      p = { ...p, id: projectIdMap.get(p.id) }
+    }
+
+    const bubbles = p.bubbles ?? []
+    const present = new Set(bubbles.map(b => b.id))
+    const idMap = new Map() // legacy bubble id → canonical seed id
+    for (const [name, canonical] of Object.entries(SEED_ROOT_BUBBLES)) {
+      if (present.has(canonical)) continue
+      const legacy = bubbles.find(b =>
+        (b.parent_id ?? null) === null && b.name === name && isLegacyId(b.id))
+      if (legacy) idMap.set(legacy.id, canonical)
+    }
+    if (!present.has(SEED_IDEAS_SELF_ID)) {
+      const self = bubbles.find(b => b.name === 'Self' && isLegacyId(b.id) &&
+        (idMap.get(b.parent_id) ?? b.parent_id) === SEED_IDEAS_ID)
+      if (self) idMap.set(self.id, SEED_IDEAS_SELF_ID)
+    }
+    if (!idMap.size) return p
+
+    changed = true
+    oldBubbleIds.push(...idMap.keys())
+    return {
+      ...p,
+      bubbles: bubbles.map(b => {
+        const id = idMap.get(b.id) ?? b.id
+        const parent = idMap.get(b.parent_id) ?? b.parent_id
+        return (id === b.id && parent === b.parent_id) ? b : { ...b, id, parent_id: parent }
+      }),
+      notes: (p.notes ?? []).map(n => {
+        const mapped = (n.bubble_ids ?? []).map(bid => idMap.get(bid) ?? bid)
+        const same = mapped.every((v, i) => v === n.bubble_ids[i])
+        return same ? n : { ...n, bubble_ids: mapped }
+      }),
+    }
+  })
+
+  return { projects: out, changed, oldBubbleIds, projectIdMap }
 }
 
 // Union of the data on this device and the account's cloud data — nothing from
@@ -136,45 +201,6 @@ function bubbleSignatures(project) {
 // against the real rule so it starts working the day they get one.
 function mergeGuestAndCloud(localProjects, cloudProjects) {
   const ts = n => Date.parse(n?.updated_at ?? n?.created_at ?? '') || 0
-
-  // Canonicalise local against cloud before unioning: a local bubble matching a
-  // cloud bubble by name path is the same bubble wearing a different id (most
-  // commonly the seeded starter bubbles). Remap those onto the cloud id — in
-  // the bubble list, in children's parent_id links, and in notes' bubble_ids —
-  // so "Keep both" cannot duplicate them.
-  const cloudIds = new Set()
-  const sigToCloudId = new Map()
-  for (const p of cloudProjects) {
-    const sigs = bubbleSignatures(p)
-    for (const b of p.bubbles ?? []) {
-      cloudIds.add(b.id)
-      const sig = sigs.get(b.id)
-      if (!sigToCloudId.has(sig)) sigToCloudId.set(sig, b.id)
-    }
-  }
-  const idMap = new Map() // local bubble id → cloud counterpart id
-  for (const p of localProjects) {
-    const sigs = bubbleSignatures(p)
-    for (const b of p.bubbles ?? []) {
-      if (cloudIds.has(b.id)) continue
-      const cid = sigToCloudId.get(sigs.get(b.id))
-      if (cid) idMap.set(b.id, cid)
-    }
-  }
-  if (idMap.size) {
-    localProjects = localProjects.map(p => ({
-      ...p,
-      bubbles: (p.bubbles ?? [])
-        .filter(b => !idMap.has(b.id))
-        .map(b => idMap.has(b.parent_id) ? { ...b, parent_id: idMap.get(b.parent_id) } : b),
-      notes: (p.notes ?? []).map(n => {
-        const mapped = [...new Set((n.bubble_ids ?? []).map(bid => idMap.get(bid) ?? bid))]
-        const same = mapped.length === (n.bubble_ids?.length ?? 0) &&
-          mapped.every((v, i) => v === n.bubble_ids[i])
-        return same ? n : { ...n, bubble_ids: mapped }
-      }),
-    }))
-  }
 
   // Winning copy of every note across both sides, remembering which project it
   // was in. Local runs second with >= so it wins exact-timestamp ties. The
@@ -258,6 +284,16 @@ function initializeData() {
     saveProjectList(projectList)
     saveProject(defaultProject)
     return { projectList, activeProject: defaultProject }
+  }
+  // Legacy seed ids → canonical constants, once. The old project file is
+  // removed after the remapped copy is saved so nothing is orphaned.
+  const seedFix = migrateSeedIds(loadAllProjects(projectList))
+  if (seedFix.changed) {
+    for (const p of seedFix.projects) saveProject(p)
+    for (const oldId of seedFix.projectIdMap.keys()) deleteProjectFromStorage(oldId)
+    projectList = projectList.map(e =>
+      seedFix.projectIdMap.has(e.id) ? { ...e, id: seedFix.projectIdMap.get(e.id) } : e)
+    saveProjectList(projectList)
   }
   const activeProject = migrateTagColors(loadProject(projectList[0].id))
   return { projectList, activeProject }
@@ -571,19 +607,43 @@ export default function App() {
       })
     }
 
-    // Cloud has data — use it as source of truth. One-time: strip the leading
-    // newline bug from cloud notes and push the fixed content back up.
+    // After a seed-id remap of cloud data has been uploaded under the new ids,
+    // the stale rows must go explicitly — the upsert sync can never remove them.
+    // Delete AFTER the upload so a failure in between loses nothing: the next
+    // sign-in just remaps again.
+    async function purgeLegacySeedRows(seedFix) {
+      if (!seedFix.changed) return
+      if (seedFix.oldBubbleIds.length) {
+        await deleteBubblesFromCloud(user.id, seedFix.oldBubbleIds)
+      }
+      for (const oldId of seedFix.projectIdMap.keys()) {
+        await deleteProjectFromCloud(user.id, oldId, [])
+      }
+    }
+
+    // Cloud has data — use it as source of truth. One-time fixes on the way in:
+    // remap legacy seed ids (then push the fix up and purge the stale rows) and
+    // strip the leading-newline bug from cloud notes.
     async function applyCloudData(cloudData, needNewlineFix) {
       let projects = cloudData.projects
+      let cloudList = cloudData.projectList
+      const seedFix = migrateSeedIds(projects)
+      if (seedFix.changed) {
+        projects = seedFix.projects
+        cloudList = cloudList.map(e =>
+          seedFix.projectIdMap.has(e.id) ? { ...e, id: seedFix.projectIdMap.get(e.id) } : e)
+        await syncAllToCloud(user.id, projects)
+        await purgeLegacySeedRows(seedFix)
+      }
       if (needNewlineFix) {
         const res = migrateProjectsNewline(projects)
         projects = res.projects
         if (res.changed) await syncAllToCloud(user.id, projects)
         localStorage.setItem(NEWLINE_FLAG, '1')
       }
-      saveProjectList(cloudData.projectList)
+      saveProjectList(cloudList)
       for (const p of projects) saveProject(p)
-      setProjectList(cloudData.projectList)
+      setProjectList(cloudList)
       setActiveProject(migrateTagColors(projects[0]))
       setSelectedBubbleId(null)
       setNoteStack([])
@@ -623,7 +683,13 @@ export default function App() {
         if (localNoteCount > 0 || localBubbleCount > 0) {
           // Read-only peek: is there also cloud data? Nothing is written locally
           // or remotely until this question — and possibly the user — has answered.
-          const peek = await loadAllFromCloud(user.id)
+          // Seed ids are remapped in memory so a not-yet-migrated cloud account's
+          // legacy seed bubbles still id-match this device's canonical ones; the
+          // durable cloud migration happens on whichever write path runs below.
+          const peekRaw = await loadAllFromCloud(user.id)
+          const peek = peekRaw
+            ? { ...peekRaw, projects: migrateSeedIds(peekRaw.projects).projects }
+            : null
           // Only items the cloud doesn't have can be lost. After a normal
           // sign-out the local store is just the last cloud snapshot, so every
           // id matches and the dialog would be pure noise — ask only when
@@ -632,29 +698,18 @@ export default function App() {
           let localOnlyCount = 0
           let localOnlyBubbleCount = 0
           if (peek) {
-            // A bubble counts as having a cloud counterpart on an id match OR a
-            // name-path match — seeded starter bubbles regenerate their ids on
-            // every install, so id alone overcounts them as new.
             const cloudNoteIds = new Set()
             const cloudBubbleIds = new Set()
-            const cloudBubbleSigs = new Set()
             for (const p of peek.projects) {
               for (const n of p.notes ?? []) cloudNoteIds.add(n.id)
-              const sigs = bubbleSignatures(p)
-              for (const b of p.bubbles ?? []) {
-                cloudBubbleIds.add(b.id)
-                cloudBubbleSigs.add(sigs.get(b.id))
-              }
+              for (const b of p.bubbles ?? []) cloudBubbleIds.add(b.id)
             }
             for (const p of localProjects) {
               for (const n of p.notes ?? []) {
                 if (!cloudNoteIds.has(n.id)) localOnlyCount++
               }
-              const sigs = bubbleSignatures(p)
               for (const b of p.bubbles ?? []) {
-                if (!cloudBubbleIds.has(b.id) && !cloudBubbleSigs.has(sigs.get(b.id))) {
-                  localOnlyBubbleCount++
-                }
+                if (!cloudBubbleIds.has(b.id)) localOnlyBubbleCount++
               }
             }
           }
@@ -692,13 +747,18 @@ export default function App() {
             } else {
               // 'merge' — union both sides, then write the cloud FIRST. Local
               // storage is only replaced once the upload succeeds, so a failed
-              // merge leaves the guest notes intact.
+              // merge leaves the guest notes intact. Cloud data is seed-id
+              // remapped before the union (local was remapped at startup) so
+              // twin seed items meet under one id; the stale legacy rows are
+              // purged after the merged upload lands.
+              const seedFix = migrateSeedIds(cloudData.projects)
               let merged = mergeGuestAndCloud(
                 loadAllProjects(loadProjectList() ?? []),
-                cloudData.projects,
+                seedFix.projects,
               )
               if (needNewlineFix) merged = migrateProjectsNewline(merged).projects
               await syncAllToCloud(user.id, merged)
+              await purgeLegacySeedRows(seedFix)
               if (needNewlineFix) localStorage.setItem(NEWLINE_FLAG, '1')
               const mergedList = merged.map(p => ({ id: p.id, name: p.name, created_at: p.created_at }))
               saveProjectList(mergedList)

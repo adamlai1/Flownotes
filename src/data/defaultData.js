@@ -1,10 +1,21 @@
 import { generateId } from '../utils/helpers'
 
-const ideasId = generateId()
-const ideasSelfId = generateId()
-const toDoId = generateId()
-const journalId = generateId()
-const defaultProjectId = generateId()
+// Fixed, well-known ids for everything the app seeds — identical on every
+// install, so the same starter bubble/project matches by id across devices
+// and accounts. The cloud scopes them per user via the composite (user_id, id)
+// primary key (see supabase/composite_ids.sql). The 'seed:' prefix cannot
+// collide with generateId() output, which is lowercase alphanumerics only.
+export const SEED_PROJECT_ID = 'seed:project'
+export const SEED_IDEAS_ID = 'seed:ideas'
+export const SEED_IDEAS_SELF_ID = 'seed:ideas-self'
+export const SEED_TODO_ID = 'seed:todo'
+export const SEED_JOURNAL_ID = 'seed:journal'
+
+const ideasId = SEED_IDEAS_ID
+const ideasSelfId = SEED_IDEAS_SELF_ID
+const toDoId = SEED_TODO_ID
+const journalId = SEED_JOURNAL_ID
+const defaultProjectId = SEED_PROJECT_ID
 
 // Sentinel ID used when a note is explicitly pinned to the root level
 // alongside membership in other bubbles.
