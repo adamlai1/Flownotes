@@ -103,34 +103,48 @@ function countNotes(projects) {
 }
 
 // Union of the data on this device and the account's cloud data — nothing from
-// either side is dropped. Notes match on id, and a collision keeps the newer
-// updated_at. Projects and bubbles carry no timestamps, so on an id collision
-// the local version wins: it's what the user was looking at a moment ago.
+// either side is dropped. Notes and bubbles match on id (ids are client-made
+// and survive the Supabase round trip unchanged), and a collision keeps the
+// newer updated_at with local winning exact ties. Bubbles carry no timestamps
+// today, so their collisions degrade to local-wins; the comparison is written
+// against the real rule so it starts working the day they get one.
 function mergeGuestAndCloud(localProjects, cloudProjects) {
   const ts = n => Date.parse(n?.updated_at ?? n?.created_at ?? '') || 0
 
   // Winning copy of every note across both sides, remembering which project it
-  // was in. Local runs second with >= so it wins exact-timestamp ties.
+  // was in. Local runs second with >= so it wins exact-timestamp ties. The
+  // note→bubble memberships (bubble_ids, many-to-many) are collected from BOTH
+  // sides regardless of which note object wins, and unioned back on below.
   const noteWinners = new Map() // note id → { note, projectId }
+  const noteBubbleIds = new Map() // note id → Set of bubble ids from either side
   for (const projects of [cloudProjects, localProjects]) {
     for (const p of projects) {
       for (const n of p.notes ?? []) {
         const prev = noteWinners.get(n.id)
         if (!prev || ts(n) >= ts(prev.note)) noteWinners.set(n.id, { note: n, projectId: p.id })
+        let ids = noteBubbleIds.get(n.id)
+        if (!ids) noteBubbleIds.set(n.id, ids = new Set())
+        for (const bid of n.bubble_ids ?? []) ids.add(bid)
       }
     }
   }
 
-  // Projects: cloud order first, local-only ones appended; a collision keeps the
-  // local fields but the union of both sides' bubbles and tags.
+  // Projects: cloud order first, local-only ones appended — a guest-only
+  // project survives whole. A collision keeps the local fields but the union
+  // of both sides' bubbles and tags.
   const projectsById = new Map()
   for (const p of cloudProjects) projectsById.set(p.id, { ...p })
   for (const p of localProjects) {
     const cloud = projectsById.get(p.id)
     if (!cloud) { projectsById.set(p.id, { ...p }); continue }
+    // Bubbles union by id, same rule as notes — a guest-only bubble survives,
+    // and with it the parent_id link that keeps its subtree attached.
     const bubbles = new Map()
     for (const b of cloud.bubbles ?? []) bubbles.set(b.id, b)
-    for (const b of p.bubbles ?? []) bubbles.set(b.id, b)
+    for (const b of p.bubbles ?? []) {
+      const prev = bubbles.get(b.id)
+      if (!prev || ts(b) >= ts(prev)) bubbles.set(b.id, b)
+    }
     projectsById.set(p.id, {
       ...cloud,
       ...p,
@@ -140,14 +154,32 @@ function mergeGuestAndCloud(localProjects, cloudProjects) {
     })
   }
 
+  // The bubble tree renders by following parent_id chains, so a bubble whose
+  // parent survived on neither side would take its whole subtree invisible.
+  // Promote such bubbles to the root of their project instead.
+  for (const p of projectsById.values()) {
+    const ids = new Set((p.bubbles ?? []).map(b => b.id))
+    p.bubbles = (p.bubbles ?? []).map(b =>
+      b.parent_id != null && !ids.has(b.parent_id) ? { ...b, parent_id: null } : b
+    )
+  }
+
   // Re-deal the winning notes into their winning project; the first project
-  // catches any orphan whose project didn't survive on either side.
+  // catches any orphan whose project didn't survive on either side. Each note
+  // keeps the winner's bubble order with the other side's memberships appended.
   const firstId = projectsById.keys().next().value
   const notesByProject = new Map()
   for (const { note, projectId } of noteWinners.values()) {
     const pid = projectsById.has(projectId) ? projectId : firstId
+    const bubbleIds = [...(note.bubble_ids ?? [])]
+    for (const bid of noteBubbleIds.get(note.id) ?? []) {
+      if (!bubbleIds.includes(bid)) bubbleIds.push(bid)
+    }
+    const outNote = bubbleIds.length === (note.bubble_ids?.length ?? 0)
+      ? note
+      : { ...note, bubble_ids: bubbleIds }
     if (!notesByProject.has(pid)) notesByProject.set(pid, [])
-    notesByProject.get(pid).push(note)
+    notesByProject.get(pid).push(outNote)
   }
 
   return [...projectsById.values()].map(p => ({ ...p, notes: notesByProject.get(p.id) ?? [] }))
