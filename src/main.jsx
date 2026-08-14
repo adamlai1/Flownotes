@@ -3,6 +3,11 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.jsx'
 import { AuthProvider } from './contexts/AuthContext.jsx'
+import { initNativeAuth, AUTH_ERROR_EVENT } from './lib/nativeAuth.js'
+
+// Register the OAuth callback listener before React mounts — iOS can deliver the
+// appUrlOpen event before any component's effects run.
+initNativeAuth()
 
 // ── Global error overlay ──────────────────────────────────────────────────────
 
@@ -23,11 +28,17 @@ function ErrorOverlay() {
       push(reason instanceof Error ? reason.message + '\n' + reason.stack : String(reason))
     }
 
+    function onAuthError(event) {
+      push(event.detail)
+    }
+
     window.addEventListener('error', onError)
     window.addEventListener('unhandledrejection', onUnhandledRejection)
+    window.addEventListener(AUTH_ERROR_EVENT, onAuthError)
     return () => {
       window.removeEventListener('error', onError)
       window.removeEventListener('unhandledrejection', onUnhandledRejection)
+      window.removeEventListener(AUTH_ERROR_EVENT, onAuthError)
     }
   }, [])
 
