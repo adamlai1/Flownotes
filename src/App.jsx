@@ -96,6 +96,63 @@ function migrateProjectsNewline(projects) {
   return { projects: out, changed }
 }
 
+// ── Guest ⇄ cloud reconciliation ────────────────────────────────────────────
+
+function countNotes(projects) {
+  return projects.reduce((sum, p) => sum + (p?.notes?.length ?? 0), 0)
+}
+
+// Union of the data on this device and the account's cloud data — nothing from
+// either side is dropped. Notes match on id, and a collision keeps the newer
+// updated_at. Projects and bubbles carry no timestamps, so on an id collision
+// the local version wins: it's what the user was looking at a moment ago.
+function mergeGuestAndCloud(localProjects, cloudProjects) {
+  const ts = n => Date.parse(n?.updated_at ?? n?.created_at ?? '') || 0
+
+  // Winning copy of every note across both sides, remembering which project it
+  // was in. Local runs second with >= so it wins exact-timestamp ties.
+  const noteWinners = new Map() // note id → { note, projectId }
+  for (const projects of [cloudProjects, localProjects]) {
+    for (const p of projects) {
+      for (const n of p.notes ?? []) {
+        const prev = noteWinners.get(n.id)
+        if (!prev || ts(n) >= ts(prev.note)) noteWinners.set(n.id, { note: n, projectId: p.id })
+      }
+    }
+  }
+
+  // Projects: cloud order first, local-only ones appended; a collision keeps the
+  // local fields but the union of both sides' bubbles and tags.
+  const projectsById = new Map()
+  for (const p of cloudProjects) projectsById.set(p.id, { ...p })
+  for (const p of localProjects) {
+    const cloud = projectsById.get(p.id)
+    if (!cloud) { projectsById.set(p.id, { ...p }); continue }
+    const bubbles = new Map()
+    for (const b of cloud.bubbles ?? []) bubbles.set(b.id, b)
+    for (const b of p.bubbles ?? []) bubbles.set(b.id, b)
+    projectsById.set(p.id, {
+      ...cloud,
+      ...p,
+      bubbles: [...bubbles.values()],
+      customTagColors: { ...(cloud.customTagColors ?? {}), ...(p.customTagColors ?? {}) },
+      customTagIds: { ...(cloud.customTagIds ?? {}), ...(p.customTagIds ?? {}) },
+    })
+  }
+
+  // Re-deal the winning notes into their winning project; the first project
+  // catches any orphan whose project didn't survive on either side.
+  const firstId = projectsById.keys().next().value
+  const notesByProject = new Map()
+  for (const { note, projectId } of noteWinners.values()) {
+    const pid = projectsById.has(projectId) ? projectId : firstId
+    if (!notesByProject.has(pid)) notesByProject.set(pid, [])
+    notesByProject.get(pid).push(note)
+  }
+
+  return [...projectsById.values()].map(p => ({ ...p, notes: notesByProject.get(p.id) ?? [] }))
+}
+
 function initializeData() {
   let projectList = loadProjectList()
   if (!projectList) {
@@ -146,8 +203,57 @@ function LoginScreen() {
   )
 }
 
+// Blocking three-way chooser shown when a sign-in finds notes both on this device
+// and in the account. Deliberately NOT dismissable — no backdrop tap, no escape
+// layer, no default action — because every way out is a real decision about
+// someone's notes. Resolved only through onChoose.
+function GuestMergeDialog({ localCount, cloudCount, onChoose }) {
+  const localNoun = localCount === 1 ? 'note' : 'notes'
+  const cloudNoun = cloudCount === 1 ? 'note' : 'notes'
+  return (
+    <div
+      data-modal
+      className="fixed inset-0 flex items-center justify-center"
+      style={{ zIndex: 80, background: 'rgba(0,0,0,0.6)' }}
+    >
+      <div
+        className="mx-6 w-full max-w-xs rounded-2xl p-6"
+        style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+      >
+        <h2 className="text-white font-semibold text-lg text-center mb-1">
+          Notes on this device
+        </h2>
+        <p className="text-gray-400 text-sm text-center mb-5">
+          This device has {localCount} {localNoun} and your account has {cloudCount} cloud {cloudNoun}. Choose what to keep.
+        </p>
+        <div className="flex flex-col gap-2">
+          <button
+            onClick={() => onChoose('merge')}
+            className="w-full py-2.5 rounded-xl text-sm font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+          >
+            Keep both
+          </button>
+          <button
+            onClick={() => onChoose('cloud')}
+            className="w-full py-2.5 rounded-xl text-sm font-medium bg-red-600 hover:bg-red-500 text-white transition-colors"
+          >
+            Discard {localCount} local {localNoun}
+          </button>
+          <button
+            onClick={() => onChoose('cancel')}
+            className="w-full py-2.5 rounded-xl text-sm font-medium transition-colors"
+            style={{ background: 'var(--hover)', color: 'var(--text-2)' }}
+          >
+            Stay signed out
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
-  const { user, loading, guestMode } = useAuth()
+  const { user, loading, guestMode, signOut, continueAsGuest } = useAuth()
   // Single keydown listener for the whole app — Escape (layers register themselves) and
   // the bare-key shortcuts wired up further down.
   useEscapeShortcut()
@@ -155,6 +261,11 @@ export default function App() {
   // not a failure, so it reads differently from 'error' in the UI.
   const [syncStatus, setSyncStatus] = useState('idle') // 'idle' | 'syncing' | 'synced' | 'error' | 'offline'
   const syncedUserRef = useRef(null)
+  // Guest ⇄ cloud conflict prompt (see the initial-sync effect). Non-null while
+  // the blocking dialog is up; the ref holds the resolver of the promise the
+  // sync effect is awaiting.
+  const [mergePrompt, setMergePrompt] = useState(null) // { local, cloud }
+  const mergeChoiceRef = useRef(null)
   const cloudSaveTimerRef = useRef(null)
   const flushingRef = useRef(false)
   const flushAgainRef = useRef(false)
@@ -342,11 +453,52 @@ export default function App() {
     if (!user) {
       setSyncStatus('idle')
       syncedUserRef.current = null
+      // A prompt can't outlive the sign-in that raised it.
+      setMergePrompt(null)
+      mergeChoiceRef.current = null
       return
     }
     if (!projectList.length) return
     if (syncedUserRef.current === user.id) return
     syncedUserRef.current = user.id
+
+    // Resolves with 'merge' | 'cloud' | 'cancel' once the user picks a button.
+    function askMergeChoice(counts) {
+      return new Promise(resolve => {
+        mergeChoiceRef.current = resolve
+        setMergePrompt(counts)
+      })
+    }
+
+    // Cloud has data — use it as source of truth. One-time: strip the leading
+    // newline bug from cloud notes and push the fixed content back up.
+    async function applyCloudData(cloudData, needNewlineFix) {
+      let projects = cloudData.projects
+      if (needNewlineFix) {
+        const res = migrateProjectsNewline(projects)
+        projects = res.projects
+        if (res.changed) await syncAllToCloud(user.id, projects)
+        localStorage.setItem(NEWLINE_FLAG, '1')
+      }
+      saveProjectList(cloudData.projectList)
+      for (const p of projects) saveProject(p)
+      setProjectList(cloudData.projectList)
+      setActiveProject(migrateTagColors(projects[0]))
+      setSelectedBubbleId(null)
+      setNoteStack([])
+      setCurrentBubbleId(null)
+    }
+
+    // First-time sync — migrate then upload all local data
+    async function uploadLocalData(needNewlineFix) {
+      let allLocal = loadAllProjects(projectList)
+      if (needNewlineFix) {
+        allLocal = migrateProjectsNewline(allLocal).projects
+        for (const p of allLocal) saveProject(p)
+        localStorage.setItem(NEWLINE_FLAG, '1')
+      }
+      await syncAllToCloud(user.id, allLocal)
+    }
 
     async function doInitialSync() {
       // Offline at startup: keep the local data as-is and don't touch the cloud. Pulling
@@ -359,38 +511,80 @@ export default function App() {
       }
       setSyncStatus('syncing')
       try {
+        const needNewlineFix = !localStorage.getItem(NEWLINE_FLAG)
+
+        // The notes already on this device are what's at stake below — count
+        // them fresh from storage, not from React state.
+        const localNoteCount = countNotes(loadAllProjects(loadProjectList() ?? []))
+
+        if (localNoteCount > 0) {
+          // Read-only peek: is there also cloud data? Nothing is written locally
+          // or remotely until this question — and possibly the user — has answered.
+          const peek = await loadAllFromCloud(user.id)
+          if (peek) {
+            // Notes on both sides. Any automatic pick would silently lose one
+            // side, so stop and ask.
+            const choice = await askMergeChoice({
+              local: localNoteCount,
+              cloud: countNotes(peek.projects),
+            })
+
+            if (choice === 'cancel') {
+              // Back to guest mode with local data untouched. Guest mode is set
+              // before signing out so the login screen never flashes.
+              syncedUserRef.current = null
+              setSyncStatus('idle')
+              continueAsGuest()
+              await signOut()
+              return
+            }
+
+            // Push anything queued from a previous offline session BEFORE pulling. The
+            // pull below overwrites local storage with cloud state, so flushing second
+            // would discard offline edits and resurrect offline deletes.
+            await flushOutbox(user.id)
+            const cloudData = await loadAllFromCloud(user.id)
+            if (!cloudData) {
+              // The cloud emptied between the peek and the choice; nothing left
+              // to merge or load, so fall back to first-sign-in adoption.
+              await uploadLocalData(needNewlineFix)
+            } else if (choice === 'cloud') {
+              await applyCloudData(cloudData, needNewlineFix)
+            } else {
+              // 'merge' — union both sides, then write the cloud FIRST. Local
+              // storage is only replaced once the upload succeeds, so a failed
+              // merge leaves the guest notes intact.
+              let merged = mergeGuestAndCloud(
+                loadAllProjects(loadProjectList() ?? []),
+                cloudData.projects,
+              )
+              if (needNewlineFix) merged = migrateProjectsNewline(merged).projects
+              await syncAllToCloud(user.id, merged)
+              if (needNewlineFix) localStorage.setItem(NEWLINE_FLAG, '1')
+              const mergedList = merged.map(p => ({ id: p.id, name: p.name, created_at: p.created_at }))
+              saveProjectList(mergedList)
+              for (const p of merged) saveProject(p)
+              setProjectList(mergedList)
+              setActiveProject(migrateTagColors(merged[0]))
+              setSelectedBubbleId(null)
+              setNoteStack([])
+              setCurrentBubbleId(null)
+            }
+            setSyncStatus('synced')
+            return
+          }
+          // No cloud data — fall through to the unchanged first-sign-in path.
+        }
+
         // Push anything queued from a previous offline session BEFORE pulling. The pull
         // below overwrites local storage with cloud state, so flushing second would
         // discard offline edits and resurrect offline deletes.
         await flushOutbox(user.id)
         const cloudData = await loadAllFromCloud(user.id)
-        const needNewlineFix = !localStorage.getItem(NEWLINE_FLAG)
         if (cloudData) {
-          // Cloud has data — use it as source of truth. One-time: strip the leading
-          // newline bug from cloud notes and push the fixed content back up.
-          let projects = cloudData.projects
-          if (needNewlineFix) {
-            const res = migrateProjectsNewline(projects)
-            projects = res.projects
-            if (res.changed) await syncAllToCloud(user.id, projects)
-            localStorage.setItem(NEWLINE_FLAG, '1')
-          }
-          saveProjectList(cloudData.projectList)
-          for (const p of projects) saveProject(p)
-          setProjectList(cloudData.projectList)
-          setActiveProject(migrateTagColors(projects[0]))
-          setSelectedBubbleId(null)
-          setNoteStack([])
-          setCurrentBubbleId(null)
+          await applyCloudData(cloudData, needNewlineFix)
         } else {
-          // First-time sync — migrate then upload all local data
-          let allLocal = loadAllProjects(projectList)
-          if (needNewlineFix) {
-            allLocal = migrateProjectsNewline(allLocal).projects
-            for (const p of allLocal) saveProject(p)
-            localStorage.setItem(NEWLINE_FLAG, '1')
-          }
-          await syncAllToCloud(user.id, allLocal)
+          await uploadLocalData(needNewlineFix)
         }
         setSyncStatus('synced')
       } catch (e) {
@@ -404,6 +598,15 @@ export default function App() {
 
     doInitialSync()
   }, [user, projectList])
+
+  // Button handler for GuestMergeDialog — hides the dialog and hands the choice
+  // to the promise the sync effect is awaiting.
+  function resolveMergeChoice(choice) {
+    setMergePrompt(null)
+    const resolve = mergeChoiceRef.current
+    mergeChoiceRef.current = null
+    resolve?.(choice)
+  }
 
   // Reconnect / retry triggers. `online` is the main one; visibility covers the common
   // mobile case where the tab was backgrounded while offline and the event never fired,
@@ -1073,6 +1276,15 @@ export default function App() {
           />
         )}
       </AnimatePresence>
+
+      {/* Guest ⇄ cloud conflict — blocking; see the initial-sync effect */}
+      {mergePrompt && (
+        <GuestMergeDialog
+          localCount={mergePrompt.local}
+          cloudCount={mergePrompt.cloud}
+          onChoose={resolveMergeChoice}
+        />
+      )}
     </div>
     </LockProvider>
     </ToastProvider>
