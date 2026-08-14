@@ -102,6 +102,10 @@ function countNotes(projects) {
   return projects.reduce((sum, p) => sum + (p?.notes?.length ?? 0), 0)
 }
 
+function countBubbles(projects) {
+  return projects.reduce((sum, p) => sum + (p?.bubbles?.length ?? 0), 0)
+}
+
 // Union of the data on this device and the account's cloud data — nothing from
 // either side is dropped. Notes and bubbles match on id (ids are client-made
 // and survive the Supabase round trip unchanged), and a collision keeps the
@@ -239,8 +243,12 @@ function LoginScreen() {
 // and in the account. Deliberately NOT dismissable — no backdrop tap, no escape
 // layer, no default action — because every way out is a real decision about
 // someone's notes. Resolved only through onChoose.
-function GuestMergeDialog({ localCount, cloudCount, onChoose }) {
-  const localNoun = localCount === 1 ? 'note' : 'notes'
+function GuestMergeDialog({ localCount, localBubbleCount, cloudCount, onChoose }) {
+  // "3 notes and 2 bubbles", with a zero count omitted rather than shown.
+  const parts = []
+  if (localCount > 0) parts.push(`${localCount} ${localCount === 1 ? 'note' : 'notes'}`)
+  if (localBubbleCount > 0) parts.push(`${localBubbleCount} ${localBubbleCount === 1 ? 'bubble' : 'bubbles'}`)
+  const localDesc = parts.join(' and ')
   const cloudNoun = cloudCount === 1 ? 'note' : 'notes'
   return (
     <div
@@ -256,7 +264,7 @@ function GuestMergeDialog({ localCount, cloudCount, onChoose }) {
           Notes on this device
         </h2>
         <p className="text-gray-400 text-sm text-center mb-5">
-          This device has {localCount} {localNoun} not in your account; your account has {cloudCount} cloud {cloudNoun}. Choose what to keep.
+          This device has {localDesc} not in your account; your account has {cloudCount} cloud {cloudNoun}. Choose what to keep.
         </p>
         <div className="flex flex-col gap-2">
           <button
@@ -269,7 +277,7 @@ function GuestMergeDialog({ localCount, cloudCount, onChoose }) {
             onClick={() => onChoose('cloud')}
             className="w-full py-2.5 rounded-xl text-sm font-medium bg-red-600 hover:bg-red-500 text-white transition-colors"
           >
-            Discard {localCount} local {localNoun}
+            Discard {localDesc}
           </button>
           <button
             onClick={() => onChoose('cancel')}
@@ -545,37 +553,46 @@ export default function App() {
       try {
         const needNewlineFix = !localStorage.getItem(NEWLINE_FLAG)
 
-        // The notes already on this device are what's at stake below — read
-        // them fresh from storage, not from React state.
+        // The notes and bubbles already on this device are what's at stake
+        // below — read them fresh from storage, not from React state.
         const localProjects = loadAllProjects(loadProjectList() ?? [])
         const localNoteCount = countNotes(localProjects)
+        const localBubbleCount = countBubbles(localProjects)
 
-        if (localNoteCount > 0) {
+        if (localNoteCount > 0 || localBubbleCount > 0) {
           // Read-only peek: is there also cloud data? Nothing is written locally
           // or remotely until this question — and possibly the user — has answered.
           const peek = await loadAllFromCloud(user.id)
-          // Only notes the cloud doesn't have can be lost. After a normal
+          // Only items the cloud doesn't have can be lost. After a normal
           // sign-out the local store is just the last cloud snapshot, so every
           // id matches and the dialog would be pure noise — ask only when
-          // loading the cloud would actually destroy something.
+          // loading the cloud would actually destroy something. Bubbles count
+          // too: a guest bubble holding no new notes is still real work.
           let localOnlyCount = 0
+          let localOnlyBubbleCount = 0
           if (peek) {
             const cloudNoteIds = new Set()
+            const cloudBubbleIds = new Set()
             for (const p of peek.projects) {
               for (const n of p.notes ?? []) cloudNoteIds.add(n.id)
+              for (const b of p.bubbles ?? []) cloudBubbleIds.add(b.id)
             }
             for (const p of localProjects) {
               for (const n of p.notes ?? []) {
                 if (!cloudNoteIds.has(n.id)) localOnlyCount++
               }
+              for (const b of p.bubbles ?? []) {
+                if (!cloudBubbleIds.has(b.id)) localOnlyBubbleCount++
+              }
             }
           }
-          if (peek && localOnlyCount > 0) {
-            // Notes on both sides. Any automatic pick would silently lose one
-            // side, so stop and ask. The count shown is what discarding local
-            // would actually lose, not the total local count.
+          if (peek && (localOnlyCount > 0 || localOnlyBubbleCount > 0)) {
+            // Work on both sides. Any automatic pick would silently lose one
+            // side, so stop and ask. The counts shown are what discarding local
+            // would actually lose, not the totals.
             const choice = await askMergeChoice({
               local: localOnlyCount,
+              bubbles: localOnlyBubbleCount,
               cloud: countNotes(peek.projects),
             })
 
@@ -615,7 +632,12 @@ export default function App() {
               saveProjectList(mergedList)
               for (const p of merged) saveProject(p)
               setProjectList(mergedList)
-              setActiveProject(migrateTagColors(merged[0]))
+              // Stay on the project the user was just looking at — every local
+              // project survives the union, but it may not be merged[0] (cloud
+              // projects sort first). Jumping to merged[0] made a guest bubble
+              // in any other project look like the merge had dropped it.
+              const viewedId = activeProjectRef.current?.id
+              setActiveProject(migrateTagColors(merged.find(p => p.id === viewedId) ?? merged[0]))
               setSelectedBubbleId(null)
               setNoteStack([])
               setCurrentBubbleId(null)
@@ -1333,6 +1355,7 @@ export default function App() {
       {mergePrompt && (
         <GuestMergeDialog
           localCount={mergePrompt.local}
+          localBubbleCount={mergePrompt.bubbles}
           cloudCount={mergePrompt.cloud}
           onChoose={resolveMergeChoice}
         />
