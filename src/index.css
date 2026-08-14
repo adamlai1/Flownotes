@@ -4,7 +4,9 @@
 
 /* ── Theme tokens ──────────────────────────────────────────────────────────── */
 :root {
-  --bg:          #1C1C1E;
+  /* --bg is the canvas underlay and must equal the dark canvas gradient's OUTER stop
+     (see BubbleVisualization) — the seam colours anchor to the gradient, not vice versa. */
+  --bg:          #19191A;
   --surface:     #1C1C1E;
   --surface-2:   #2C2C2E;
   --sidebar:     #111827;
@@ -21,7 +23,9 @@
 }
 
 [data-theme="light"] {
-  --bg:          #F2F2F7;
+  /* --bg is the canvas underlay and must equal the light canvas gradient's OUTER stop
+     (see BubbleVisualization) — the seam colours anchor to the gradient, not vice versa. */
+  --bg:          #E8E8E2;
   --surface:     #FAFAF7;
   --surface-2:   #EEEEE8;
   --sidebar:     #EEEEE8;
@@ -126,33 +130,33 @@
     min-height: 100dvh;
     margin: 0;
     padding: 0;
-    background-color: #1C1C1E;
+    background-color: #19191A; /* = dark gradient outer stop */
     overscroll-behavior: none;
   }
   html[data-theme="light"] {
-    background-color: #FAFAF7;
+    background-color: #E8E8E2; /* = light gradient outer stop */
   }
   body {
     min-height: 100dvh;
     margin: 0;
     padding: 0;
-    background-color: #1C1C1E;
+    background-color: #19191A; /* = dark gradient outer stop */
     color: var(--text);
     touch-action: manipulation;
     overscroll-behavior: none;
   }
   [data-theme="light"] body {
-    background-color: #FAFAF7;
+    background-color: #E8E8E2; /* = light gradient outer stop */
   }
   #root {
     min-height: 100dvh;
     margin: 0;
     padding: 0;
-    background-color: #1C1C1E;
+    background-color: #19191A; /* = dark gradient outer stop */
     touch-action: manipulation;
   }
   [data-theme="light"] #root {
-    background-color: #FAFAF7;
+    background-color: #E8E8E2; /* = light gradient outer stop */
   }
 }
 

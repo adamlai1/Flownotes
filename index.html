@@ -11,10 +11,12 @@
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-    <meta name="theme-color" content="#1C1C1E" />
-    <meta name="apple-mobile-web-app-title" content="FlowNotes" />
-    <meta name="description" content="FlowNotes" />
-    <title>FlowNotes</title>
+    <!-- Matches the header (bg-gray-900), not the page background, so the status-bar
+         region blends into the nav. Kept in step by ThemeContext.applyTheme. -->
+    <meta name="theme-color" content="#111827" />
+    <meta name="apple-mobile-web-app-title" content="Nubble" />
+    <meta name="description" content="Nubble" />
+    <title>Nubble</title>
     <script>
       window.onerror = function(msg, url, line, col, error) {
         document.body.innerHTML = '<div style="color:red;padding:20px;font-size:16px;font-family:monospace;white-space:pre-wrap;">' + msg + '<br>Line: ' + line + '<br>File: ' + url + (error && error.stack ? '<br><br>' + error.stack : '') + '</div>';

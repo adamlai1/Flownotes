@@ -114,7 +114,7 @@ function LoginScreen() {
   return (
     <div className="flex flex-col items-center justify-center h-dvh bg-[#1C1C1E] gap-6 px-6">
       <div className="text-center mb-2">
-        <h1 className="text-4xl font-bold text-white mb-2">FlowNotes</h1>
+        <h1 className="text-4xl font-bold text-white mb-2">Nubble</h1>
         <p className="text-gray-400">Your thoughts, connected.</p>
       </div>
 
@@ -209,6 +209,43 @@ export default function App() {
     const { projectList: pl, activeProject: ap } = initializeData()
     setProjectList(pl)
     setActiveProject(ap)
+  }, [])
+
+  // ── True viewport height ──────────────────────────────────────────────────────
+  //
+  // The app column is sized by --app-h, set here from window.innerHeight — not by a CSS
+  // viewport unit. In the installed PWA the column sized with 100dvh ended a safe-area
+  // inset short of the real viewport (the red-shell test showed html/body through a
+  // ~34px strip at the bottom that no app element ever covered), while innerHeight
+  // consistently reported the true bottom. So the truth the probe measures is the truth
+  // the layout uses.
+  //
+  // Which height governs what, deliberately:
+  //   PAINT    — this height. The app column, and the canvas filling it, must cover to
+  //              the real viewport bottom; the canvas gradient resolves to the shell
+  //              colour before the bottom edge, so coverage is what makes the seam
+  //              invisible.
+  //   MOVEMENT — the canvas-measured size.height (+ safeBottom) in BubbleVisualization.
+  //              Item bounds derive from the canvas's own box, so they follow this fix
+  //              automatically; if items should someday rest above the home indicator
+  //              again, that belongs in bottomEdgeLimit, not here.
+  //
+  // innerHeight (the layout viewport) does not shrink for the iOS keyboard — only the
+  // visual viewport does — so listening to visualViewport is safe: re-reading
+  // innerHeight there is a no-op mid-edit and catches the standalone relaunch/rotation
+  // moments where dvh goes stale.
+  useEffect(() => {
+    const setH = () =>
+      document.documentElement.style.setProperty('--app-h', `${window.innerHeight}px`)
+    setH()
+    window.addEventListener('resize', setH)
+    window.addEventListener('orientationchange', setH)
+    window.visualViewport?.addEventListener('resize', setH)
+    return () => {
+      window.removeEventListener('resize', setH)
+      window.removeEventListener('orientationchange', setH)
+      window.visualViewport?.removeEventListener('resize', setH)
+    }
   }, [])
 
   // One-time newline-bug migration for guest data. Signed-in users are migrated
@@ -891,7 +928,13 @@ export default function App() {
     <PreferencesProvider>
     <ToastProvider>
     <LockProvider onRemoveAllLocks={clearAllLocks}>
-    <div className="flex flex-col h-dvh overflow-hidden" style={{ background: 'var(--bg)' }}>
+    <div
+      data-app-root=""
+      className="flex flex-col overflow-hidden"
+      // height: measured innerHeight (see the --app-h effect above), 100dvh only until
+      // the first effect tick. h-dvh alone left the column an inset short in standalone.
+      style={{ background: 'var(--bg)', height: 'var(--app-h, 100dvh)' }}
+    >
       <TopNav
         projectList={projectList}
         activeProject={activeProject}

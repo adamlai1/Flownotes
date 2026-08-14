@@ -67,7 +67,7 @@ export default function Onboarding({ onDismiss }) {
         transition={{ delay: 0.18, duration: 0.35 }}
         className="text-center mb-10"
       >
-        <h1 className="text-3xl font-bold text-white mb-2">FlowNotes</h1>
+        <h1 className="text-3xl font-bold text-white mb-2">Nubble</h1>
         <p className="text-gray-400 text-[15px] leading-snug">
           A mind-mapping notes app.<br />Organize your thoughts in bubbles.
         </p>

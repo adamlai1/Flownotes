@@ -176,9 +176,9 @@ const layoutSeed = (contextId, pageIndex = 0) =>
 
 // Lay out ONE page's items exactly like the single-page view: organic scatter from
 // computeLayout, overridden by saved positions, new items settled, overlaps cleared.
-function layoutPage(pageItems, savedPositions, projectId, contextId, width, height, noteScale = 1, seed = 0) {
+function layoutPage(pageItems, savedPositions, projectId, contextId, width, height, noteScale = 1, seed = 0, safeBottom = 0) {
   if (width <= 0) return []
-  const laid = computeLayout(pageItems, width, height, SUB_BAR_H, BOTTOM_PAD, noteScale, seed)
+  const laid = computeLayout(pageItems, width, height, SUB_BAR_H, BOTTOM_PAD, noteScale, seed, safeBottom)
   const laidMapped = laid.map(item => {
     const saved = savedPositions[posKey(projectId, contextId, item.id)]
     return saved ? { ...item, cx: saved.xFrac * width, cy: saved.yFrac * height } : item
@@ -189,13 +189,13 @@ function layoutPage(pageItems, savedPositions, projectId, contextId, width, heig
   // Mixed page with saved positions: flow the free notes around the bubbles' actual
   // (loaded) locations instead of just settling them off the phantom fresh layout.
   if (anchored.size > 0) {
-    const arranged = arrangeNotesAroundBubbles(laidMapped, anchored, width, height)
+    const arranged = arrangeNotesAroundBubbles(laidMapped, anchored, width, height, safeBottom)
     if (arranged) return arranged
   }
   const settled = (anchored.size > 0 && anchored.size < laidMapped.length)
-    ? settleItems(laidMapped, anchored, width, height)
+    ? settleItems(laidMapped, anchored, width, height, safeBottom)
     : laidMapped
-  return separateOverlaps(settled, width, height, shouldPinBubbles(settled, anchored.size))
+  return separateOverlaps(settled, width, height, shouldPinBubbles(settled, anchored.size), null, safeBottom)
 }
 
 // Everything layoutPage's OUTPUT depends on, as one string — the cache key for a page.
@@ -212,8 +212,8 @@ function layoutPage(pageItems, savedPositions, projectId, contextId, width, heig
 // Adding, removing or moving an item between pages changes some page's id list; a
 // resize or a note-size change alters the geometry for every page; a drop rewrites the
 // saved positions. Each of those falls out of the key on its own.
-function pageLayoutKey(group, savedPositions, projectId, contextId, width, height, noteScale, seed) {
-  let key = `${projectId}|${contextId ?? 'root'}|${width}x${height}|${noteScale}|${seed}`
+function pageLayoutKey(group, savedPositions, projectId, contextId, width, height, noteScale, seed, safeBottom = 0) {
+  let key = `${projectId}|${contextId ?? 'root'}|${width}x${height}+${safeBottom}|${noteScale}|${seed}`
   for (const it of group) {
     key += `|${it.id}:${it.type === 'note' ? 'n' : it.contentCount || 0}`
     const saved = savedPositions[posKey(projectId, contextId, it.id)]
@@ -247,6 +247,42 @@ function solidMutedColor(hex) {
 
 
 // ─── Layout ───────────────────────────────────────────────────────────────────
+
+// ─── The bottom bound ─────────────────────────────────────────────────────────
+//
+// Items may rest at the PAINTED bottom of the screen, home indicator included — iOS
+// keeps the indicator legible over app content, and a bubble is canvas, not a control.
+// The layout used to hold everything a whole inset above the painted bottom (then a
+// middle-band reservation, then a graded one); all of that is gone. One exception
+// survives, and it is not about the indicator: the + button column.
+//
+// `height` deliberately still means the CONTENT box (painted height minus the inset), and
+// the strip under the indicator is expressed as `+ safeBottom` at the few places that
+// bound an item. That is not an accident of convenience: the + button is positioned in
+// CSS at `bottom: 1.5rem + env(safe-area-inset-bottom)`, so its centre sits at
+// `height - 52` in content-box coordinates and at `height - 52 - safeBottom` in
+// painted-box ones. Keeping `height` as the content box leaves all six of those `- 52`
+// sites correct exactly as they are, instead of requiring every one to be found and
+// corrected in step.
+
+// The lowest an item's BOTTOM EDGE may reach at horizontal position `cx`: the painted
+// bottom (`height + safeBottom`) everywhere except the + button column, which keeps a
+// BINARY veto — it protects a tappable control. (The veto exists as a regression fix:
+// handing back the strip on the right opened a pocket of canvas BELOW the button that
+// keepClearOfPlusButton's radial escape could not get items out of; excluding the
+// button's whole column restores the invariant the escape depends on: an item is never
+// below the button, so radial always has room.)
+function bottomEdgeLimit(cx, hw, width, height, safeBottom = 0) {
+  // The button's exclusion circle projected onto x, so the veto covers the whole column
+  // the radial escape has to work in.
+  const btnReach = PLUS_BTN_EXCL_R + BTN_ROW_PAD
+  return (cx + hw > width - 52 - btnReach) ? height : height + safeBottom
+}
+
+// The same bound expressed for an item's CENTRE, which is what every clamp works in.
+function bottomCentreLimit(p, width, height, safeBottom = 0) {
+  return bottomEdgeLimit(p.cx, halfWidthOf(p), width, height, safeBottom) - halfHeightOf(p)
+}
 
 // Note squares render at W = r*1.55, H = r*1.15, so their half-extents are these
 // fractions of r. Notes are separated by their real box, not the bounding circle.
@@ -583,7 +619,7 @@ function recenterBubbles(items, width, height, headerH, bottomPad, noteScale = 1
 // bubbles and pinned saved-notes → pinned separation). Notes the user placed manually
 // are never moved by Lloyd and are exempt from the ellipse ejection.
 // Returns null when the flow doesn't apply (no bubbles, or no free notes to arrange).
-function arrangeNotesAroundBubbles(items, anchoredIds, width, height) {
+function arrangeNotesAroundBubbles(items, anchoredIds, width, height, safeBottom = 0) {
   const bubs = items.filter(p => p.type !== 'note')
   const freeNotes = items.filter(p => p.type === 'note' && !anchoredIds.has(p.id))
   if (bubs.length === 0 || freeNotes.length === 0) return null
@@ -600,8 +636,8 @@ function arrangeNotesAroundBubbles(items, anchoredIds, width, height) {
     items.filter(p => p.type === 'note' && anchoredIds.has(p.id)).map(p => p.id)
   )
   return separateOverlaps(
-    lloydSpread(seeded, width, height, SUB_BAR_H, BOTTOM_PAD, pinnedNotes),
-    width, height, true, freeIds,
+    lloydSpread(seeded, width, height, SUB_BAR_H, BOTTOM_PAD - safeBottom, pinnedNotes),
+    width, height, true, freeIds, safeBottom,
   )
 }
 
@@ -628,7 +664,11 @@ export function noteGridFrame(width, height, headerH, bottomPad, noteR, resX, re
   const BOX_W = noteR * 2 * NOTE_HW, BOX_H = noteR * 2 * NOTE_HH
   const mX = NOTE_MARGIN_X + resX + BOX_W / 2
   const mT = headerH + NOTE_MARGIN_Y + resY + BOX_H / 2
-  const mB = NOTE_MARGIN_Y + resY + BOX_H / 2
+  // Bottom margin is the jitter reserve and half a box, and NOT NOTE_MARGIN_Y: that
+  // extra 10px put freshly placed notes above where the drag clamp lets one be
+  // dragged. The reserve stays — it is what guarantees a wobbling edge card cannot
+  // cross the bound — so placement now agrees with the clamp up to the wobble.
+  const mB = resY + BOX_H / 2
   return {
     BOX_W, BOX_H, mX, mT,
     spanW: width - mX * 2,
@@ -801,9 +841,12 @@ export const PAGE_FILL = 0.72
 // them as 98px bubble cells paginated note pages long before they were visually full.
 // pageLoad > 1 means the mix doesn't fit one screen; perPage is the count assignPages
 // splits on (it is count-based, so the two capacities blend into one number).
-export function pageLoadFor(bubbleN, noteN, width, height, noteScale) {
+export function pageLoadFor(bubbleN, noteN, width, height, noteScale, safeBottom = 0) {
   if (width <= 0) return { pageLoad: 0, perPage: 1 }
-  const pageAvailH = height - SUB_BAR_H - BOTTOM_PAD
+  // Capacity is solved against the same grown span placement uses, or pages under-fill
+  // by exactly the strip this change recovered.
+  const gridPad = BOTTOM_PAD - safeBottom
+  const pageAvailH = height - SUB_BAR_H - gridPad
   // The cell is the bubble FLOOR, and it has to be.
   //
   // Sizing it to the biggest bubble a page can hold sounds more honest and is badly
@@ -828,13 +871,13 @@ export function pageLoadFor(bubbleN, noteN, width, height, noteScale) {
   // clearance, minus the cells lost to the + button), held back to PAGE_FILL so the
   // solver always lands on a looser pitch than the densest one and jitterFor has slack
   // to spend. Filling to rawNotesPerPage is precisely the zero-jitter case.
-  const rawNotesPerPage = noteGridCapacity(width, height, SUB_BAR_H, BOTTOM_PAD, noteScale)
+  const rawNotesPerPage = noteGridCapacity(width, height, SUB_BAR_H, gridPad, noteScale)
   const notesPerPage = Math.max(1, Math.floor(rawNotesPerPage * PAGE_FILL))
   // Reported for the capacity log: the one usable width every note count is derived from
   // (centre-to-centre, i.e. the page minus the header, the edge margin and half a card at
   // each end), and how many cards fit across it as pure arithmetic. If the placement ever
   // puts fewer than noteCols in a full row again, these two numbers show it immediately.
-  const noteFrame = noteGridFrame(width, height, SUB_BAR_H, BOTTOM_PAD, noteRFor(noteScale), 0, 0)
+  const noteFrame = noteGridFrame(width, height, SUB_BAR_H, gridPad, noteRFor(noteScale), 0, 0)
   const usableW = noteFrame.spanW
   const noteCols = cellsAcross(usableW, noteFrame.BOX_W, NOTE_GAP_X)
   const noteRows = cellsAcross(noteFrame.spanH, noteFrame.BOX_H, NOTE_GAP_Y)
@@ -873,14 +916,15 @@ export function pageLoadFor(bubbleN, noteN, width, height, noteScale) {
 // layout is clean — nothing overlapping, nothing off-screen — which is the only thing the
 // caller below actually tests for.
 const LAYOUT_PENALTY_EPS = 0.5 // sub-pixel float noise is not an overlap
-function layoutPenalty(laid, width, height, headerH, bottomPad) {
+function layoutPenalty(laid, width, height, headerH, bottomPad, safeBottom = 0) {
   let s = 0
   const btn = { cx: width - 52, cy: height - 52, r: PLUS_BTN_EXCL_R }
   for (let i = 0; i < laid.length; i++) {
     const p = laid[i]
     const hw = halfWidthOf(p), hh = halfHeightOf(p)
     s += Math.max(0, hw - p.cx) + Math.max(0, p.cx - (width - hw))
-      + Math.max(0, headerH + hh - p.cy) + Math.max(0, p.cy - (height - bottomPad - hh))
+      + Math.max(0, headerH + hh - p.cy)
+      + Math.max(0, p.cy - (bottomEdgeLimit(p.cx, halfWidthOf(p), width, height, safeBottom) - bottomPad - hh))
     // The + button is as much an obstacle as another item — a candidate that only looks
     // clean because it parked a bubble under the button is not clean.
     s += circleBoxPen(btn, p, BTN_ROW_PAD)
@@ -894,12 +938,16 @@ function layoutPenalty(laid, width, height, headerH, bottomPad) {
   return s
 }
 
-export function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteScale = 1, seed = 0) {
+export function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteScale = 1, seed = 0, safeBottom = 0) {
   const n = items.length
   if (n === 0) return []
 
   // availH excludes the header and the bottom clearance needed for the + button
-  const availH = height - headerH - bottomPad
+  // The strip beside the home indicator is usable now, so every span below is solved
+  // against the painted height. Only the BOUNDS are indicator-aware (bottomEdgeLimit);
+  // spans that were merely conservative can simply grow.
+  const gridPad = bottomPad - safeBottom
+  const availH = height - headerH - gridPad
   const cx0 = width / 2
   // Center the cluster in the usable band between header and bottom clearance
   const cy0 = headerH + availH / 2
@@ -936,9 +984,9 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
     // A full page converges on a zero reserve — which is the grid noteGridCapacity
     // measures, so the two agree exactly where it matters — while a sparse page still
     // reserves room for the wobble it will actually use.
-    const probe = solveNoteGrid(n, width, height, headerH, bottomPad, NOTE_R, 0, 0)
+    const probe = solveNoteGrid(n, width, height, headerH, gridPad, NOTE_R, 0, 0)
     const probeJ = jitterFor(probe.f, probe.cols, probe.rows, probe.pitchX, probe.pitchY)
-    const reserved = solveNoteGrid(n, width, height, headerH, bottomPad, NOTE_R, probeJ.jx, probeJ.jy)
+    const reserved = solveNoteGrid(n, width, height, headerH, gridPad, NOTE_R, probeJ.jx, probeJ.jy)
     // The probe can pick a loose split whose jitter, once reserved, leaves too little room
     // for n — a full desktop page of large notes did exactly that and dumped the surplus
     // in a stack. Only adopt the reserved frame if it still holds every note; otherwise
@@ -1054,7 +1102,11 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
       return {
         ...item,
         cx,
-        cy: Math.min(s.y + hy * jy, noteCyMaxAt(cx, width, height, NOTE_R)),
+        cy: Math.min(
+          s.y + hy * jy,
+          noteCyMaxAt(cx, width, height, NOTE_R),
+          bottomEdgeLimit(cx, NOTE_R * NOTE_HW, width, height, safeBottom) - NOTE_R * NOTE_HH,
+        ),
         r: NOTE_R,
       }
     })
@@ -1188,7 +1240,7 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
   const clampXY = (p) => {
     const hw = halfWidthOf(p), hh = halfHeightOf(p)
     p.cx = Math.max(hw + 8, Math.min(width - hw - 8, p.cx))
-    p.cy = Math.max(headerH + hh + 8, Math.min(height - bottomPad - hh, p.cy))
+    p.cy = Math.max(headerH + hh + 8, Math.min(bottomCentreLimit(p, width, height, safeBottom) - bottomPad, p.cy))
   }
   const tightGap = Math.min(packGap, 5)
   for (let iter = 0; iter < 160; iter++) {
@@ -1203,15 +1255,16 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
   }
 
   // Keep every bubble fully clear of the + button (full-circle barrier, all sides).
-  result.forEach(item => keepClearOfPlusButton(item, width, height, headerH, height - bottomPad))
+  result.forEach(item => keepClearOfPlusButton(item, width, height, headerH,
+    bottomEdgeLimit(item.cx, halfWidthOf(item), width, height, safeBottom) - bottomPad))
 
   // Mixed pages (bubbles + notes): cluster the bubbles compactly at the page center,
   // then spread the NOTES around them (lloydSpread pins bubbles), and finish with the
   // pinned separation so notes yield to the anchored bubble cluster.
   if (items.some(i => i.type === 'note')) {
     return separateOverlaps(
-      lloydSpread(recenterBubbles(result, width, height, headerH, bottomPad, noteScale), width, height, headerH, bottomPad),
-      width, height, true,
+      lloydSpread(recenterBubbles(result, width, height, headerH, gridPad, noteScale), width, height, headerH, gridPad),
+      width, height, true, null, safeBottom,
     )
   }
 
@@ -1231,12 +1284,13 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
   // Lloyd steers centroids away from the button but knows nothing about the boxes around
   // them, so it undoes the barrier applied above — re-apply it to the spread candidate
   // before the separation pass, exactly as the packed one already had it.
-  const spreadPos = lloydSpread(result, width, height, headerH, bottomPad)
-  spreadPos.forEach(item => keepClearOfPlusButton(item, width, height, headerH, height - bottomPad))
-  const packed = separateOverlaps(result, width, height, false)
-  const spread = separateOverlaps(spreadPos, width, height, false)
-  return layoutPenalty(spread, width, height, headerH, bottomPad)
-    <= layoutPenalty(packed, width, height, headerH, bottomPad) + LAYOUT_PENALTY_EPS
+  const spreadPos = lloydSpread(result, width, height, headerH, gridPad)
+  spreadPos.forEach(item => keepClearOfPlusButton(item, width, height, headerH,
+    bottomEdgeLimit(item.cx, halfWidthOf(item), width, height, safeBottom) - bottomPad))
+  const packed = separateOverlaps(result, width, height, false, null, safeBottom)
+  const spread = separateOverlaps(spreadPos, width, height, false, null, safeBottom)
+  return layoutPenalty(spread, width, height, headerH, bottomPad, safeBottom)
+    <= layoutPenalty(packed, width, height, headerH, bottomPad, safeBottom) + LAYOUT_PENALTY_EPS
     ? spread
     : packed
   }
@@ -1259,13 +1313,13 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
   // shipping an overlap. The plain golden angle is always the last candidate, so this can
   // never place worse than the unvaried layout did.
   let best = scatter(1)
-  let bestPenalty = layoutPenalty(best, width, height, headerH, bottomPad)
+  let bestPenalty = layoutPenalty(best, width, height, headerH, bottomPad, safeBottom)
   // A bubble-only page has no wobble to give back, so the other candidates would be the
   // identical layout recomputed — don't pay for them.
   for (const wobble of hasNotes ? [0.5, 0] : []) {
     if (bestPenalty <= LAYOUT_PENALTY_EPS) break
     const candidate = scatter(wobble)
-    const penalty = layoutPenalty(candidate, width, height, headerH, bottomPad)
+    const penalty = layoutPenalty(candidate, width, height, headerH, bottomPad, safeBottom)
     if (penalty < bestPenalty) { best = candidate; bestPenalty = penalty }
   }
   return best
@@ -2076,7 +2130,7 @@ const BOTTOM_PAD = 0           // no bottom barrier — bubbles reach the bottom
 // commit, and the per-render page layout. Set false to silence, or delete the marked
 // blocks. Note the app runs under StrictMode, so in dev every render body — including
 // the layout below — executes TWICE per commit; halve the layout figures accordingly.
-const DEBUG_SWIPE_PERF = true
+const DEBUG_SWIPE_PERF = false
 
 const PLUS_BTN_EXCL_R = 36    // no-go radius around the floating + button
 
@@ -2101,11 +2155,59 @@ function keepClearOfPlusButton(p, width, height, topLimit, botLimit) {
 // (r=40) forced note centers 17px further from the top edge than the even-spread grid
 // places them, shoving the whole top row down into row 2 and re-creating tiny overlaps
 // the layout had just resolved. Mutates p.cx / p.cy in place.
-function clampToBounds(p, width, height) {
+// Where a dragged item is ALLOWED to want to be: screen bounds, the indicator/button
+// bottom rule, and the + button's exclusion zone — the same three the layout enforces, so
+// dragging cannot reach a position placement would refuse.
+function clampDragTarget(drag, wantX, wantY, width, height, safeBottom = 0) {
+  const hw = halfWidthOf(drag), hh = halfHeightOf(drag)
+  const loX = hw + 12, hiX = Math.max(loX, width - hw - 12)
+  const cx = Math.max(loX, Math.min(hiX, wantX))
+  const loY = SUB_BAR_H + hh + 12
+  const hiYat = (x) => Math.max(loY, bottomEdgeLimit(x, hw, width, height, safeBottom) - hh)
+  const cy = Math.max(loY, Math.min(hiYat(cx), wantY))
+
+  // Clear of the + button, GUARANTEED rather than attempted.
+  //
+  // keepClearOfPlusButton pushes once along the centre-to-centre direction by the
+  // box-vs-circle penetration, then clamps. That is fine when the item is beside the
+  // button with room to move, and it silently fails when it isn't: the push is cut short
+  // by a bound, or the centres nearly coincide and the direction is meaningless, and the
+  // item stays in the zone. A sweep of every pointer position found ~26k such spots.
+  //
+  // A box is clear of the circle as soon as it is separated on EITHER axis, so instead of
+  // one direction that may be blocked, take the cheapest of the four that isn't. Up and
+  // left are the ones that always have room here — the button sits in the bottom-right
+  // corner — so a feasible candidate always exists.
+  const btnCx = width - 52, btnCy = height - 52
+  const need = PLUS_BTN_EXCL_R + BTN_ROW_PAD
+  const gapX = Math.max(0, Math.abs(cx - btnCx) - hw)
+  const gapY = Math.max(0, Math.abs(cy - btnCy) - hh)
+  if (Math.hypot(gapX, gapY) >= need) return { cx, cy }
+
+  const candidates = [
+    { cx, cy: btnCy - need - hh },          // up
+    { cx: btnCx - need - hw, cy },          // left
+    { cx: btnCx + need + hw, cy },          // right
+    { cx, cy: btnCy + need + hh },          // down
+  ]
+  let best = null
+  for (const c of candidates) {
+    if (c.cx < loX || c.cx > hiX) continue
+    if (c.cy < loY || c.cy > hiYat(c.cx)) continue
+    const d = Math.hypot(c.cx - cx, c.cy - cy)
+    if (!best || d < best.d) best = { ...c, d }
+  }
+  // No candidate fits only on a viewport too small to hold the item beside the button at
+  // all; keeping the clamped position is better than teleporting it.
+  return best ? { cx: best.cx, cy: best.cy } : { cx, cy }
+}
+
+function clampToBounds(p, width, height, safeBottom = 0) {
   const hw = halfWidthOf(p), hh = halfHeightOf(p)
   p.cx = Math.max(hw + 12, Math.min(width - hw - 12, p.cx))
-  p.cy = Math.max(SUB_BAR_H + hh + 12, Math.min(height - BOTTOM_PAD - hh, p.cy))
-  keepClearOfPlusButton(p, width, height, SUB_BAR_H, height - BOTTOM_PAD)
+  // Clamp x first: the bottom bound depends on where the box sits horizontally.
+  p.cy = Math.max(SUB_BAR_H + hh + 12, Math.min(bottomCentreLimit(p, width, height, safeBottom), p.cy))
+  keepClearOfPlusButton(p, width, height, SUB_BAR_H, bottomEdgeLimit(p.cx, hw, width, height, safeBottom))
 }
 
 // Safety pass: after any data change / re-render, push apart any bubbles that
@@ -2137,7 +2239,7 @@ function shouldPinBubbles(items, anchoredCount) {
     items.some(i => i.type === 'note') && items.some(i => i.type !== 'note')
 }
 
-export function separateOverlaps(items, width, height, pinBubbles = false, ellipseOnlyIds = null) {
+export function separateOverlaps(items, width, height, pinBubbles = false, ellipseOnlyIds = null, safeBottom = 0) {
   const BUFFER = 3 // px gap so items never visually touch
   const EPS = 0.25 // sub-pixel tolerance so float noise doesn't spin the loop forever
   const pos = items.map(i => ({ ...i }))
@@ -2146,14 +2248,15 @@ export function separateOverlaps(items, width, height, pinBubbles = false, ellip
   const boundsClamp = (p) => {
     const hw = halfWidthOf(p), hh = halfHeightOf(p)
     p.cx = Math.max(hw + EDGE_INSET, Math.min(width - hw - EDGE_INSET, p.cx))
-    p.cy = Math.max(SUB_BAR_H + hh + EDGE_INSET, Math.min(height - BOTTOM_PAD - hh, p.cy))
+    p.cy = Math.max(SUB_BAR_H + hh + EDGE_INSET, Math.min(bottomCentreLimit(p, width, height, safeBottom), p.cy))
   }
   // How far outside the page an item hangs, 0 when fully inside — the same insets read as
   // a distance instead of a clamp, so a snapshot can be scored on it.
   const outOfBounds = (p) => {
     const hw = halfWidthOf(p), hh = halfHeightOf(p)
     return Math.max(0, hw + EDGE_INSET - p.cx) + Math.max(0, p.cx - (width - hw - EDGE_INSET))
-      + Math.max(0, SUB_BAR_H + hh + EDGE_INSET - p.cy) + Math.max(0, p.cy - (height - BOTTOM_PAD - hh))
+      + Math.max(0, SUB_BAR_H + hh + EDGE_INSET - p.cy)
+      + Math.max(0, p.cy - bottomCentreLimit(p, width, height, safeBottom))
   }
   // Keep the BEST arrangement seen, not the last one.
   //
@@ -2254,7 +2357,7 @@ export function separateOverlaps(items, width, height, pinBubbles = false, ellip
 
 // ─── Settle new (unplaced) items away from anchored (saved-position) items ─────
 // anchoredIds = Set of item IDs that are fixed in place; new items are free to move.
-function settleItems(items, anchoredIds, width, height) {
+function settleItems(items, anchoredIds, width, height, safeBottom = 0) {
   const GAP = 16
 
   const pos = items.map(i => ({ ...i }))
@@ -2276,14 +2379,14 @@ function settleItems(items, anchoredIds, width, height) {
         const bFree = !anchoredIds.has(b.id)
         if (ox < oy) {
           const s = dx < 0 ? -1 : 1
-          if (bFree) { a.cx += s * ox / 2; b.cx -= s * ox / 2; clampToBounds(b, width, height) }
+          if (bFree) { a.cx += s * ox / 2; b.cx -= s * ox / 2; clampToBounds(b, width, height, safeBottom) }
           else a.cx += s * ox
         } else {
           const s = dy < 0 ? -1 : 1
-          if (bFree) { a.cy += s * oy / 2; b.cy -= s * oy / 2; clampToBounds(b, width, height) }
+          if (bFree) { a.cy += s * oy / 2; b.cy -= s * oy / 2; clampToBounds(b, width, height, safeBottom) }
           else a.cy += s * oy
         }
-        clampToBounds(a, width, height)
+        clampToBounds(a, width, height, safeBottom)
         moved = true
       }
     }
@@ -2298,7 +2401,7 @@ function settleItems(items, anchoredIds, width, height) {
 // Returns a new positions array with no overlaps and boundary violations resolved.
 // The dragged item starts at desiredCx/desiredCy; if blocked by cornered bubbles
 // it gets pushed back, giving a "hits a wall" feel.
-function resolveCollisions(items, draggedId, desiredCx, desiredCy, width, height) {
+function resolveCollisions(items, draggedId, desiredCx, desiredCy, width, height, safeBottom = 0) {
   const GAP = 16
 
   const pos = items.map(item => ({
@@ -2312,7 +2415,7 @@ function resolveCollisions(items, draggedId, desiredCx, desiredCy, width, height
 
   // Clamp dragged item to screen boundaries (incl. + button exclusion) first
   const dp = pos.find(p => p.isDragged)
-  if (dp) clampToBounds(dp, width, height)
+  if (dp) clampToBounds(dp, width, height, safeBottom)
 
   for (let iter = 0; iter < 30; iter++) {
     let anyOverlap = false
@@ -2347,22 +2450,22 @@ function resolveCollisions(items, draggedId, desiredCx, desiredCy, width, height
         if (!a.isDragged && !b.isDragged) {
           if (axisX) { a.cx -= sgn * ov / 2; b.cx += sgn * ov / 2 }
           else { a.cy -= sgn * ov / 2; b.cy += sgn * ov / 2 }
-          clampToBounds(a, width, height)
-          clampToBounds(b, width, height)
+          clampToBounds(a, width, height, safeBottom)
+          clampToBounds(b, width, height, safeBottom)
         } else {
           const dragged = a.isDragged ? a : b
           const other = a.isDragged ? b : a
           const dir = a.isDragged ? sgn : -sgn // push the other away from the dragged
           const bx = other.cx, by = other.cy
           if (axisX) other.cx += dir * ov; else other.cy += dir * ov
-          clampToBounds(other, width, height)
+          clampToBounds(other, width, height, safeBottom)
           // Whatever the other item couldn't absorb (it hit a wall) pushes the dragged
           // item back instead — the "hits a wall" feel.
           const movedDist = Math.abs(axisX ? other.cx - bx : other.cy - by)
           const remaining = ov - movedDist
           if (remaining > 0.5) {
             if (axisX) dragged.cx -= dir * remaining; else dragged.cy -= dir * remaining
-            clampToBounds(dragged, width, height)
+            clampToBounds(dragged, width, height, safeBottom)
           }
         }
       }
@@ -2395,7 +2498,9 @@ export default function BubbleVisualization({
   const isLight = theme === 'light'
   const { noteSize } = usePreferences()
   const noteScale = NOTE_SIZE_SCALE[noteSize] ?? 1
-  const [size, setSize] = useState({ width: 0, height: 0 })
+  // height stays the CONTENT box; safeBottom is the inset the canvas paints through,
+  // carried alongside so the bounds can hand the strip back outside the indicator.
+  const [size, setSize] = useState({ width: 0, height: 0, safeBottom: 0 })
   const [navStack, setNavStack] = useState([])
   const [navDir, setNavDir] = useState('in')
   // ── Multi-select ──────────────────────────────────────────────────────────────
@@ -2642,11 +2747,23 @@ export default function BubbleVisualization({
   useLayoutEffect(() => {
     const el = containerRef.current
     if (!el) return
-    // clientHeight includes the safe-area paddingBottom (border-box); subtract it so
-    // bubbles lay out in the visible area while the gradient still paints the safe area.
+    // The canvas carries no safe-area padding (see the container style for why), so the
+    // inset is measured directly: a throwaway fixed element sized by the env() value,
+    // read and removed in the same frame. `height` keeps its documented meaning — the
+    // area above the home indicator — so bottomEdgeLimit and every `- 52` site are
+    // untouched; only where the inset comes FROM has changed.
+    const measureSafeBottom = () => {
+      const probe = document.createElement('div')
+      probe.style.cssText =
+        'position:fixed;left:-9999px;bottom:0;height:env(safe-area-inset-bottom);pointer-events:none'
+      document.body.appendChild(probe)
+      const h = probe.getBoundingClientRect().height
+      probe.remove()
+      return h
+    }
     const update = () => {
-      const padBottom = parseFloat(getComputedStyle(el).paddingBottom) || 0
-      setSize({ width: el.clientWidth, height: el.clientHeight - padBottom })
+      const safeBottom = measureSafeBottom()
+      setSize({ width: el.clientWidth, height: el.clientHeight - safeBottom, safeBottom })
     }
     update()
     const ro = new ResizeObserver(update)
@@ -2775,14 +2892,14 @@ export default function BubbleVisualization({
     pageLoad, perPage, notesPerPage, bubblesPerPage, rawNotesPerPage, rawBubblesPerPage,
     usableW, noteCols, noteRows,
   } = useMemo(
-    () => pageLoadFor(bubbleN, noteN, size.width, size.height, noteScale),
-    [bubbleN, noteN, size.width, size.height, noteScale],
+    () => pageLoadFor(bubbleN, noteN, size.width, size.height, noteScale, size.safeBottom),
+    [bubbleN, noteN, size.width, size.height, noteScale, size.safeBottom],
   )
   const paginated = size.width > 0 && pageLoad > 1
 
   // Single-page organic layout (skipped when paginated — each page lays out its own).
   const laid = (!paginated && size.width > 0)
-    ? computeLayout(layoutItems, size.width, size.height, SUB_BAR_H, BOTTOM_PAD, noteScale, layoutSeed(currentId))
+    ? computeLayout(layoutItems, size.width, size.height, SUB_BAR_H, BOTTOM_PAD, noteScale, layoutSeed(currentId), size.safeBottom)
     : []
 
   // Apply saved positions on top of auto-layout
@@ -2803,17 +2920,17 @@ export default function BubbleVisualization({
   // Mixed page with saved positions: flow the free notes around the bubbles' actual
   // (loaded) locations instead of just settling them off the phantom fresh layout.
   const arrangedAroundBubbles = (anchoredIds.size > 0 && size.width > 0)
-    ? arrangeNotesAroundBubbles(laidMapped, anchoredIds, size.width, size.height)
+    ? arrangeNotesAroundBubbles(laidMapped, anchoredIds, size.width, size.height, size.safeBottom)
     : null
 
   const laidSettled = (anchoredIds.size > 0 && anchoredIds.size < laidMapped.length && size.width > 0)
-    ? settleItems(laidMapped, anchoredIds, size.width, size.height)
+    ? settleItems(laidMapped, anchoredIds, size.width, size.height, size.safeBottom)
     : laidMapped
 
   // Final safety pass every render: separate any overlapping bubbles (with a small
   // buffer so they never touch) and re-apply the + button barrier and bounds.
   const laidWithOverrides = arrangedAroundBubbles ?? (size.width > 0
-    ? separateOverlaps(laidSettled, size.width, size.height, shouldPinBubbles(laidSettled, anchoredIds.size))
+    ? separateOverlaps(laidSettled, size.width, size.height, shouldPinBubbles(laidSettled, anchoredIds.size), null, size.safeBottom)
     : laidSettled)
 
   // ── Pagination ────────────────────────────────────────────────────────────────
@@ -2859,7 +2976,7 @@ export default function BubbleVisualization({
     pages = groups.map((group, pi) => {
       const key = pageLayoutKey(
         group, savedPositions, project.id, currentId,
-        size.width, size.height, noteScale, layoutSeed(currentId, pi),
+        size.width, size.height, noteScale, layoutSeed(currentId, pi), size.safeBottom,
       )
       const hit = cache.get(pi)
       if (hit && hit.key === key) {
@@ -2872,7 +2989,7 @@ export default function BubbleVisualization({
       recomputed++
       const laidPage = layoutPage(
         group, savedPositions, project.id, currentId,
-        size.width, size.height, noteScale, layoutSeed(currentId, pi),
+        size.width, size.height, noteScale, layoutSeed(currentId, pi), size.safeBottom,
       )
       cache.set(pi, { key, geom: laidPage.map(p => ({ id: p.id, cx: p.cx, cy: p.cy, r: p.r })) })
       return laidPage
@@ -2967,7 +3084,7 @@ export default function BubbleVisualization({
       const total = bubbleN + noteN
       if (total === 0) continue
       const { pageLoad: lvlLoad, perPage: lvlPerPage } =
-        pageLoadFor(bubbleN, noteN, W, H, noteScale)
+        pageLoadFor(bubbleN, noteN, W, H, noteScale, sizeRef.current.safeBottom)
       // Unpaginated at this size: the level renders as a single page and its saved
       // assignments are dormant. Left as they are — if a later size brings pagination
       // back, this same pass re-flows them then.
@@ -3353,10 +3470,13 @@ export default function BubbleVisualization({
       const localX = e.clientX - rect.left
       const localY = e.clientY - rect.top
       const dhw = halfWidthOf(drag), dhh = halfHeightOf(drag)
+      // The pointer's desired position is clamped against the + button here as well as
+      // in the RAF pass. resolveCollisions clamps the RESOLVED position, which is a frame
+      // behind and can be overridden by a push from a neighbour; clamping the desired
+      // position too means the zone is never even asked for.
       dragInfoRef.current = {
         ...drag,
-        cx: Math.max(dhw + 12, Math.min(W - dhw - 12, localX)),
-        cy: Math.max(SUB_BAR_H + dhh + 12, Math.min(H - BOTTOM_PAD - dhh, localY)),
+        ...clampDragTarget(drag, localX, localY, W, H, sizeRef.current.safeBottom),
       }
       // Highlight the edge when hovering over one that has an adjacent page to move to.
       const cur = pageIndexRef.current
@@ -3436,7 +3556,7 @@ export default function BubbleVisualization({
         layoutAnimTimerRef.current = setTimeout(() => setLayoutAnim(false), 420)
       } else if (W > 0 && lastResolved.length) {
         // Same-page drop: save every current-page item where it settled (jump-free).
-        const final = resolveCollisions(lastResolved, '__none__', 0, 0, W, H)
+        const final = resolveCollisions(lastResolved, '__none__', 0, 0, W, H, sizeRef.current.safeBottom)
         const newPositions = { ...savedPositionsRef.current }
         final.forEach(p => { newPositions[posKey(project.id, cId, p.id)] = { xFrac: p.cx / W, yFrac: p.cy / H } })
         flushSync(() => { setSavedPositions(newPositions); setDraggingId(null); setLayoutAnim(false) })
@@ -3478,7 +3598,7 @@ export default function BubbleVisualization({
     const laid = laidWithOverridesRef.current
 
     // Full iterative collision resolution — no overlaps, chain reactions, boundary blocking
-    const resolved = resolveCollisions(laid, drag.id, drag.cx, drag.cy, width, height)
+    const resolved = resolveCollisions(laid, drag.id, drag.cx, drag.cy, width, height, sizeRef.current.safeBottom)
 
     // Track all resolved positions (for saving on drop) and dragged item's final position
     resolvedAllPosRef.current = resolved
@@ -3591,8 +3711,7 @@ export default function BubbleVisualization({
     const dhw = halfWidthOf(drag), dhh = halfHeightOf(drag)
     dragInfoRef.current = {
       ...drag,
-      cx: Math.max(dhw + 12, Math.min(width - dhw - 12, e.clientX - rect.left)),
-      cy: Math.max(SUB_BAR_H + dhh + 12, Math.min(height - BOTTOM_PAD - dhh, e.clientY - rect.top)),
+      ...clampDragTarget(drag, e.clientX - rect.left, e.clientY - rect.top, width, height, sizeRef.current.safeBottom),
     }
   }
 
@@ -3628,7 +3747,15 @@ export default function BubbleVisualization({
       if (width > 0 && lastResolved.length > 0) {
         // Post-drop: run one final collision pass with ALL items free (no dragged item)
         // so any remaining overlaps from the drop are cleaned up.
-        const finalResolved = resolveCollisions(lastResolved, '__none__', 0, 0, width, height)
+        //
+        // safeBottom MUST ride along here, same as the two live-drag passes. This call
+        // predated the recovered strip and leaned on the default (0), which re-imposed
+        // the old uniform bound at the exact moment of release: the drag let a bubble
+        // reach the painted bottom, the drop clamped it back up an inset, and the saved
+        // yFrac was taken from the clamped position — so the barrier looked alive and
+        // well even though every live-drag bound was already indicator-shaped.
+        const finalResolved = resolveCollisions(
+          lastResolved, '__none__', 0, 0, width, height, sizeRef.current.safeBottom)
 
         // Save positions of ALL items — non-dragged bubbles stay exactly where they were pushed
         const newPositions = { ...savedPositionsRef.current }
@@ -3707,6 +3834,7 @@ export default function BubbleVisualization({
   return (
     <div
       ref={containerRef}
+      data-bubble-canvas=""
       onPointerDown={handlePointerDown}
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
@@ -3715,17 +3843,35 @@ export default function BubbleVisualization({
         position: 'relative',
         flex: 1,
         minHeight: 0,
-        // Background bleeds through the bottom safe area (border-box padding);
-        // the layout subtracts this padding so bubbles stay above the home indicator.
-        paddingBottom: 'env(safe-area-inset-bottom)',
+        // No bottom safe-area padding here, deliberately. It used to live on this
+        // element, and it put a box boundary — and with it the overflow clip line —
+        // exactly one inset above the painted bottom: an item placed in the recovered
+        // strip (bottomEdgeLimit allows that outside the indicator's middle 35%) had
+        // its glow sheared off at that line. The home-indicator protection is layout
+        // data, not geometry: the ResizeObserver below measures the inset with a probe
+        // element and hands it to the layout as `safeBottom`, while this box — and any
+        // clipping done in it — runs to the painted bottom edge.
         overflow: 'hidden',
         touchAction: 'none',
         userSelect: 'none',
         WebkitUserSelect: 'none',
         WebkitTouchCallout: 'none',
+        // Explicit extent instead of the default farthest-corner: with the centre in the
+        // upper third, farthest-corner only reaches the final stop at the bottom CORNERS,
+        // so the bottom EDGE painted an in-between shade — visibly darker than the flat
+        // shell (#1C1C1E dark / #FAFAF7 light) that shows through the safe-area padding
+        // below, which is the bottom band. A 75%-height reach from 30% down resolves the
+        // gradient above the bottom edge, and the 92% stop leaves everything past it flat
+        // shell colour, so canvas and shell meet with no seam.
+        // The ORIGINAL gradient stops, deliberately. The seam rule anchors the other
+        // way round: the shell follows the gradient, not the gradient the shell. The
+        // explicit extent + 94% stop make the last rows one uniform colour (no
+        // farthest-corner drift), and whatever the OUTER stop is here must equal the
+        // solid underlay (--bg / #root), html/body, and (dark) manifest
+        // background_color — change one, change all five together.
         background: isLight
-          ? `radial-gradient(ellipse at 50% 30%, rgba(${rgb},0.10) 0%, #F5F5F0 40%, #E8E8E2 100%)`
-          : `radial-gradient(ellipse at 55% 30%, rgba(${rgb},0.18) 0%, #141414 45%, #1C1C1E 100%)`,
+          ? `radial-gradient(ellipse 120% 75% at 50% 30%, rgba(${rgb},0.10) 0%, #F5F5F0 40%, #E8E8E2 94%)`
+          : `radial-gradient(ellipse 120% 75% at 55% 30%, rgba(${rgb},0.30) 0%, #10101A 45%, #19191A 80%, #19191A 94%)`,
         transition: 'background 0.6s ease-in-out',
       }}
     >
