@@ -224,7 +224,7 @@ function GuestMergeDialog({ localCount, cloudCount, onChoose }) {
           Notes on this device
         </h2>
         <p className="text-gray-400 text-sm text-center mb-5">
-          This device has {localCount} {localNoun} and your account has {cloudCount} cloud {cloudNoun}. Choose what to keep.
+          This device has {localCount} {localNoun} not in your account; your account has {cloudCount} cloud {cloudNoun}. Choose what to keep.
         </p>
         <div className="flex flex-col gap-2">
           <button
@@ -513,19 +513,37 @@ export default function App() {
       try {
         const needNewlineFix = !localStorage.getItem(NEWLINE_FLAG)
 
-        // The notes already on this device are what's at stake below — count
+        // The notes already on this device are what's at stake below — read
         // them fresh from storage, not from React state.
-        const localNoteCount = countNotes(loadAllProjects(loadProjectList() ?? []))
+        const localProjects = loadAllProjects(loadProjectList() ?? [])
+        const localNoteCount = countNotes(localProjects)
 
         if (localNoteCount > 0) {
           // Read-only peek: is there also cloud data? Nothing is written locally
           // or remotely until this question — and possibly the user — has answered.
           const peek = await loadAllFromCloud(user.id)
+          // Only notes the cloud doesn't have can be lost. After a normal
+          // sign-out the local store is just the last cloud snapshot, so every
+          // id matches and the dialog would be pure noise — ask only when
+          // loading the cloud would actually destroy something.
+          let localOnlyCount = 0
           if (peek) {
+            const cloudNoteIds = new Set()
+            for (const p of peek.projects) {
+              for (const n of p.notes ?? []) cloudNoteIds.add(n.id)
+            }
+            for (const p of localProjects) {
+              for (const n of p.notes ?? []) {
+                if (!cloudNoteIds.has(n.id)) localOnlyCount++
+              }
+            }
+          }
+          if (peek && localOnlyCount > 0) {
             // Notes on both sides. Any automatic pick would silently lose one
-            // side, so stop and ask.
+            // side, so stop and ask. The count shown is what discarding local
+            // would actually lose, not the total local count.
             const choice = await askMergeChoice({
-              local: localNoteCount,
+              local: localOnlyCount,
               cloud: countNotes(peek.projects),
             })
 
@@ -573,7 +591,9 @@ export default function App() {
             setSyncStatus('synced')
             return
           }
-          // No cloud data — fall through to the unchanged first-sign-in path.
+          // Fall through: either no cloud data (unchanged first-sign-in path)
+          // or every local note already exists in the account (normal cloud
+          // load — nothing on this device can be lost).
         }
 
         // Push anything queued from a previous offline session BEFORE pulling. The pull
