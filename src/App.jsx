@@ -106,6 +106,28 @@ function countBubbles(projects) {
   return projects.reduce((sum, p) => sum + (p?.bubbles?.length ?? 0), 0)
 }
 
+// A bubble's identity beyond its id: the project name plus the chain of bubble
+// names from the root down to it. Ids are stable through the cloud round trip,
+// but the seeded starter bubbles get fresh random ids on every install — so an
+// id comparison alone calls a bubble "new" when the account already holds the
+// identical bubble. The name path is how a person judges "this already exists".
+function bubbleSignatures(project) {
+  const byId = new Map()
+  for (const b of project.bubbles ?? []) byId.set(b.id, b)
+  const path = (b, seen) => {
+    if (b.parent_id == null || seen.has(b.id)) return b.name ?? ''
+    seen.add(b.id)
+    const parent = byId.get(b.parent_id)
+    if (!parent) return b.name ?? ''
+    return `${path(parent, seen)}\u0000${b.name ?? ''}`
+  }
+  const sigs = new Map() // bubble id → signature
+  for (const b of project.bubbles ?? []) {
+    sigs.set(b.id, `${project.name ?? ''}\u0001${path(b, new Set())}`)
+  }
+  return sigs
+}
+
 // Union of the data on this device and the account's cloud data — nothing from
 // either side is dropped. Notes and bubbles match on id (ids are client-made
 // and survive the Supabase round trip unchanged), and a collision keeps the
@@ -114,6 +136,45 @@ function countBubbles(projects) {
 // against the real rule so it starts working the day they get one.
 function mergeGuestAndCloud(localProjects, cloudProjects) {
   const ts = n => Date.parse(n?.updated_at ?? n?.created_at ?? '') || 0
+
+  // Canonicalise local against cloud before unioning: a local bubble matching a
+  // cloud bubble by name path is the same bubble wearing a different id (most
+  // commonly the seeded starter bubbles). Remap those onto the cloud id — in
+  // the bubble list, in children's parent_id links, and in notes' bubble_ids —
+  // so "Keep both" cannot duplicate them.
+  const cloudIds = new Set()
+  const sigToCloudId = new Map()
+  for (const p of cloudProjects) {
+    const sigs = bubbleSignatures(p)
+    for (const b of p.bubbles ?? []) {
+      cloudIds.add(b.id)
+      const sig = sigs.get(b.id)
+      if (!sigToCloudId.has(sig)) sigToCloudId.set(sig, b.id)
+    }
+  }
+  const idMap = new Map() // local bubble id → cloud counterpart id
+  for (const p of localProjects) {
+    const sigs = bubbleSignatures(p)
+    for (const b of p.bubbles ?? []) {
+      if (cloudIds.has(b.id)) continue
+      const cid = sigToCloudId.get(sigs.get(b.id))
+      if (cid) idMap.set(b.id, cid)
+    }
+  }
+  if (idMap.size) {
+    localProjects = localProjects.map(p => ({
+      ...p,
+      bubbles: (p.bubbles ?? [])
+        .filter(b => !idMap.has(b.id))
+        .map(b => idMap.has(b.parent_id) ? { ...b, parent_id: idMap.get(b.parent_id) } : b),
+      notes: (p.notes ?? []).map(n => {
+        const mapped = [...new Set((n.bubble_ids ?? []).map(bid => idMap.get(bid) ?? bid))]
+        const same = mapped.length === (n.bubble_ids?.length ?? 0) &&
+          mapped.every((v, i) => v === n.bubble_ids[i])
+        return same ? n : { ...n, bubble_ids: mapped }
+      }),
+    }))
+  }
 
   // Winning copy of every note across both sides, remembering which project it
   // was in. Local runs second with >= so it wins exact-timestamp ties. The
@@ -571,18 +632,29 @@ export default function App() {
           let localOnlyCount = 0
           let localOnlyBubbleCount = 0
           if (peek) {
+            // A bubble counts as having a cloud counterpart on an id match OR a
+            // name-path match — seeded starter bubbles regenerate their ids on
+            // every install, so id alone overcounts them as new.
             const cloudNoteIds = new Set()
             const cloudBubbleIds = new Set()
+            const cloudBubbleSigs = new Set()
             for (const p of peek.projects) {
               for (const n of p.notes ?? []) cloudNoteIds.add(n.id)
-              for (const b of p.bubbles ?? []) cloudBubbleIds.add(b.id)
+              const sigs = bubbleSignatures(p)
+              for (const b of p.bubbles ?? []) {
+                cloudBubbleIds.add(b.id)
+                cloudBubbleSigs.add(sigs.get(b.id))
+              }
             }
             for (const p of localProjects) {
               for (const n of p.notes ?? []) {
                 if (!cloudNoteIds.has(n.id)) localOnlyCount++
               }
+              const sigs = bubbleSignatures(p)
               for (const b of p.bubbles ?? []) {
-                if (!cloudBubbleIds.has(b.id)) localOnlyBubbleCount++
+                if (!cloudBubbleIds.has(b.id) && !cloudBubbleSigs.has(sigs.get(b.id))) {
+                  localOnlyBubbleCount++
+                }
               }
             }
           }

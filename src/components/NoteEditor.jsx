@@ -70,6 +70,17 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     if (addingTag) tagInputRef.current?.focus({ preventScroll: true })
   }, [addingTag])
 
+  // A brand-new (empty) note opens straight into typing mode — focused, cursor
+  // ready, keyboard up — with no extra tap.
+  useEffect(() => {
+    if (note.content) return
+    const el = bodyRef.current
+    if (!el) return
+    el.focus({ preventScroll: true })
+    const end = el.value.length
+    try { el.setSelectionRange(end, end) } catch { /* not all inputs support it */ }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
   // On mount: register any custom tags on this note that aren't yet in the project color map.
   // This ensures toggling a custom tag off never removes the pill — it just deselects it.
   useEffect(() => {
@@ -320,6 +331,13 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       animate={isDesktop ? { opacity: 1 } : { x: 0 }}
       exit={isDesktop ? { opacity: 0 } : { x: '100%' }}
       transition={{ type: 'tween', duration: isDesktop ? 0.18 : 0.16, ease: [0.25, 0.46, 0.45, 0.94] }}
+      // Desktop only: pressing the dimmed backdrop closes the note the same way
+      // the back arrow does (same pending-edit save). target===currentTarget
+      // means presses inside the panel — or on any menu/dialog it spawns, which
+      // are all children — can never reach here; mousedown (not click) means a
+      // text-selection drag that ends outside the panel can't close it either.
+      // Touch devices keep swipe-back/Escape only, where a stray tap is too easy.
+      onMouseDown={isDesktop ? (e => { if (e.target === e.currentTarget) handleClose() }) : undefined}
     >
     <div
       style={isDesktop ? {
