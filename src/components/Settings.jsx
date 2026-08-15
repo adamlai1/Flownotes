@@ -108,10 +108,10 @@ const KeyCap = ({ children }) => (
   </kbd>
 )
 
-export default function Settings({ onClose, zIndex = 50, project, onImportNotes }) {
+export default function Settings({ onClose, zIndex = 50, project, onImportNotes, onSignOut }) {
   const { theme, toggleTheme } = useTheme()
   const { noteSize, setNoteSize } = usePreferences()
-  const { user, guestMode, signInWithGoogle, signOut } = useAuth()
+  const { user, guestMode, signInWithGoogle } = useAuth()
   const {
     hasPassword,
     requestCreatePassword,
@@ -221,7 +221,7 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes 
                   </div>
                   <Divider />
                   <button
-                    onClick={() => signOut()}
+                    onClick={() => onSignOut?.()}
                     className="w-full flex items-center px-4 py-3.5 active:opacity-70 transition-opacity"
                   >
                     <span className="text-sm font-medium text-red-400">Sign out</span>

@@ -9,6 +9,7 @@ import {
   saveProject,
   deleteProject as deleteProjectFromStorage,
   loadAllProjects,
+  clearAllProjectData,
 } from './utils/storage'
 import {
   loadAllFromCloud,
@@ -28,6 +29,7 @@ import {
   markProjectDirty,
   clearProjectDirty,
   hasPending,
+  pendingCount,
   flushOutbox,
 } from './lib/outbox'
 import { TAG_COLORS } from './data/defaultData'
@@ -86,10 +88,15 @@ const NEWLINE_FLAG = 'newlineBugFixed'
 // ── Local-data ownership ────────────────────────────────────────────────────
 // Which account the data in localStorage belongs to. Written once a sign-in's
 // initial sync completes and on every cloud load; absent for guest-created
-// data, which has no owner. Sign-out deliberately leaves the stamp in place —
-// that is exactly what marks the leftover snapshot as the previous account's
-// rather than guest work, so signing into a DIFFERENT account never mistakes
-// it for guest data: no merge offer, no upload, just that account's own cloud.
+// data, which has no owner.
+//
+// The interactive sign-out (handleSignOut) clears local data outright, so on
+// that path this stamp never survives to matter. It exists for the sign-outs
+// that DON'T run that flow: an expired or revoked session just drops the user
+// on the login screen with the account's snapshot still in localStorage, and
+// this stamp is what stops a different account's sign-in from mistaking that
+// snapshot for guest data — no merge offer, no upload, just that account's own
+// cloud (see the different-account branch in doInitialSync).
 //
 // The stamp describes the DATA, not the device: the moment a signed-out
 // session writes anything (see disownLocalDataIfGuest), the store is no longer
@@ -404,6 +411,47 @@ function GuestMergeDialog({ localCount, localBubbleCount, cloudCount, onChoose }
   )
 }
 
+// Blocking chooser shown when sign-out couldn't flush unsynced changes (offline
+// or a sync error). Same rule as GuestMergeDialog: not dismissable except through
+// its buttons, because both ways out are a real decision about unsynced notes.
+function SignOutWarningDialog({ pending, onChoose }) {
+  const noun = pending === 1 ? 'change' : 'changes'
+  return (
+    <div
+      data-modal
+      className="fixed inset-0 flex items-center justify-center"
+      style={{ zIndex: 80, background: 'rgba(0,0,0,0.6)' }}
+    >
+      <div
+        className="mx-6 w-full max-w-xs rounded-2xl p-6"
+        style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+      >
+        <h2 className="text-white font-semibold text-lg text-center mb-1">
+          Unsynced changes
+        </h2>
+        <p className="text-gray-400 text-sm text-center mb-5">
+          {pending} {noun} on this device {pending === 1 ? 'has' : 'have'} not been uploaded to your account.
+          Signing out clears this device, so {pending === 1 ? 'it' : 'they'} would be permanently lost.
+        </p>
+        <div className="flex flex-col gap-2">
+          <button
+            onClick={() => onChoose(false)}
+            className="w-full py-2.5 rounded-xl text-sm font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors"
+          >
+            Stay signed in
+          </button>
+          <button
+            onClick={() => onChoose(true)}
+            className="w-full py-2.5 rounded-xl text-sm font-medium bg-red-600 hover:bg-red-500 text-white transition-colors"
+          >
+            Sign out and lose {pending === 1 ? 'it' : 'them'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function App() {
   const { user, loading, guestMode, signOut, continueAsGuest } = useAuth()
   // Single keydown listener for the whole app — Escape (layers register themselves) and
@@ -418,6 +466,10 @@ export default function App() {
   // sync effect is awaiting.
   const [mergePrompt, setMergePrompt] = useState(null) // { local, cloud }
   const mergeChoiceRef = useRef(null)
+  // Unsynced-changes warning raised by sign-out; the ref holds the resolver of
+  // the promise handleSignOut is awaiting. Same shape as the merge prompt.
+  const [signOutWarning, setSignOutWarning] = useState(null) // null | { pending }
+  const signOutChoiceRef = useRef(null)
   const cloudSaveTimerRef = useRef(null)
   const flushingRef = useRef(false)
   const flushAgainRef = useRef(false)
@@ -868,6 +920,81 @@ export default function App() {
     const resolve = mergeChoiceRef.current
     mergeChoiceRef.current = null
     resolve?.(choice)
+  }
+
+  // Button handler for SignOutWarningDialog — same pattern as resolveMergeChoice.
+  function resolveSignOutWarning(proceed) {
+    setSignOutWarning(null)
+    const resolve = signOutChoiceRef.current
+    signOutChoiceRef.current = null
+    resolve?.(proceed)
+  }
+
+  // Sign-out clears the device: once this account's data is safely in its own
+  // cloud, local storage goes back to the state a fresh install has (seed
+  // project included), so nothing left behind can later be mistaken for the
+  // next user's guest work. The flush comes FIRST, and a failed flush blocks
+  // the clear behind an explicit acknowledgement of loss. Only the user-facing
+  // sign-out goes through here — the merge dialog's "stay signed out" path
+  // calls the raw signOut() precisely because it must keep local data intact.
+  async function handleSignOut() {
+    const uid = userRef.current?.id
+    if (!uid) { await signOut(); return }
+
+    // Land the newest edits in localStorage so the flush reads current state.
+    cancelPendingSaves()
+    if (activeProjectRef.current) saveProject(activeProjectRef.current)
+
+    let flushed = false
+    if (navigator.onLine) {
+      setSyncStatus('syncing')
+      try {
+        await flushOutbox(uid)
+      } catch (e) {
+        console.error('Sign-out flush error:', e)
+      }
+      flushed = !hasPending(uid)
+      setSyncStatus(flushed ? 'synced' : 'error')
+    } else {
+      // Offline with nothing queued means nothing can be lost.
+      flushed = !hasPending(uid)
+    }
+
+    if (!flushed) {
+      const proceed = await new Promise(resolve => {
+        signOutChoiceRef.current = resolve
+        setSignOutWarning({ pending: pendingCount(uid) })
+      })
+      if (!proceed) return
+    }
+
+    try {
+      await signOut()
+    } catch (e) {
+      // Still signed in — leave everything untouched rather than clearing data
+      // out from under a session that didn't actually end.
+      console.error('Sign-out failed; local data left untouched:', e)
+      setSyncStatus('error')
+      return
+    }
+
+    clearAllProjectData()
+    localStorage.removeItem(DATA_OWNER_KEY)
+    // The lock record is a privacy feature, and the window between sign-out and
+    // the next sign-in is exactly when someone else may open this browser — so
+    // it goes too. Safe to drop: it lives in the account's cloud row and the
+    // next sign-in restores it from there. Removing only the localStorage key
+    // is complete — LockProvider sits below the LoginScreen early-return, so it
+    // unmounted with this sign-out and its next mount re-reads storage.
+    localStorage.removeItem('mindmap-lock')
+    syncedUserRef.current = null
+    setSyncStatus('idle')
+    const { projectList: pl, activeProject: ap } = initializeData()
+    setProjectList(pl)
+    setActiveProject(ap)
+    setSelectedBubbleId(null)
+    setNoteStack([])
+    setCurrentBubbleId(null)
   }
 
   // Reconnect / retry triggers. `online` is the main one; visibility covers the common
@@ -1505,7 +1632,7 @@ export default function App() {
       {/* Settings panel */}
       <AnimatePresence>
         {settingsOpen && (
-          <Settings key="settings" onClose={() => setSettingsOpen(false)} zIndex={45} project={activeProject} onImportNotes={importNotes} />
+          <Settings key="settings" onClose={() => setSettingsOpen(false)} zIndex={45} project={activeProject} onImportNotes={importNotes} onSignOut={handleSignOut} />
         )}
       </AnimatePresence>
 
@@ -1553,6 +1680,10 @@ export default function App() {
       </AnimatePresence>
 
       {/* Guest ⇄ cloud conflict — blocking; see the initial-sync effect */}
+      {signOutWarning && (
+        <SignOutWarningDialog pending={signOutWarning.pending} onChoose={resolveSignOutWarning} />
+      )}
+
       {mergePrompt && (
         <GuestMergeDialog
           localCount={mergePrompt.local}
