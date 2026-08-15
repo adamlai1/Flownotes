@@ -83,6 +83,21 @@ const LONG_PRESS_MS = 750
 // Guarded by the localStorage flag below so it runs at most once per device.
 const NEWLINE_FLAG = 'newlineBugFixed'
 
+// ── Local-data ownership ────────────────────────────────────────────────────
+// Which account the data in localStorage belongs to. Written once a sign-in's
+// initial sync completes and on every cloud load; absent for guest-created
+// data, which has no owner. Sign-out deliberately leaves the stamp in place —
+// that is exactly what marks the leftover snapshot as the previous account's
+// rather than guest work, so signing into a DIFFERENT account never mistakes
+// it for guest data: no merge offer, no upload, just that account's own cloud.
+//
+// The stamp describes the DATA, not the device: the moment a signed-out
+// session writes anything (see disownLocalDataIfGuest), the store is no longer
+// purely that snapshot, so the stamp is cleared and the store reverts to
+// unowned guest data — the next sign-in must offer the merge dialog rather
+// than silently discard it.
+const DATA_OWNER_KEY = 'mindmap-data-owner'
+
 function stripBugNewline(content) {
   const c = content || ''
   return (c.startsWith('\n') && !c.startsWith('\n\n')) ? c.slice(1) : c
@@ -575,6 +590,7 @@ export default function App() {
   // actually stops a deleted item reappearing from the cloud later. Marking the project
   // dirty covers the leftover cleanup on surviving items (connections, tags).
   function commitDelete(updatedProject, ops) {
+    disownLocalDataIfGuest()
     cancelPendingSaves()
     setActiveProject(updatedProject)
     saveProject(updatedProject)
@@ -648,6 +664,7 @@ export default function App() {
       setSelectedBubbleId(null)
       setNoteStack([])
       setCurrentBubbleId(null)
+      localStorage.setItem(DATA_OWNER_KEY, user.id)
     }
 
     // First-time sync — migrate then upload all local data
@@ -659,6 +676,7 @@ export default function App() {
         localStorage.setItem(NEWLINE_FLAG, '1')
       }
       await syncAllToCloud(user.id, allLocal)
+      localStorage.setItem(DATA_OWNER_KEY, user.id)
     }
 
     async function doInitialSync() {
@@ -673,6 +691,43 @@ export default function App() {
       setSyncStatus('syncing')
       try {
         const needNewlineFix = !localStorage.getItem(NEWLINE_FLAG)
+
+        // Local data stamped as belonging to a DIFFERENT account is the previous
+        // user's snapshot (plus anything typed over it since), not guest work.
+        // Never offer to merge it and never upload any of it — load this
+        // account's own cloud data, or start it fresh (same seed a brand-new
+        // device gets) if it has none. Leaving the old data in place isn't an
+        // option even in the empty-cloud case: the first edit would mark it
+        // dirty and push it up under the new account. The outbox is flushed
+        // only AFTER local storage holds this account's data, so a stale dirty
+        // flag can never re-push a project that belonged to someone else.
+        const owner = localStorage.getItem(DATA_OWNER_KEY)
+        if (owner && owner !== user.id) {
+          const cloudData = await loadAllFromCloud(user.id)
+          if (cloudData) {
+            await applyCloudData(cloudData, needNewlineFix)
+          } else {
+            console.warn(
+              '[sync] Different-account sign-in with an empty cloud — RESETTING local data to a fresh seed project.',
+              { previousOwner: owner, signingInAs: user.id },
+            )
+            const fresh = createDefaultProject()
+            const freshList = [{ id: fresh.id, name: fresh.name, created_at: fresh.created_at }]
+            saveProjectList(freshList)
+            saveProject(fresh)
+            setProjectList(freshList)
+            setActiveProject(migrateTagColors(fresh))
+            setSelectedBubbleId(null)
+            setNoteStack([])
+            setCurrentBubbleId(null)
+            localStorage.setItem(NEWLINE_FLAG, '1')
+            await syncAllToCloud(user.id, [fresh])
+            localStorage.setItem(DATA_OWNER_KEY, user.id)
+          }
+          await flushOutbox(user.id)
+          setSyncStatus('synced')
+          return
+        }
 
         // The notes and bubbles already on this device are what's at stake
         // below — read them fresh from storage, not from React state.
@@ -773,6 +828,7 @@ export default function App() {
               setSelectedBubbleId(null)
               setNoteStack([])
               setCurrentBubbleId(null)
+              localStorage.setItem(DATA_OWNER_KEY, user.id)
             }
             setSyncStatus('synced')
             return
@@ -835,7 +891,16 @@ export default function App() {
     }
   }, [user, runFlush])
 
+  // A write from a signed-out session means the local store is no longer purely
+  // the previous account's snapshot — drop the owner stamp so it counts as guest
+  // data again and the next sign-in asks instead of silently discarding it.
+  // No-op while signed in. Called at every user-initiated mutation entry point.
+  function disownLocalDataIfGuest() {
+    if (!userRef.current) localStorage.removeItem(DATA_OWNER_KEY)
+  }
+
   function updateProject(updatedProject) {
+    disownLocalDataIfGuest()
     setActiveProject(updatedProject)
     scheduleSave(updatedProject)
     scheduleCloudSync(updatedProject)
@@ -853,6 +918,7 @@ export default function App() {
   }
 
   function createProject(name) {
+    disownLocalDataIfGuest()
     const now = new Date().toISOString()
     const newProject = {
       id: generateId(),
@@ -870,6 +936,7 @@ export default function App() {
   }
 
   function renameProject(id, newName) {
+    disownLocalDataIfGuest()
     const newList = projectList.map(p => p.id === id ? { ...p, name: newName } : p)
     setProjectList(newList)
     saveProjectList(newList)
@@ -882,6 +949,7 @@ export default function App() {
 
   function deleteProject(id) {
     if (projectList.length <= 1) return
+    disownLocalDataIfGuest()
     // Grab the project's notes before removing it from storage so we can delete
     // them (and their connections) from the cloud too.
     const projectToDelete = activeProject?.id === id ? activeProject : loadProject(id)
@@ -1041,6 +1109,7 @@ export default function App() {
   // Clear every lock in every project — used when the password is removed, since
   // locked items would otherwise stay hidden with no password left to reveal them.
   function clearAllLocks() {
+    disownLocalDataIfGuest()
     // A queued debounced save still holds the pre-clear project; let it fire and it
     // would write the locked flags straight back.
     cancelPendingSaves()
