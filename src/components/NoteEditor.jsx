@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CONNECTION_TYPES, CUSTOM_TAG_PALETTE, ROOT_BUBBLE_ID } from '../data/defaultData'
-import { getNoteTitle, realBubbleIds } from '../utils/helpers'
+import { getNoteTitle, realBubbleIds, connectionType } from '../utils/helpers'
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
 import { useToast } from '../contexts/ToastContext'
@@ -214,7 +214,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     if (!connNoteId) return
     const type = connType === '__custom__' ? customConnType.trim() : connType
     if (!type) return
-    const updated = [...connections, { note_id: connNoteId, relationship_type: type }]
+    // `type` is the canonical field (what the cloud loader produces and the
+    // uploader sends); reads go through connectionType so legacy local
+    // objects that used relationship_type keep working.
+    const updated = [...connections, { note_id: connNoteId, type }]
     setConnections(updated)
     onUpdateNote(note.id, { connections: updated })
     setConnNoteId('')
@@ -580,7 +583,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                 <div key={`fwd-${idx}`} className="flex items-center gap-2 bg-white/6 rounded-lg px-3 py-2 mb-1.5">
                   <div className="flex-1 min-w-0 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-xs">
                     <span className="text-gray-300 truncate max-w-[120px]">{thisTitle}</span>
-                    <span className="text-gray-500 italic flex-shrink-0">{conn.relationship_type}</span>
+                    <span className="text-gray-500 italic flex-shrink-0">{connectionType(conn)}</span>
                     {otherNote ? (
                       <button
                         onClick={() => otherLocked
@@ -619,7 +622,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                         >
                           {otherTitle}
                         </button>
-                        <span className="text-gray-500 italic flex-shrink-0">{conn.relationship_type}</span>
+                        <span className="text-gray-500 italic flex-shrink-0">{connectionType(conn)}</span>
                         <span className="text-gray-300 truncate max-w-[120px]">{thisTitle}</span>
                       </div>
                     </div>

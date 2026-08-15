@@ -20,6 +20,17 @@ export function realBubbleIds(noteOrIds) {
   return (ids ?? []).filter(bid => bid !== ROOT_BUBBLE_ID)
 }
 
+// A connection's relationship label. Connection objects historically carried
+// it under two names — the editor wrote `relationship_type`, the cloud loader
+// produced `type` — and the uploader read only `type`, so editor-created
+// connections uploaded with no label at all (the bug that kept the
+// connections table empty). New connections are written with `type`; this
+// accessor is the ONLY sanctioned way to read the label, so legacy local
+// objects keep working everywhere.
+export function connectionType(conn) {
+  return conn?.type ?? conn?.relationship_type ?? null
+}
+
 export function formatDate(isoString) {
   const date = new Date(isoString)
   return date.toLocaleDateString('en-US', {

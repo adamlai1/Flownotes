@@ -1,5 +1,5 @@
 import { supabase } from './supabase'
-import { generateId } from '../utils/helpers'
+import { generateId, connectionType } from '../utils/helpers'
 
 // The `locked` column on notes/bubbles (supabase/locks.sql) may not exist yet on an
 // account that hasn't run the migration. Rather than break ALL syncing there, detect
@@ -76,13 +76,26 @@ export async function saveConnectionsToCloud(userId, notes) {
       const key = `${note.id}:${conn.note_id}`
       if (!seen.has(key)) {
         seen.add(key)
-        rows.push({ user_id: userId, from_note_id: note.id, to_note_id: conn.note_id, relationship_type: conn.type })
+        // connectionType, not conn.type: editor-created connections carried
+        // the label under relationship_type, so reading .type sent every row
+        // without a label — the insert failed and no connection ever reached
+        // the cloud.
+        rows.push({
+          user_id: userId,
+          from_note_id: note.id,
+          to_note_id: conn.note_id,
+          relationship_type: connectionType(conn),
+        })
       }
     }
   }
   const noteIds = notes.map(n => n.id)
   if (noteIds.length) {
-    await supabase.from('connections').delete().eq('user_id', userId).in('from_note_id', noteIds)
+    // The delete's failure was silently ignored — the one genuinely
+    // swallowed error in this path. Surface it like everything else.
+    const { error: deleteError } = await supabase
+      .from('connections').delete().eq('user_id', userId).in('from_note_id', noteIds)
+    if (deleteError) throw deleteError
   }
   if (rows.length) {
     const { error } = await supabase.from('connections').insert(rows)
