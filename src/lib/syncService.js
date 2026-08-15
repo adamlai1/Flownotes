@@ -11,15 +11,19 @@ function isMissingColumnError(error, column) {
     (error.code === 'PGRST204' || error.code === '42703' || /column/i.test(text))
 }
 
+// optionalColumn may be a single column name or an array of them (each one an
+// optional column whose migration may not have been run yet). On a
+// missing-column error the offending column is stripped and the upsert retried
+// recursively, so any combination of missing optional columns still syncs.
 async function upsertRows(table, rows, onConflict, optionalColumn) {
+  const optional = Array.isArray(optionalColumn) ? optionalColumn : optionalColumn ? [optionalColumn] : []
   const { error } = await supabase.from(table).upsert(rows, { onConflict })
   if (!error) return
-  if (optionalColumn && isMissingColumnError(error, optionalColumn)) {
-    console.warn(`[sync] ${table}.${optionalColumn} missing — run supabase/locks.sql. Retrying without it.`)
-    const stripped = rows.map(({ [optionalColumn]: _drop, ...rest }) => rest)
-    const retry = await supabase.from(table).upsert(stripped, { onConflict })
-    if (retry.error) throw retry.error
-    return
+  const missing = optional.find(col => isMissingColumnError(error, col))
+  if (missing) {
+    console.warn(`[sync] ${table}.${missing} missing — run its migration in supabase/. Retrying without it.`)
+    const stripped = rows.map(({ [missing]: _drop, ...rest }) => rest)
+    return upsertRows(table, stripped, onConflict, optional.filter(col => col !== missing))
   }
   throw error
 }
@@ -45,10 +49,15 @@ export async function saveBubblesToCloud(userId, projectId, bubbles) {
   await upsertRows('bubbles', rows, 'user_id,id', 'locked')
 }
 
-export async function saveNotesToCloud(userId, notes) {
+// projectId is the note's containing project — the caller's project object is
+// the single source of truth for membership, so every note write stamps
+// project_id from it. That stored assignment is what keeps a note in its
+// project after its last bubble is removed (no inference, no fallback).
+export async function saveNotesToCloud(userId, projectId, notes) {
   if (!notes.length) return
   const rows = notes.map(n => ({
     id: n.id, user_id: userId,
+    project_id: projectId,
     title: n.content?.split('\n')[0]?.trim() ?? '',
     content: n.content ?? '',
     created_at: n.created_at, updated_at: n.updated_at,
@@ -56,7 +65,7 @@ export async function saveNotesToCloud(userId, notes) {
     pinned: n.pinned ?? false,
     locked: n.locked ?? false,
   }))
-  await upsertRows('notes', rows, 'user_id,id', 'locked')
+  await upsertRows('notes', rows, 'user_id,id', ['locked', 'project_id'])
 }
 
 export async function saveConnectionsToCloud(userId, notes) {
@@ -159,6 +168,19 @@ export async function submitFeedback(userId, message) {
   if (error) throw error
 }
 
+// ── Account deletion ──────────────────────────────────────────────────────────
+// Calls the delete-account edge function (supabase/functions/delete-account),
+// which verifies the caller's JWT server-side and deletes the auth user with
+// the service role key; FK cascades remove the user's rows. The session token
+// is attached automatically by functions.invoke, so this works identically on
+// web and native. Throws on any failure — the caller must not clear local
+// data unless this resolves.
+
+export async function deleteAccountOnServer() {
+  const { error } = await supabase.functions.invoke('delete-account')
+  if (error) throw error
+}
+
 // ── Load ──────────────────────────────────────────────────────────────────────
 
 export async function loadAllFromCloud(userId) {
@@ -198,22 +220,32 @@ export async function loadAllFromCloud(userId) {
     bubbleToProject[b.id] = b.project_id
   }
 
-  // Assign notes to projects via bubble_ids; orphans go to first project
+  // Assign notes to projects: the stored project_id is authoritative. Rows
+  // predating the project_id migration (supabase/note_project_id.sql) fall
+  // back to bubble membership — first bubble in bubble_ids order, the same
+  // rule that migration's backfill uses. A note with neither goes into
+  // unassignedNotes for the caller to adopt EXPLICITLY and persist; the old
+  // silent first-project fallback is gone.
+  const projectIds = new Set(projects.map(p => p.id))
   const notesByProject = {}
-  const firstProjectId = projects[0].id
+  const unassignedNotes = []
   for (const n of notes ?? []) {
-    let projectId = firstProjectId
-    for (const bid of n.bubble_ids ?? []) {
-      if (bubbleToProject[bid]) { projectId = bubbleToProject[bid]; break }
+    let projectId = projectIds.has(n.project_id) ? n.project_id : null
+    if (!projectId) {
+      for (const bid of n.bubble_ids ?? []) {
+        if (bubbleToProject[bid]) { projectId = bubbleToProject[bid]; break }
+      }
     }
-    if (!notesByProject[projectId]) notesByProject[projectId] = []
-    notesByProject[projectId].push({
+    const note = {
       id: n.id, content: n.content ?? '',
       created_at: n.created_at, updated_at: n.updated_at,
       bubble_ids: n.bubble_ids ?? [], tags: n.tags ?? [],
       locked: n.locked ?? false,
       connections: connMap[n.id] ?? [],
-    })
+    }
+    if (!projectId) { unassignedNotes.push(note); continue }
+    if (!notesByProject[projectId]) notesByProject[projectId] = []
+    notesByProject[projectId].push(note)
   }
 
   const customTagColors = {}
@@ -234,6 +266,7 @@ export async function loadAllFromCloud(userId) {
   return {
     projectList: projects.map(p => ({ id: p.id, name: p.name, created_at: p.created_at })),
     projects: fullProjects,
+    unassignedNotes,
   }
 }
 
@@ -242,7 +275,7 @@ export async function loadAllFromCloud(userId) {
 export async function syncProjectToCloud(userId, project) {
   await saveProjectsToCloud(userId, [project])
   await saveBubblesToCloud(userId, project.id, project.bubbles ?? [])
-  await saveNotesToCloud(userId, project.notes ?? [])
+  await saveNotesToCloud(userId, project.id, project.notes ?? [])
   await saveConnectionsToCloud(userId, project.notes ?? [])
   await saveCustomTagsToCloud(userId, project.customTagColors ?? {}, project.customTagIds ?? {})
 }
@@ -254,16 +287,25 @@ export async function syncAllToCloud(userId, projects) {
 }
 
 export async function deleteProjectFromCloud(userId, projectId, noteIds = []) {
-  const ops = [
+  // Notes (and their connections) go FIRST. notes.project_id is ON DELETE SET
+  // NULL, so deleting the project row before its notes would null their
+  // project_id — and a failure in between would leave them as unassigned
+  // notes that the adoption path later re-homes into another project, the
+  // opposite of what deleting a project means.
+  if (noteIds.length) {
+    const connResults = await Promise.all([
+      supabase.from('connections').delete().eq('user_id', userId).in('from_note_id', noteIds),
+      supabase.from('connections').delete().eq('user_id', userId).in('to_note_id', noteIds),
+    ])
+    const connFailed = connResults.find(r => r.error)
+    if (connFailed) throw connFailed.error
+    const { error: notesError } = await supabase.from('notes').delete().eq('user_id', userId).in('id', noteIds)
+    if (notesError) throw notesError
+  }
+  const results = await Promise.all([
     supabase.from('bubbles').delete().eq('project_id', projectId).eq('user_id', userId),
     supabase.from('projects').delete().eq('id', projectId).eq('user_id', userId),
-  ]
-  if (noteIds.length) {
-    ops.push(supabase.from('connections').delete().eq('user_id', userId).in('from_note_id', noteIds))
-    ops.push(supabase.from('connections').delete().eq('user_id', userId).in('to_note_id', noteIds))
-    ops.push(supabase.from('notes').delete().eq('user_id', userId).in('id', noteIds))
-  }
-  const results = await Promise.all(ops)
+  ])
   const failed = results.find(r => r.error)
   if (failed) throw failed.error
 }

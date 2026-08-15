@@ -15,8 +15,10 @@ import {
   loadAllFromCloud,
   syncAllToCloud,
   syncProjectToCloud,
+  saveNotesToCloud,
   deleteBubblesFromCloud,
   deleteProjectFromCloud,
+  deleteAccountOnServer,
 } from './lib/syncService'
 import {
   SEED_PROJECT_ID,
@@ -435,6 +437,38 @@ function buildSeparateImport(localProjects, cloudProjects, cloudList) {
   })
 }
 
+// One-time adoption of cloud notes that have no stored project (NULL
+// project_id and no surviving bubble membership — see loadAllFromCloud).
+// They join the project with the OLDEST created_at in the account:
+// deterministic, repeatable, and independent of UI state, so the same orphan
+// always lands in the same project no matter what was open — anything
+// context-dependent here would reintroduce exactly the guessing project_id
+// exists to remove. Ties (equal or missing timestamps) break by id so the
+// pick is still deterministic. This replaces the old silent sort-order
+// fallback with an explicit assignment that the caller then PERSISTS
+// (directly or via its normal upload), so it happens once and sticks.
+// Pure apart from the adoption log; returns the adjusted projects plus what
+// to persist.
+function attachUnassignedNotes(cloudData) {
+  const unassigned = cloudData.unassignedNotes ?? []
+  if (!unassigned.length) return { projects: cloudData.projects, targetId: null, unassigned }
+  const oldest = [...cloudData.projectList].sort((a, b) => {
+    const ta = Date.parse(a.created_at ?? '') || 0
+    const tb = Date.parse(b.created_at ?? '') || 0
+    return (ta - tb) || String(a.id).localeCompare(String(b.id))
+  })[0]
+  if (!oldest) return { projects: cloudData.projects, targetId: null, unassigned }
+  console.log(
+    `[adopt] ${unassigned.length} unassigned note(s) adopted into oldest project "${oldest.name}" (${oldest.id})`,
+  )
+  return {
+    projects: cloudData.projects.map(p =>
+      p.id === oldest.id ? { ...p, notes: [...(p.notes ?? []), ...unassigned] } : p),
+    targetId: oldest.id,
+    unassigned,
+  }
+}
+
 function initializeData() {
   let projectList = loadProjectList()
   if (!projectList) {
@@ -602,6 +636,67 @@ function SignOutWarningDialog({ pending, onChoose }) {
   )
 }
 
+// Blocking confirmation for account deletion. Same rule as the other blocking
+// dialogs — no backdrop dismiss, no escape, no default action — and the
+// destructive button additionally stays disabled until the user types DELETE,
+// so no single tap can ever destroy an account. Apple 5.1.1(v) requires this
+// flow to exist in-app.
+function DeleteAccountDialog({ busy, onChoose }) {
+  const [text, setText] = useState('')
+  const armed = text.trim().toUpperCase() === 'DELETE'
+  return (
+    <div
+      data-modal
+      className="fixed inset-0 flex items-center justify-center"
+      style={{ zIndex: 80, background: 'rgba(0,0,0,0.6)' }}
+    >
+      <div
+        className="mx-6 w-full max-w-xs rounded-2xl p-6"
+        style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+      >
+        <h2 className="text-white font-semibold text-lg text-center mb-1">
+          Delete account?
+        </h2>
+        <p className="text-gray-400 text-sm text-center mb-4">
+          This permanently deletes your account and all notes, bubbles, and
+          connections. It cannot be undone.
+        </p>
+        <p className="text-gray-400 text-xs text-center mb-2">
+          Type DELETE to confirm.
+        </p>
+        <input
+          value={text}
+          onChange={e => setText(e.target.value)}
+          disabled={busy}
+          autoFocus
+          autoCapitalize="characters"
+          autoCorrect="off"
+          spellCheck={false}
+          className="w-full mb-4 px-3 py-2 rounded-xl text-sm text-center text-white outline-none"
+          style={{ background: 'var(--hover)', border: '1px solid var(--border)' }}
+        />
+        <div className="flex flex-col gap-2">
+          <button
+            onClick={() => onChoose(false)}
+            disabled={busy}
+            className="w-full py-2.5 rounded-xl text-sm font-medium transition-colors disabled:opacity-50"
+            style={{ background: 'var(--hover)', color: 'var(--text-2)' }}
+          >
+            Cancel
+          </button>
+          <button
+            onClick={() => onChoose(true)}
+            disabled={!armed || busy}
+            className="w-full py-2.5 rounded-xl text-sm font-medium bg-red-600 hover:bg-red-500 text-white transition-colors disabled:opacity-40 disabled:hover:bg-red-600"
+          >
+            {busy ? 'Deleting…' : 'Delete my account'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // App itself sits above ToastProvider, so it can't call useToast — this bridge
 // renders just inside the provider and hands showToast up through a ref.
 function ToastBridge({ toastRef }) {
@@ -628,6 +723,10 @@ export default function App() {
   const [signOutWarning, setSignOutWarning] = useState(null) // null | { pending }
   const signOutChoiceRef = useRef(null)
   const toastRef = useRef(null) // showToast, bridged up from inside ToastProvider
+  // Account-deletion confirmation dialog; busy while the edge function call
+  // is in flight (both dialog buttons disable).
+  const [deleteAccountPrompt, setDeleteAccountPrompt] = useState(false)
+  const [deleteAccountBusy, setDeleteAccountBusy] = useState(false)
   const cloudSaveTimerRef = useRef(null)
   const flushingRef = useRef(false)
   const flushAgainRef = useRef(false)
@@ -852,8 +951,16 @@ export default function App() {
     // remap legacy seed ids (then push the fix up and purge the stale rows) and
     // strip the leading-newline bug from cloud notes.
     async function applyCloudData(cloudData, needNewlineFix) {
-      let projects = cloudData.projects
+      const adoption = attachUnassignedNotes(cloudData)
+      let projects = adoption.projects
       let cloudList = cloudData.projectList
+      // Persist the adoption immediately — otherwise the NULL rows would be
+      // re-adopted into whatever happens to be viewed on every future load.
+      // If the target is a residue twin the seed migration below folds, the
+      // migration's own upload rewrites project_id to the canonical id.
+      if (adoption.targetId) {
+        await saveNotesToCloud(user.id, adoption.targetId, adoption.unassigned)
+      }
       const seedFix = migrateSeedIds(projects)
       if (seedFix.changed) {
         projects = seedFix.projects
@@ -974,6 +1081,10 @@ export default function App() {
               for (const n of p.notes ?? []) cloudNoteIds.add(n.id)
               for (const b of p.bubbles ?? []) cloudBubbleIds.add(b.id)
             }
+            // Unassigned cloud notes are still cloud notes — missing them here
+            // would make their local copies look local-only and raise the
+            // dialog for nothing.
+            for (const n of peek.unassignedNotes ?? []) cloudNoteIds.add(n.id)
             for (const p of localProjects) {
               for (const n of p.notes ?? []) {
                 if (!cloudNoteIds.has(n.id)) localOnlyCount++
@@ -990,7 +1101,7 @@ export default function App() {
             const choice = await askMergeChoice({
               local: localOnlyCount,
               bubbles: localOnlyBubbleCount,
-              cloud: countNotes(peek.projects),
+              cloud: countNotes(peek.projects) + (peek.unassignedNotes?.length ?? 0),
             })
 
             if (choice === 'cancel') {
@@ -1025,7 +1136,11 @@ export default function App() {
               // cloud writes are awaited BEFORE local storage is replaced, so
               // a failure partway leaves the device's data intact and the
               // next sign-in simply asks again.
-              const seedFix = migrateSeedIds(cloudData.projects)
+              // Unassigned cloud notes are adopted into the oldest cloud
+              // project here too; persisted below (by the seed-migration
+              // upload when it runs, explicitly otherwise).
+              const adoption = attachUnassignedNotes(cloudData)
+              const seedFix = migrateSeedIds(adoption.projects)
               const cloudProjects = seedFix.projects
               const cloudList = seedFix.changed
                 ? cloudData.projectList.map(e =>
@@ -1044,7 +1159,11 @@ export default function App() {
               // imports). The flag stays unset so the cloud side still gets
               // its fix from the next applyCloudData run.
               if (needNewlineFix) imported = migrateProjectsNewline(imported).projects
-              if (seedFix.changed) await syncAllToCloud(user.id, cloudProjects)
+              if (seedFix.changed) {
+                await syncAllToCloud(user.id, cloudProjects)
+              } else if (adoption.targetId) {
+                await saveNotesToCloud(user.id, adoption.targetId, adoption.unassigned)
+              }
               // Upload one project at a time, recording each source as done
               // the moment its copy lands, so a failure partway resumes here
               // next time instead of restarting the whole import.
@@ -1076,7 +1195,11 @@ export default function App() {
               // remapped before the union (local was remapped at startup) so
               // twin seed items meet under one id; the stale legacy rows are
               // purged after the merged upload lands.
-              const seedFix = migrateSeedIds(cloudData.projects)
+              // Unassigned cloud notes join the union inside a project (the
+              // oldest one) or the merge would drop them; the merged upload
+              // below persists their project_id.
+              const adoption = attachUnassignedNotes(cloudData)
+              const seedFix = migrateSeedIds(adoption.projects)
               let merged = mergeGuestAndCloud(
                 loadAllProjects(loadProjectList() ?? []),
                 seedFix.projects,
@@ -1205,6 +1328,15 @@ export default function App() {
       return
     }
 
+    clearDeviceToFreshState()
+  }
+
+  // Return the device to the state a fresh install has: every piece of user
+  // content and per-account marker removed, seed project re-created, and
+  // device-level preferences (theme, note size, sort, onboarding/migration
+  // flags) kept. Shared by sign-out and account deletion — callers must only
+  // reach this AFTER whatever server-side step makes clearing safe.
+  function clearDeviceToFreshState() {
     clearAllProjectData()
     localStorage.removeItem(DATA_OWNER_KEY)
     clearImportProgress()
@@ -1223,6 +1355,30 @@ export default function App() {
     setSelectedBubbleId(null)
     setNoteStack([])
     setCurrentBubbleId(null)
+  }
+
+  // Account deletion, in two strictly ordered halves: the edge function is the
+  // only authority, and the device is cleared ONLY after it confirms the
+  // account row is gone — a failed call leaves cloud and device exactly as
+  // they were. After a confirmed deletion the local session belongs to a dead
+  // user; signOut removes it (the auth server ignores 401/404 from the dead
+  // token), and even if that step fails mid-flow the device is still cleared,
+  // because the deletion has already happened and the dialog promised it.
+  async function confirmDeleteAccount() {
+    setDeleteAccountBusy(true)
+    try {
+      await deleteAccountOnServer()
+    } catch (e) {
+      console.error('Account deletion failed:', e)
+      setDeleteAccountBusy(false)
+      setDeleteAccountPrompt(false)
+      toastRef.current?.('Couldn’t delete your account — nothing was changed')
+      return
+    }
+    try { await signOut() } catch {}
+    setDeleteAccountBusy(false)
+    setDeleteAccountPrompt(false)
+    clearDeviceToFreshState()
   }
 
   // Reconnect / retry triggers. `online` is the main one; visibility covers the common
@@ -1862,7 +2018,7 @@ export default function App() {
       {/* Settings panel */}
       <AnimatePresence>
         {settingsOpen && (
-          <Settings key="settings" onClose={() => setSettingsOpen(false)} zIndex={45} project={activeProject} onImportNotes={importNotes} onSignOut={handleSignOut} />
+          <Settings key="settings" onClose={() => setSettingsOpen(false)} zIndex={45} project={activeProject} onImportNotes={importNotes} onSignOut={handleSignOut} onDeleteAccount={() => setDeleteAccountPrompt(true)} />
         )}
       </AnimatePresence>
 
@@ -1912,6 +2068,16 @@ export default function App() {
       {/* Guest ⇄ cloud conflict — blocking; see the initial-sync effect */}
       {signOutWarning && (
         <SignOutWarningDialog pending={signOutWarning.pending} onChoose={resolveSignOutWarning} />
+      )}
+
+      {deleteAccountPrompt && (
+        <DeleteAccountDialog
+          busy={deleteAccountBusy}
+          onChoose={confirmed => {
+            if (confirmed) confirmDeleteAccount()
+            else setDeleteAccountPrompt(false)
+          }}
+        />
       )}
 
       {mergePrompt && (
