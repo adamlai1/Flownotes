@@ -14,6 +14,7 @@ import {
 import {
   loadAllFromCloud,
   syncAllToCloud,
+  syncProjectToCloud,
   deleteBubblesFromCloud,
   deleteProjectFromCloud,
 } from './lib/syncService'
@@ -105,6 +106,34 @@ const NEWLINE_FLAG = 'newlineBugFixed'
 // than silently discard it.
 const DATA_OWNER_KEY = 'mindmap-data-owner'
 
+// ── "Keep separate" import progress ─────────────────────────────────────────
+// Which SOURCE (device) projects have already landed in which account, so a
+// retry after a partial "Keep separate" failure resumes where it stopped
+// instead of re-importing what already arrived — which would duplicate it
+// under the next name suffix. Keyed by user id because progress toward one
+// account must never skip imports into another, and cleared whenever a
+// sign-in resolves (any choice) or the device is cleared: after that, a
+// source id could belong to different data than the record remembers.
+const IMPORT_PROGRESS_KEY = 'mindmap-import-progress'
+
+function readImportProgress(userId) {
+  try {
+    const raw = JSON.parse(localStorage.getItem(IMPORT_PROGRESS_KEY))
+    return raw?.userId === userId && Array.isArray(raw.done) ? new Set(raw.done) : new Set()
+  } catch {
+    return new Set()
+  }
+}
+
+function markImportDone(userId, sourceProjectId) {
+  const done = [...readImportProgress(userId), sourceProjectId]
+  try { localStorage.setItem(IMPORT_PROGRESS_KEY, JSON.stringify({ userId, done })) } catch {}
+}
+
+function clearImportProgress() {
+  localStorage.removeItem(IMPORT_PROGRESS_KEY)
+}
+
 function stripBugNewline(content) {
   const c = content || ''
   return (c.startsWith('\n') && !c.startsWith('\n\n')) ? c.slice(1) : c
@@ -167,9 +196,24 @@ function migrateSeedIds(projects) {
 
   // The seeded project: first legacy-id project with the seed name, and only
   // when nothing already holds the canonical id.
-  if (!projects.some(p => p.id === SEED_PROJECT_ID)) {
+  const canonicalProject = projects.find(p => p.id === SEED_PROJECT_ID)
+  if (!canonicalProject) {
     const legacy = projects.find(p => p.name === SEED_PROJECT_NAME && isLegacyId(p.id))
     if (legacy) projectIdMap.set(legacy.id, SEED_PROJECT_ID)
+  } else {
+    // The canonical project already existing does NOT mean the migration is
+    // done: the cloud half is a two-phase move (upsert under new ids, then
+    // purge the old rows), and an interruption between the phases — or the
+    // pre-pull outbox flush planting the remapped project first — leaves a
+    // legacy twin behind that the old "already migrated" guard then protected
+    // forever. Recognize such residue by identity, not just name: the remap
+    // copies created_at verbatim, so residue always matches the canonical
+    // project's timestamp, while a project the user genuinely created under
+    // the seed name gets its own creation time and never folds.
+    const twin = projects.find(p =>
+      p !== canonicalProject && p.name === SEED_PROJECT_NAME && isLegacyId(p.id) &&
+      (p.created_at ?? null) === (canonicalProject.created_at ?? null))
+    if (twin) projectIdMap.set(twin.id, SEED_PROJECT_ID)
   }
 
   const out = projects.map(project => {
@@ -212,7 +256,32 @@ function migrateSeedIds(projects) {
     }
   })
 
-  return { projects: out, changed, oldBubbleIds, projectIdMap }
+  // Fold projects that now share an id — the remapped residue twin lands on
+  // the canonical project's id and merges into it here: bubbles union by id
+  // with the first (canonical) copy winning, notes concatenate deduped by id,
+  // tags union. Dropping the twin from the output is what finally lets the
+  // caller's purge delete its rows.
+  const byId = new Map()
+  for (const p of out) {
+    const prev = byId.get(p.id)
+    if (!prev) { byId.set(p.id, p); continue }
+    changed = true
+    const bubbles = new Map()
+    for (const b of prev.bubbles ?? []) bubbles.set(b.id, b)
+    for (const b of p.bubbles ?? []) if (!bubbles.has(b.id)) bubbles.set(b.id, b)
+    const notes = new Map()
+    for (const n of prev.notes ?? []) notes.set(n.id, n)
+    for (const n of p.notes ?? []) if (!notes.has(n.id)) notes.set(n.id, n)
+    byId.set(p.id, {
+      ...prev,
+      bubbles: [...bubbles.values()],
+      notes: [...notes.values()],
+      customTagColors: { ...(p.customTagColors ?? {}), ...(prev.customTagColors ?? {}) },
+      customTagIds: { ...(p.customTagIds ?? {}), ...(prev.customTagIds ?? {}) },
+    })
+  }
+
+  return { projects: [...byId.values()], changed, oldBubbleIds, projectIdMap }
 }
 
 // Union of the data on this device and the account's cloud data — nothing from
@@ -372,6 +441,7 @@ function initializeData() {
     for (const oldId of seedFix.projectIdMap.keys()) deleteProjectFromStorage(oldId)
     projectList = projectList.map(e =>
       seedFix.projectIdMap.has(e.id) ? { ...e, id: seedFix.projectIdMap.get(e.id) } : e)
+      .filter((e, i, a) => a.findIndex(x => x.id === e.id) === i) // folded twin
     saveProjectList(projectList)
   }
   const activeProject = migrateTagColors(loadProject(projectList[0].id))
@@ -778,6 +848,7 @@ export default function App() {
         projects = seedFix.projects
         cloudList = cloudList.map(e =>
           seedFix.projectIdMap.has(e.id) ? { ...e, id: seedFix.projectIdMap.get(e.id) } : e)
+          .filter((e, i, a) => a.findIndex(x => x.id === e.id) === i) // folded twin
         await syncAllToCloud(user.id, projects)
         await purgeLegacySeedRows(seedFix)
       }
@@ -795,6 +866,7 @@ export default function App() {
       setNoteStack([])
       setCurrentBubbleId(null)
       localStorage.setItem(DATA_OWNER_KEY, user.id)
+      clearImportProgress()
     }
 
     // First-time sync — migrate then upload all local data
@@ -807,6 +879,7 @@ export default function App() {
       }
       await syncAllToCloud(user.id, allLocal)
       localStorage.setItem(DATA_OWNER_KEY, user.id)
+      clearImportProgress()
     }
 
     async function doInitialSync() {
@@ -853,6 +926,7 @@ export default function App() {
             localStorage.setItem(NEWLINE_FLAG, '1')
             await syncAllToCloud(user.id, [fresh])
             localStorage.setItem(DATA_OWNER_KEY, user.id)
+            clearImportProgress()
           }
           await flushOutbox(user.id)
           setSyncStatus('synced')
@@ -945,18 +1019,28 @@ export default function App() {
               const cloudList = seedFix.changed
                 ? cloudData.projectList.map(e =>
                     seedFix.projectIdMap.has(e.id) ? { ...e, id: seedFix.projectIdMap.get(e.id) } : e)
+                    .filter((e, i, a) => a.findIndex(x => x.id === e.id) === i) // folded twin
                 : cloudData.projectList
-              let imported = buildSeparateImport(
-                loadAllProjects(loadProjectList() ?? []),
-                cloudProjects,
-                cloudList,
-              )
+              // Resume support: sources that already landed in THIS account
+              // during an earlier partial attempt are skipped — their copies
+              // are in cloudData (and cloudList) already, so re-importing
+              // would duplicate them under the next name suffix.
+              const alreadyImported = readImportProgress(user.id)
+              const sources = loadAllProjects(loadProjectList() ?? [])
+                .filter(p => !alreadyImported.has(p.id))
+              let imported = buildSeparateImport(sources, cloudProjects, cloudList)
               // The newline fix is applied to what this path writes (the
               // imports). The flag stays unset so the cloud side still gets
               // its fix from the next applyCloudData run.
               if (needNewlineFix) imported = migrateProjectsNewline(imported).projects
               if (seedFix.changed) await syncAllToCloud(user.id, cloudProjects)
-              await syncAllToCloud(user.id, imported)
+              // Upload one project at a time, recording each source as done
+              // the moment its copy lands, so a failure partway resumes here
+              // next time instead of restarting the whole import.
+              for (let i = 0; i < imported.length; i++) {
+                await syncProjectToCloud(user.id, imported[i])
+                markImportDone(user.id, sources[i].id)
+              }
               await purgeLegacySeedRows(seedFix)
               const combinedList = [
                 ...cloudList,
@@ -966,12 +1050,14 @@ export default function App() {
               for (const p of [...cloudProjects, ...imported]) saveProject(p)
               setProjectList(combinedList)
               // Land on the first imported project — proof at a glance that
-              // nothing the guest made was lost.
-              setActiveProject(migrateTagColors(imported[0]))
+              // nothing the guest made was lost. (A resumed retry can have
+              // nothing left to import; land on the account's data then.)
+              setActiveProject(migrateTagColors(imported[0] ?? cloudProjects[0]))
               setSelectedBubbleId(null)
               setNoteStack([])
               setCurrentBubbleId(null)
               localStorage.setItem(DATA_OWNER_KEY, user.id)
+              clearImportProgress()
             } else {
               // 'merge' — union both sides, then write the cloud FIRST. Local
               // storage is only replaced once the upload succeeds, so a failed
@@ -1002,6 +1088,7 @@ export default function App() {
               setNoteStack([])
               setCurrentBubbleId(null)
               localStorage.setItem(DATA_OWNER_KEY, user.id)
+              clearImportProgress()
             }
             setSyncStatus('synced')
             return
@@ -1109,6 +1196,7 @@ export default function App() {
 
     clearAllProjectData()
     localStorage.removeItem(DATA_OWNER_KEY)
+    clearImportProgress()
     // The lock record is a privacy feature, and the window between sign-out and
     // the next sign-in is exactly when someone else may open this browser — so
     // it goes too. Safe to drop: it lives in the account's cloud row and the
