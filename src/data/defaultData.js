@@ -118,7 +118,7 @@ const SEED_NOTE_CONTENT =
 const SEED_HOLD_NOTE_CONTENT =
   'Hold to move, keep holding for more\nPress and drag any bubble or note to move it. Hold still for a moment instead and a menu appears — rename or recolor a bubble, copy or share a note, lock, delete. The + button holds too: tap it for a note, hold it to create a bubble.'
 const SEED_TAGS_NOTE_CONTENT =
-  'Tag your thinking, link your notes\nTag a note with how sure you are — Certain, Think About More, Not Sure, Could Be Wrong — or make your own. Scroll down inside any note to add a connection: pick another note and how they relate, like "causes" or "opposing idea". You can add your own connection types too.'
+  'Tag your thinking, link your notes\nTag a note with how sure you are — Certain, Think About More, Not Sure, Could Be Wrong — or make your own tags however you see fit. Scroll down inside any note to add a connection: pick another note and how they relate, like "Leads To" or "Opposing Ideas". You can add your own connection types too.'
 
 // Every wording each seed note has EVER shipped with, keyed by note id. The
 // pristine check matches against all of them, so rewording the copy can never
@@ -133,7 +133,11 @@ const SEED_NOTE_TEXTS = {
     'This note is also in To Do — tap the "To Do" bubble to see. Notes can live in as many bubbles as you want.',
   ],
   [SEED_HOLD_NOTE_ID]: [SEED_HOLD_NOTE_CONTENT],
-  [SEED_TAGS_NOTE_ID]: [SEED_TAGS_NOTE_CONTENT],
+  [SEED_TAGS_NOTE_ID]: [
+    SEED_TAGS_NOTE_CONTENT,
+    // Earlier wording, from before the connection-type defaults were renamed.
+    'Tag your thinking, link your notes\nTag a note with how sure you are — Certain, Think About More, Not Sure, Could Be Wrong — or make your own. Scroll down inside any note to add a connection: pick another note and how they relate, like "causes" or "opposing idea". You can add your own connection types too.',
+  ],
 }
 
 // Prior shapes of seed bubbles (renamed / recoloured / reparented in later
@@ -214,11 +218,18 @@ export function createDefaultProject() {
   }
 }
 
+// Default connection types offered by the picker — labels for NEW connections
+// only. A connection stores its type as a plain string and renders it
+// verbatim; nothing validates existing data against this list. So the earlier
+// defaults ('causes', 'similar idea', 'opposing idea', 'leads to') remain
+// fully valid and keep displaying on every connection that uses them — same
+// pattern as the Self seed bubble: gone from new defaults, untouched in
+// existing data.
 export const CONNECTION_TYPES = [
-  'causes',
-  'similar idea',
-  'opposing idea',
-  'leads to',
+  'Leads To',
+  'Supports',
+  'Similar Ideas',
+  'Opposing Ideas',
 ]
 
 export const DEFAULT_PROJECT_ID = defaultProjectId
