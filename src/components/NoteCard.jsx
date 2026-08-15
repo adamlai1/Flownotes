@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { formatDate, getNoteTitle, contrastColor, realBubbleIds } from '../utils/helpers'
+import { formatDate, noteTitle, contrastColor, realBubbleIds } from '../utils/helpers'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import { useToast } from '../contexts/ToastContext'
 import { canShareNotes, copyNoteText, shareNoteText } from '../utils/noteShare'
@@ -9,7 +9,7 @@ import { TAG_COLORS } from '../data/defaultData'
 export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, onTogglePin, onToggleLock, locked = false, pinned = false, customTagColors = {}, selectMode = false, selected = false, onToggleSelect }) {
   const [showMenu, setShowMenu] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const title = getNoteTitle(note.content)
+  const title = noteTitle(note)
   const allLines = (note.content || '').split('\n')
   const titleLineIdx = allLines.findIndex(l => l.trim())
   const bodyPreview = allLines

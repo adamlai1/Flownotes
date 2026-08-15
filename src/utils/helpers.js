@@ -62,6 +62,17 @@ export function formatDateGroup(isoString) {
 }
 
 // Returns the display title for a note: first non-empty line of content, or '' if blank
+// A note's display title: the manually-set title when there is one, else the
+// first non-empty line of the body (getNoteTitle). note.title is null/absent
+// until the user edits the title by hand, and clearing a manual title sets it
+// back to null — so NULL means "derive". EVERY place that shows a note's name
+// resolves it through this; never open-code first-line extraction against a
+// note object.
+export function noteTitle(note) {
+  const custom = typeof note?.title === 'string' ? note.title.trim() : ''
+  return custom || getNoteTitle(note?.content ?? '')
+}
+
 export function getNoteTitle(content) {
   if (!content?.trim()) return ''
   for (const line of content.split('\n')) {

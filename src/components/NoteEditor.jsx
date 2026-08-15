@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CONNECTION_TYPES, CUSTOM_TAG_PALETTE, ROOT_BUBBLE_ID } from '../data/defaultData'
-import { getNoteTitle, realBubbleIds, connectionType, generateId } from '../utils/helpers'
+import { getNoteTitle, noteTitle, realBubbleIds, connectionType, generateId } from '../utils/helpers'
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
 import { useToast } from '../contexts/ToastContext'
@@ -30,6 +30,13 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // DERIVED from the first non-empty line, so the first line stays in the text and
   // is never pulled out / hidden.
   const [text, setText] = useState(note.content || '')
+  // '' = no manual title: the header derives from the first body line and
+  // follows it live. Non-empty = the user set it by hand; it stays fixed
+  // until they clear it, which reverts to deriving (stored as null).
+  const [customTitle, setCustomTitle] = useState((note.title ?? '').trim())
+  const [editingTitle, setEditingTitle] = useState(false)
+  const [titleDraft, setTitleDraft] = useState('')
+  const titleDraftInitialRef = useRef('')
   // A note always has at least one location: legacy notes saved with an empty
   // bubble_ids open as pinned to the project canvas, and the next save
   // persists that normalization.
@@ -354,7 +361,26 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   }
 
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0
-  const displayTitle = getNoteTitle(text) // first non-empty line, for the header label
+  // Manual title when set, else the first non-empty body line, tracking the
+  // live text rather than the last saved copy.
+  const displayTitle = customTitle || getNoteTitle(text)
+
+  function startTitleEdit() {
+    titleDraftInitialRef.current = displayTitle
+    setTitleDraft(displayTitle)
+    setEditingTitle(true)
+  }
+
+  // Commit on blur/Enter. An untouched draft keeps the prior mode — tapping
+  // in and back out never freezes a derived title. A cleared draft reverts
+  // to deriving (stored as null).
+  function commitTitle() {
+    setEditingTitle(false)
+    if (titleDraft === titleDraftInitialRef.current) return
+    const next = titleDraft.trim()
+    setCustomTitle(next)
+    onUpdateNote(note.id, { title: next || null })
+  }
   // A locked note's title must not surface through the connections UI either — it's
   // shown as "Locked" in existing connections, and can't be picked as a new one.
   const lockIndex = buildLockIndex(project.bubbles, project.notes, unlockedIds)
@@ -362,7 +388,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     n => n.id !== note.id && !lockIndex.gatedNoteIds.has(n.id)
   )
   const titleOf = (n) =>
-    lockIndex.gatedNoteIds.has(n.id) ? 'Locked' : (getNoteTitle(n.content) || 'Untitled')
+    lockIndex.gatedNoteIds.has(n.id) ? 'Locked' : (noteTitle(n) || 'Untitled')
   const swipeTransition = swipeRef.current.active
     ? 'none'
     : 'transform 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94)'
@@ -436,21 +462,42 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           <span className="truncate">{backLabel}</span>
         </button>
 
-        {/* Derived title (first non-empty line). Read-only — editing happens in the
-            note body below, so the first line is never removed from the text. */}
-        <div
-          className="absolute inset-x-0 mx-auto w-1/2 text-center text-[15px] font-semibold truncate pointer-events-none px-2"
-          style={{ color: displayTitle ? 'var(--text)' : '#6b7280' }}
-        >
-          {displayTitle || 'Untitled'}
-        </div>
+        {/* Title. Follows the first body line until manually edited (tap to
+            edit); a manual title is fixed and no longer tracks the body, and
+            clearing it reverts to deriving. The side buttons keep z-10, so
+            they stay clickable where the centered strip would overlap. */}
+        {editingTitle ? (
+          <input
+            autoFocus
+            value={titleDraft}
+            onChange={e => setTitleDraft(e.target.value)}
+            onBlur={commitTitle}
+            onKeyDown={e => {
+              if (e.key === 'Enter') { e.preventDefault(); commitTitle() }
+              if (e.key === 'Escape') { e.stopPropagation(); setEditingTitle(false) }
+            }}
+            placeholder="Untitled"
+            aria-label="Note title"
+            className="absolute inset-x-0 mx-auto w-1/2 text-center text-[15px] font-semibold outline-none bg-transparent px-2"
+            style={{ color: 'var(--text)', userSelect: 'text', WebkitUserSelect: 'text' }}
+          />
+        ) : (
+          <button
+            onClick={startTitleEdit}
+            className="absolute inset-x-0 mx-auto w-1/2 text-center text-[15px] font-semibold truncate px-2"
+            style={{ color: displayTitle ? 'var(--text)' : '#6b7280' }}
+            title="Edit title"
+          >
+            {displayTitle || 'Untitled'}
+          </button>
+        )}
 
         <div className="flex-1" />
 
         {/* Copy — the text as it stands in the editor, not the last saved version, so
             what lands on the clipboard is what's on screen. */}
         <button
-          onClick={() => copyNoteText({ content: text }).then(showToast)}
+          onClick={() => copyNoteText({ content: text, title: customTitle || null }).then(showToast)}
           disabled={!text.trim()}
           className="p-1.5 rounded-lg transition-opacity flex-shrink-0 z-10 text-gray-400 disabled:opacity-25"
           title="Copy note"
@@ -458,30 +505,6 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
               d="M8 8V5a1 1 0 011-1h10a1 1 0 011 1v10a1 1 0 01-1 1h-3M5 8h10a1 1 0 011 1v10a1 1 0 01-1 1H5a1 1 0 01-1-1V9a1 1 0 011-1z" />
-          </svg>
-        </button>
-
-        {/* Undo / Redo */}
-        <button
-          onClick={undo}
-          disabled={past.length === 0}
-          className="p-1.5 rounded-lg transition-opacity flex-shrink-0 z-10 text-gray-400 disabled:opacity-25"
-          title="Undo"
-        >
-          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-              d="M3 10h10a6 6 0 010 12H9m-6-12l4-4m-4 4l4 4" />
-          </svg>
-        </button>
-        <button
-          onClick={redo}
-          disabled={future.length === 0}
-          className="p-1.5 rounded-lg transition-opacity flex-shrink-0 z-10 text-gray-400 disabled:opacity-25"
-          title="Redo"
-        >
-          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-              d="M21 10H11a6 6 0 000 12h4m6-12l-4-4m4 4l-4 4" />
           </svg>
         </button>
 
@@ -516,10 +539,35 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             style={{ height: '60dvh', overflowY: 'auto', overscrollBehavior: 'contain', userSelect: 'text', WebkitUserSelect: 'text' }}
           />
           <div className="flex items-end justify-between pt-2">
-            <p className="text-[11px] text-gray-700">
-              {wordCount} {wordCount === 1 ? 'word' : 'words'}
-            </p>
+            {/* Undo / Redo — moved down from the header */}
+            <div className="flex items-center gap-1 -ml-1.5">
+              <button
+                onClick={undo}
+                disabled={past.length === 0}
+                className="p-1.5 rounded-lg transition-opacity flex-shrink-0 text-gray-400 disabled:opacity-25"
+                title="Undo"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M3 10h10a6 6 0 010 12H9m-6-12l4-4m-4 4l4 4" />
+                </svg>
+              </button>
+              <button
+                onClick={redo}
+                disabled={future.length === 0}
+                className="p-1.5 rounded-lg transition-opacity flex-shrink-0 text-gray-400 disabled:opacity-25"
+                title="Redo"
+              >
+                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                    d="M21 10H11a6 6 0 000 12h4m6-12l-4-4m4 4l-4 4" />
+                </svg>
+              </button>
+            </div>
             <div className="text-right space-y-0.5">
+              <p className="text-[11px] text-gray-700">
+                {wordCount} {wordCount === 1 ? 'word' : 'words'}
+              </p>
               <p className="text-[11px] text-gray-600">Created {formatNoteDate(note.created_at)}</p>
               <p className="text-[11px] text-gray-700">Last edited {formatNoteDate(note.updated_at)}</p>
             </div>
@@ -607,7 +655,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             {/* Forward connections: this note → other note (deletable) */}
             {connections.map((conn, idx) => {
               const otherNote = project.notes.find(n => n.id === conn.note_id)
-              const thisTitle = getNoteTitle(note.content) || 'Untitled'
+              const thisTitle = displayTitle || 'Untitled'
               const otherTitle = otherNote ? titleOf(otherNote) : null
               const otherLocked = otherNote ? lockIndex.gatedNoteIds.has(otherNote.id) : false
               return (
@@ -641,7 +689,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                 .map((conn, i) => {
                   const otherTitle = titleOf(n)
                   const otherLocked = lockIndex.gatedNoteIds.has(n.id)
-                  const thisTitle = getNoteTitle(note.content) || 'Untitled'
+                  const thisTitle = displayTitle || 'Untitled'
                   return (
                     <div key={`rev-${n.id}-${i}`} className="flex items-center gap-2 bg-white/6 rounded-lg px-3 py-2 mb-1.5">
                       <div className="flex-1 min-w-0 flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5 text-xs">

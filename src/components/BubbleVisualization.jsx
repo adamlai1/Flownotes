@@ -1,7 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, createContext, useContext } from 'react'
 import { flushSync } from 'react-dom'
 import { motion, AnimatePresence, useMotionValue, animate } from 'framer-motion'
-import { getNoteCountForBubble, getBubbleDescendantIds, getNoteTitle, contrastColor, realBubbleIds } from '../utils/helpers'
+import { getNoteCountForBubble, getBubbleDescendantIds, noteTitle, contrastColor, realBubbleIds } from '../utils/helpers'
 import { buildLockIndex } from '../utils/locks'
 import {
   fitNameFont, nameBoxHeight,
@@ -1793,7 +1793,7 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
   const floatDuration = 2.6 + (index % 4) * 0.45
   const floatDelay    = (index * 0.22) % 3
 
-  const label    = gated ? 'Locked' : (getNoteTitle(item.content) || 'New note')
+  const label    = gated ? 'Locked' : (noteTitle(item) || 'New note')
   const lines    = (item.content || '').split('\n').filter(l => l.trim())
   const bodyText = gated ? '' : lines.slice(1).join('\n').trim() // content after the first (title) line
   const fontSize = Math.max(Math.min(r * 0.17, 13), 8)
@@ -2079,7 +2079,7 @@ function LockMenu({ menu, gated, onLock, onCopy, onShare, onRename, onColor, onD
           className="px-3 py-2 text-[11px] font-semibold uppercase tracking-wider truncate"
           style={{ color: 'var(--text-muted)', borderBottom: '1px solid var(--border)' }}
         >
-          {gated ? 'Locked' : (item.type === 'note' ? (getNoteTitle(item.content) || 'New note') : item.name)}
+          {gated ? 'Locked' : (item.type === 'note' ? (noteTitle(item) || 'New note') : item.name)}
         </div>
         {showCopy && (
           <>

@@ -2,7 +2,7 @@ import { useMemo, useState, useRef, useEffect } from 'react'
 import NoteCard from './NoteCard'
 import BubbleVisualization from './BubbleVisualization'
 import ConfirmDialog from './ConfirmDialog'
-import { formatDateGroup, realBubbleIds, getBubbleDescendantIds } from '../utils/helpers'
+import { formatDateGroup, realBubbleIds, getBubbleDescendantIds, noteTitle } from '../utils/helpers'
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
 import { useEscapeInput } from '../lib/escapeStack'
@@ -168,8 +168,12 @@ export default function MainView({
     if (!q) return sortedNotes
     // Locked notes are excluded from search rather than matched: a hit would reveal
     // that hidden content contains the query, which is exactly what the lock hides.
+    // The resolved title counts as searchable text: a derived title is a
+    // subset of the content anyway, but a custom title exists precisely so
+    // the note can be found by it.
     return sortedNotes.filter(note =>
-      !lockIndex.gatedNoteIds.has(note.id) && note.content.toLowerCase().includes(q)
+      !lockIndex.gatedNoteIds.has(note.id) &&
+      (note.content.toLowerCase().includes(q) || noteTitle(note).toLowerCase().includes(q))
     )
   }, [sortedNotes, searchQuery, lockIndex])
 

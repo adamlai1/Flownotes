@@ -60,7 +60,7 @@ function migrateTagColors(project) {
   if (idsChanged) result = { ...result, customTagIds: ids }
   return result
 }
-import { getNoteTitle } from './utils/helpers'
+import { noteTitle } from './utils/helpers'
 import TopNav from './components/TopNav'
 import Sidebar from './components/Sidebar'
 import MainView from './components/MainView'
@@ -2073,7 +2073,7 @@ export default function App() {
             ? activeProject.notes.find(n => n.id === noteStack[index - 1])
             : null
           const backLabel = prevNote
-            ? (getNoteTitle(prevNote.content) || 'Untitled')
+            ? (noteTitle(prevNote) || 'Untitled')
             : 'Notes'
           return (
             <NoteEditor

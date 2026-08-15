@@ -1,5 +1,5 @@
 import { supabase } from './supabase'
-import { generateId, connectionType } from '../utils/helpers'
+import { generateId, connectionType, getNoteTitle } from '../utils/helpers'
 
 // The `locked` column on notes/bubbles (supabase/locks.sql) may not exist yet on an
 // account that hasn't run the migration. Rather than break ALL syncing there, detect
@@ -58,7 +58,10 @@ export async function saveNotesToCloud(userId, projectId, notes) {
   const rows = notes.map(n => ({
     id: n.id, user_id: userId,
     project_id: projectId,
-    title: n.content?.split('\n')[0]?.trim() ?? '',
+    // NULL means "derive from the first line" (see noteTitle in helpers);
+    // only a manually-set title is stored. The column used to hold a derived
+    // copy of the first line, which nothing ever read back.
+    title: n.title ?? null,
     content: n.content ?? '',
     created_at: n.created_at, updated_at: n.updated_at,
     bubble_ids: n.bubble_ids ?? [], tags: n.tags ?? [],
@@ -259,8 +262,25 @@ export async function loadAllFromCloud(userId) {
         if (bubbleToProject[bid]) { projectId = bubbleToProject[bid]; break }
       }
     }
+    // Legacy-title normalization: before titles became user-settable, every
+    // sync stored a machine-derived copy of the first line in this column.
+    // Deliberately handled HERE instead of a blanket UPDATE against every
+    // user's rows: a stored title that matches what would be derived anyway
+    // (under either the old first-line-verbatim formula or getNoteTitle's
+    // first-non-empty-line) is a derived copy, not a choice — treat it as
+    // NULL so the title keeps following the body. Self-cleaning: this
+    // client re-uploads derived notes with title null, so the old copies
+    // disappear from the cloud one sync at a time. Known ambiguity, accepted:
+    // a custom title set to exactly the current first line reads as derived —
+    // display-identical, diverging only if the first line later changes.
+    const storedTitle = (n.title ?? '').trim()
+    const oldDerived = (n.content?.split('\n')[0] ?? '').trim()
+    const isCustomTitle = storedTitle &&
+      storedTitle !== oldDerived &&
+      storedTitle !== getNoteTitle(n.content ?? '')
     const note = {
       id: n.id, content: n.content ?? '',
+      title: isCustomTitle ? storedTitle : null,
       created_at: n.created_at, updated_at: n.updated_at,
       bubble_ids: n.bubble_ids ?? [], tags: n.tags ?? [],
       locked: n.locked ?? false,

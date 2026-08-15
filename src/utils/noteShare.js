@@ -1,4 +1,4 @@
-import { getNoteTitle } from './helpers'
+import { getNoteTitle, noteTitle } from './helpers'
 
 // Copying and sharing a note, shared by the two menus that offer it — the three-dot menu
 // on a card in All Notes, and the long-press menu on a square in bubble view. They are
@@ -12,6 +12,15 @@ import { getNoteTitle } from './helpers'
 // the thought, not the filing.
 export function noteAsText(note) {
   const content = note?.content ?? ''
+  // A manually-set title is not part of the body: the whole content IS the
+  // body, and nothing is stripped from it.
+  const custom = typeof note?.title === 'string' ? note.title.trim() : ''
+  if (custom) {
+    const body = content
+      .replace(/^(?:[ \t]*\n)+/, '')
+      .replace(/\s+$/, '')
+    return body ? `${custom}\n\n${body}` : custom
+  }
   const title = getNoteTitle(content)
   if (!title) return content.trim()
   // Everything after the line the title came from, kept verbatim in the middle. The ends
@@ -63,7 +72,7 @@ export async function shareNoteText(note) {
     return result === 'Copied' ? 'Copied to clipboard' : result
   }
   try {
-    await navigator.share({ title: getNoteTitle(note?.content ?? '') || 'Note', text })
+    await navigator.share({ title: noteTitle(note) || 'Note', text })
     return null
   } catch (err) {
     if (err?.name === 'AbortError') return null
