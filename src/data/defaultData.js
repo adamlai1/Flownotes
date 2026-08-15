@@ -112,6 +112,19 @@ const SEED_BUBBLES = [
 const SEED_NOTE_CONTENT =
   'This note is also in To Do — tap the "To Do" bubble to see. Notes can live in as many bubbles as you want.'
 
+// Every wording the seed note has EVER shipped with. The pristine check
+// matches against all of them, so rewording the copy can never make an older
+// install's untouched note read as "edited" (which would resurrect the merge
+// dialog for that whole cohort). REWORDING RULE: change SEED_NOTE_CONTENT,
+// append the previous wording here, never remove an entry.
+const SEED_NOTE_TEXTS = [SEED_NOTE_CONTENT]
+
+// Prior shapes of seed bubbles (renamed / recoloured / reparented in later
+// releases). The pristine check accepts these too, for the same reason as
+// SEED_NOTE_TEXTS. SAME RULE: when a seed bubble's shape changes, append its
+// old { id, name, parent_id, color } here, never remove an entry.
+const SEED_BUBBLE_HISTORY = []
+
 // "Untouched seed content" — items the app created that the user has not made
 // their own. Used to keep app-created content from tripping the guest⇄cloud
 // merge dialog on a fresh device: pristine seed items don't count as
@@ -122,15 +135,16 @@ const SEED_NOTE_CONTENT =
 // invites. A pristine note may still have a rewritten bubble_ids (deleting a
 // seed bubble re-pins it); membership alone doesn't make it the user's.
 export function isPristineSeedBubble(bubble) {
-  const t = SEED_BUBBLES.find(s => s.id === bubble.id)
-  return !!t && bubble.name === t.name &&
+  return [...SEED_BUBBLES, ...SEED_BUBBLE_HISTORY].some(t =>
+    t.id === bubble.id &&
+    bubble.name === t.name &&
     (bubble.parent_id ?? null) === (t.parent_id ?? null) &&
-    bubble.color === t.color
+    bubble.color === t.color)
 }
 
 export function isPristineSeedNote(note) {
   return note.id === SEED_INTRO_NOTE_ID &&
-    note.content === SEED_NOTE_CONTENT &&
+    SEED_NOTE_TEXTS.includes(note.content) &&
     (note.tags ?? []).length === 0 &&
     (note.connections ?? []).length === 0
 }
