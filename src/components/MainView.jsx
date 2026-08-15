@@ -28,6 +28,7 @@ export default function MainView({
   navigateBubbleId,
   placeBubbleId,
   onChangeBubbleColor,
+  onRenameBubble,
   searchFocusNonce,
   pageStep,
   onRefresh,
@@ -237,6 +238,7 @@ export default function MainView({
           pageStep={pageStep}
           onRefresh={onRefresh}
           onChangeBubbleColor={onChangeBubbleColor}
+          onRenameBubble={onRenameBubble}
         />
       ) : (
     <main

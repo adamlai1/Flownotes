@@ -2016,6 +2016,7 @@ export default function App() {
             navigateBubbleId={navigateBubbleId}
             placeBubbleId={placeBubbleId}
             onChangeBubbleColor={changeBubbleColor}
+            onRenameBubble={renameBubble}
             searchFocusNonce={searchFocusNonce}
             pageStep={pageStep}
             onRefresh={handleRefresh}

@@ -17,6 +17,7 @@ import { canShareNotes, copyNoteText, shareNoteText } from '../utils/noteShare'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import ConfirmDialog from './ConfirmDialog'
 import BubbleColorPicker from './BubbleColorPicker'
+import BubbleNameInput from './BubbleNameInput'
 
 // ─── Position persistence ─────────────────────────────────────────────────────
 
@@ -2031,14 +2032,16 @@ const LONG_PRESS_MENU_MS = 750
 // Anchored at the press point and clamped to stay on screen. Stops its own pointer
 // events so the canvas's drag handlers underneath don't pick them up.
 
-function LockMenu({ menu, gated, onLock, onCopy, onShare, onColor, onDelete, onClose, width, height }) {
+function LockMenu({ menu, gated, onLock, onCopy, onShare, onRename, onColor, onDelete, onClose, width, height }) {
   if (!menu) return null
   const item = menu.item
   // Copy/Share are for notes, and never for a hidden one — the lock exists to keep the
   // content out of reach, and a Copy one tap away would be a way around it.
   const showCopy = item.type === 'note' && !gated
   const showShare = showCopy && canShareNotes()
-  // Colour is for bubbles; withheld while locked like every other action.
+  // Rename/colour are for bubbles; withheld while locked like every other action
+  // (a rename field would put the hidden name straight back on screen).
+  const showRename = item.type === 'bubble' && !gated
   const showColor = item.type === 'bubble' && !gated
   const MENU_W = 176
   // Measured from the rendered rows rather than a fixed figure, since the menu is now
@@ -2047,7 +2050,7 @@ function LockMenu({ menu, gated, onLock, onCopy, onShare, onColor, onDelete, onC
   // bottom edge exactly where a long-press near the bottom puts it.
   const HEADER_H = 30
   const ROW_H = 54
-  const rows = 2 + (showCopy ? 1 : 0) + (showShare ? 1 : 0) + (showColor ? 1 : 0)
+  const rows = 2 + (showCopy ? 1 : 0) + (showShare ? 1 : 0) + (showRename ? 1 : 0) + (showColor ? 1 : 0)
   const MENU_H = HEADER_H + rows * ROW_H
   const x = Math.max(8, Math.min(menu.x, width - MENU_W - 8))
   const y = Math.max(SUB_BAR_H + 8, Math.min(menu.y, height - MENU_H - 8))
@@ -2100,6 +2103,22 @@ function LockMenu({ menu, gated, onLock, onCopy, onShare, onColor, onDelete, onC
             >
               <ShareGlyph size={15} color="currentColor" />
               Share
+            </button>
+            <div style={{ height: 1, background: 'var(--border)' }} />
+          </>
+        )}
+        {showRename && (
+          <>
+            <button
+              onClick={e => { e.stopPropagation(); onRename() }}
+              className="w-full flex items-center gap-2 px-3 py-3 text-sm text-left active:opacity-70"
+              style={{ color: 'var(--text)' }}
+            >
+              <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" className="flex-shrink-0">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+              </svg>
+              Rename
             </button>
             <div style={{ height: 1, background: 'var(--border)' }} />
           </>
@@ -2512,10 +2531,16 @@ export default function BubbleVisualization({
   pageStep,
   onRefresh,
   onChangeBubbleColor,
+  onRenameBubble,
 }) {
   const containerRef = useRef(null)
   // Bubble whose colour picker modal is open (from the long-press menu).
   const [colorPickerItem, setColorPickerItem] = useState(null)
+  // Bubble being renamed from the long-press menu — same flow as the
+  // sidebar's inline rename: BubbleNameInput with sibling-name exclusion,
+  // committed through the one onRenameBubble handler.
+  const [renameItem, setRenameItem] = useState(null)
+  const [renameValue, setRenameValue] = useState('')
   const { theme } = useTheme()
   const isLight = theme === 'light'
   const { noteSize } = usePreferences()
@@ -4249,6 +4274,11 @@ export default function BubbleVisualization({
             onLock={() => { closeLockMenu(); toggleItemLock(lockMenu.item) }}
             onCopy={() => { closeLockMenu(); copyItem(lockMenu.item) }}
             onShare={() => { closeLockMenu(); shareItem(lockMenu.item) }}
+            onRename={() => {
+              closeLockMenu()
+              setRenameValue(lockMenu.item.name)
+              setRenameItem(lockMenu.item)
+            }}
             onColor={() => { closeLockMenu(); setColorPickerItem(lockMenu.item) }}
             onDelete={() => { closeLockMenu(); requestDeleteItem(lockMenu.item) }}
           />
@@ -4276,6 +4306,64 @@ export default function BubbleVisualization({
           </button>
         </div>
       )}
+
+      {/* ── Bubble rename (long-press menu → Rename) ──────────────────────────── */}
+      {renameItem && (() => {
+        const target = project.bubbles.find(b => b.id === renameItem.id)
+        const submitRename = () => {
+          const name = renameValue.trim()
+          if (name) onRenameBubble?.(renameItem.id, name)
+          setRenameItem(null)
+        }
+        return (
+          <div
+            data-modal
+            className="fixed inset-0 z-50 flex items-center justify-center"
+            style={{ background: 'rgba(0,0,0,0.6)' }}
+            onClick={() => setRenameItem(null)}
+            onPointerDown={e => e.stopPropagation()}
+            onPointerUp={e => e.stopPropagation()}
+          >
+            <div
+              className="mx-6 w-full max-w-xs rounded-2xl p-5"
+              style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+              onClick={e => e.stopPropagation()}
+            >
+              <h2 className="text-white font-semibold text-base text-center mb-4">Rename bubble</h2>
+              <BubbleNameInput
+                autoFocus
+                value={renameValue}
+                onChange={setRenameValue}
+                onSubmit={submitRename}
+                onCancel={() => setRenameItem(null)}
+                // Its own name is a sibling, so the list won't offer the name
+                // it already has — nor any other name taken at this level.
+                exclude={project.bubbles
+                  .filter(b => (b.parent_id ?? null) === (target?.parent_id ?? null))
+                  .map(b => b.name)}
+                ariaLabel="Rename bubble"
+                className="w-full px-3 py-2 rounded-xl text-sm text-white outline-none"
+                style={{ background: 'var(--hover)', border: '1px solid var(--border)' }}
+              />
+              <div className="flex gap-3 mt-4">
+                <button
+                  onClick={() => setRenameItem(null)}
+                  className="flex-1 py-2.5 rounded-xl text-sm font-medium transition-colors"
+                  style={{ background: 'var(--hover)', color: 'var(--text-2)' }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={submitRename}
+                  className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+                >
+                  Save
+                </button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* ── Bubble colour picker (long-press menu → Change color) ─────────────── */}
       {colorPickerItem && (
