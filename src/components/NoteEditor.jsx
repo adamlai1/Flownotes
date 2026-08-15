@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CONNECTION_TYPES, CUSTOM_TAG_PALETTE, ROOT_BUBBLE_ID } from '../data/defaultData'
-import { getNoteTitle, realBubbleIds, connectionType } from '../utils/helpers'
+import { getNoteTitle, realBubbleIds, connectionType, generateId } from '../utils/helpers'
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
 import { useToast } from '../contexts/ToastContext'
@@ -216,8 +216,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     if (!type) return
     // `type` is the canonical field (what the cloud loader produces and the
     // uploader sends); reads go through connectionType so legacy local
-    // objects that used relationship_type keep working.
-    const updated = [...connections, { note_id: connNoteId, type }]
+    // objects that used relationship_type keep working. The id is client-made
+    // like note/bubble ids — connections.id has no DB default, and a stable
+    // id is what lets syncs upsert instead of multiplying rows.
+    const updated = [...connections, { id: generateId(), note_id: connNoteId, type }]
     setConnections(updated)
     onUpdateNote(note.id, { connections: updated })
     setConnNoteId('')

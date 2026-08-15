@@ -76,30 +76,40 @@ export async function saveConnectionsToCloud(userId, notes) {
       const key = `${note.id}:${conn.note_id}`
       if (!seen.has(key)) {
         seen.add(key)
-        // connectionType, not conn.type: editor-created connections carried
-        // the label under relationship_type, so reading .type sent every row
-        // without a label — the insert failed and no connection ever reached
-        // the cloud.
         rows.push({
+          // connections.id is text NOT NULL with NO default, so the client
+          // must supply it — an omitted id 23502s every insert (the bug that
+          // kept this table empty). New connections carry a generateId()
+          // from the editor; a legacy object without one gets a stable id
+          // derived from the pair it represents, so every re-sync upserts
+          // the same row instead of multiplying.
+          id: conn.id || key,
           user_id: userId,
           from_note_id: note.id,
           to_note_id: conn.note_id,
+          // connectionType, not conn.type: editor-created connections carried
+          // the label under relationship_type.
           relationship_type: connectionType(conn),
         })
       }
     }
   }
   const noteIds = notes.map(n => n.id)
-  if (noteIds.length) {
-    // The delete's failure was silently ignored — the one genuinely
-    // swallowed error in this path. Surface it like everything else.
-    const { error: deleteError } = await supabase
-      .from('connections').delete().eq('user_id', userId).in('from_note_id', noteIds)
-    if (deleteError) throw deleteError
-  }
   if (rows.length) {
-    const { error } = await supabase.from('connections').insert(rows)
+    const { error } = await supabase.from('connections').upsert(rows, { onConflict: 'user_id,id' })
     if (error) throw error
+  }
+  if (noteIds.length) {
+    // Upsert can't remove: clear rows for these source notes that no longer
+    // exist locally, or a removed connection resurrects on the next load.
+    // Runs AFTER the upsert so a failure here never leaves connections
+    // missing — stale rows just survive until the next sync.
+    let query = supabase.from('connections').delete().eq('user_id', userId).in('from_note_id', noteIds)
+    if (rows.length) {
+      query = query.not('id', 'in', `(${rows.map(r => `"${r.id}"`).join(',')})`)
+    }
+    const { error: staleError } = await query
+    if (staleError) throw staleError
   }
 }
 
@@ -218,7 +228,7 @@ export async function loadAllFromCloud(userId) {
   const connMap = {}
   for (const c of connections ?? []) {
     if (!connMap[c.from_note_id]) connMap[c.from_note_id] = []
-    connMap[c.from_note_id].push({ note_id: c.to_note_id, type: c.relationship_type })
+    connMap[c.from_note_id].push({ id: c.id, note_id: c.to_note_id, type: c.relationship_type })
   }
 
   // Bubble lookup by project
@@ -286,11 +296,30 @@ export async function loadAllFromCloud(userId) {
 // ── Full sync helpers ──────────────────────────────────────────────────────────
 
 export async function syncProjectToCloud(userId, project) {
+  // The project row is the root every other row FK-references — without it
+  // nothing can land, so its failure is everyone's failure (fail fast).
   await saveProjectsToCloud(userId, [project])
-  await saveBubblesToCloud(userId, project.id, project.bubbles ?? [])
-  await saveNotesToCloud(userId, project.id, project.notes ?? [])
-  await saveConnectionsToCloud(userId, project.notes ?? [])
-  await saveCustomTagsToCloud(userId, project.customTagColors ?? {}, project.customTagIds ?? {})
+
+  // The remaining entities are independent of each other (connections need
+  // notes, so those two share a slot). One failing entity must not block the
+  // rest — a connections error used to silently take custom tags down with
+  // it. Every slot runs; every failure is logged; the first error is
+  // re-thrown at the end so the dirty flag stays set and the project
+  // retries, but everything independent has already had its chance.
+  const errors = []
+  const attempt = async (label, fn) => {
+    try { await fn() } catch (e) {
+      console.error(`[sync] ${label} failed for project ${project.id}:`, e)
+      errors.push(e)
+    }
+  }
+  await attempt('bubbles', () => saveBubblesToCloud(userId, project.id, project.bubbles ?? []))
+  await attempt('notes+connections', async () => {
+    await saveNotesToCloud(userId, project.id, project.notes ?? [])
+    await saveConnectionsToCloud(userId, project.notes ?? [])
+  })
+  await attempt('custom tags', () => saveCustomTagsToCloud(userId, project.customTagColors ?? {}, project.customTagIds ?? {}))
+  if (errors.length) throw errors[0]
 }
 
 export async function syncAllToCloud(userId, projects) {

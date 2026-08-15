@@ -433,7 +433,10 @@ function buildSeparateImport(localProjects, cloudProjects, cloudList) {
           .filter(Boolean),
         connections: (note.connections ?? [])
           .filter(c => idMap.has(c.note_id))
-          .map(c => ({ ...c, note_id: idMap.get(c.note_id) })),
+          // Fresh connection id too — same all-new-ids rule as everything
+          // else in the import; the relationship label rides along via the
+          // spread whichever field name it uses.
+          .map(c => ({ ...c, id: generateId(), note_id: idMap.get(c.note_id) })),
       })),
       customTagColors: guestTags.length ? Object.fromEntries(guestTags) : undefined,
       customTagIds: undefined,
