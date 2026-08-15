@@ -21,6 +21,8 @@ export const SEED_JOURNAL_ID = 'seed:journal'
 export const SEED_LISTS_ID = 'seed:lists'
 export const SEED_LISTS_WATCHLIST_ID = 'seed:lists-watchlist'
 export const SEED_INTRO_NOTE_ID = 'seed:note-intro'
+export const SEED_HOLD_NOTE_ID = 'seed:note-hold'
+export const SEED_TAGS_NOTE_ID = 'seed:note-tags'
 
 const ideasId = SEED_IDEAS_ID
 const ideasSelfId = SEED_IDEAS_SELF_ID
@@ -109,15 +111,30 @@ const SEED_BUBBLES = [
   { id: SEED_LISTS_ID, name: 'Lists', parent_id: null, color: '#8b5cf6' },
   { id: SEED_LISTS_WATCHLIST_ID, name: 'Watch List', parent_id: SEED_LISTS_ID, color: '#f97316' },
 ]
+// Seed note copy. First line is the title (getNoteTitle takes the first
+// non-empty line); the body follows on its own line.
 const SEED_NOTE_CONTENT =
-  'This note is also in To Do — tap the "To Do" bubble to see. Notes can live in as many bubbles as you want.'
+  'Notes can live in multiple bubbles\nThis note is also in To Do — tap the "To Do" bubble to see it there.'
+const SEED_HOLD_NOTE_CONTENT =
+  'Hold to move, keep holding for more\nPress and drag any bubble or note to move it. Hold still for a moment instead and a menu appears — rename or recolor a bubble, copy or share a note, lock, delete. The + button holds too: tap it for a note, hold it to create a bubble.'
+const SEED_TAGS_NOTE_CONTENT =
+  'Tag your thinking, link your notes\nTag a note with how sure you are — Certain, Think About More, Not Sure, Could Be Wrong — or make your own. Scroll down inside any note to add a connection: pick another note and how they relate, like "causes" or "opposing idea". You can add your own connection types too.'
 
-// Every wording the seed note has EVER shipped with. The pristine check
-// matches against all of them, so rewording the copy can never make an older
-// install's untouched note read as "edited" (which would resurrect the merge
-// dialog for that whole cohort). REWORDING RULE: change SEED_NOTE_CONTENT,
-// append the previous wording here, never remove an entry.
-const SEED_NOTE_TEXTS = [SEED_NOTE_CONTENT]
+// Every wording each seed note has EVER shipped with, keyed by note id. The
+// pristine check matches against all of them, so rewording the copy can never
+// make an older install's untouched note read as "edited" (which would
+// resurrect the merge dialog for that whole cohort). REWORDING RULE: change
+// the content constant, append the previous wording to that note's list,
+// never remove an entry.
+const SEED_NOTE_TEXTS = {
+  [SEED_INTRO_NOTE_ID]: [
+    SEED_NOTE_CONTENT,
+    // Original single-line wording, from before the title/body split.
+    'This note is also in To Do — tap the "To Do" bubble to see. Notes can live in as many bubbles as you want.',
+  ],
+  [SEED_HOLD_NOTE_ID]: [SEED_HOLD_NOTE_CONTENT],
+  [SEED_TAGS_NOTE_ID]: [SEED_TAGS_NOTE_CONTENT],
+}
 
 // Prior shapes of seed bubbles (renamed / recoloured / reparented in later
 // releases). The pristine check accepts these too, for the same reason as
@@ -143,8 +160,8 @@ export function isPristineSeedBubble(bubble) {
 }
 
 export function isPristineSeedNote(note) {
-  return note.id === SEED_INTRO_NOTE_ID &&
-    SEED_NOTE_TEXTS.includes(note.content) &&
+  const texts = SEED_NOTE_TEXTS[note.id]
+  return !!texts && texts.includes(note.content) &&
     (note.tags ?? []).length === 0 &&
     (note.connections ?? []).length === 0
 }
@@ -162,7 +179,28 @@ export function createDefaultProject() {
         content: SEED_NOTE_CONTENT,
         created_at: now,
         updated_at: now,
+        // On the project canvas AND in To Do — the note is its own demo.
         bubble_ids: [ROOT_BUBBLE_ID, toDoId],
+        tags: [],
+        connections: [],
+        locked: false,
+      },
+      {
+        id: SEED_HOLD_NOTE_ID,
+        content: SEED_HOLD_NOTE_CONTENT,
+        created_at: now,
+        updated_at: now,
+        bubble_ids: [toDoId],
+        tags: [],
+        connections: [],
+        locked: false,
+      },
+      {
+        id: SEED_TAGS_NOTE_ID,
+        content: SEED_TAGS_NOTE_CONTENT,
+        created_at: now,
+        updated_at: now,
+        bubble_ids: [toDoId],
         tags: [],
         connections: [],
         locked: false,
