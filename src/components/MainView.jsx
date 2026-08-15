@@ -2,7 +2,7 @@ import { useMemo, useState, useRef, useEffect } from 'react'
 import NoteCard from './NoteCard'
 import BubbleVisualization from './BubbleVisualization'
 import ConfirmDialog from './ConfirmDialog'
-import { formatDateGroup } from '../utils/helpers'
+import { formatDateGroup, realBubbleIds } from '../utils/helpers'
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
 import { useEscapeInput } from '../lib/escapeStack'
@@ -181,7 +181,7 @@ export default function MainView({
   const filteredNotes = useMemo(() => {
     if (!activeBubbleId && !activeTag) return searchedNotes
     return searchedNotes.filter(note => {
-      const matchesBubble = activeBubbleId === '' || note.bubble_ids.includes(activeBubbleId)
+      const matchesBubble = activeBubbleId === '' || realBubbleIds(note).includes(activeBubbleId)
       const matchesTag = activeTag === '' || note.tags.includes(activeTag)
       return matchesBubble && matchesTag
     })

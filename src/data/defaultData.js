@@ -18,8 +18,10 @@ const journalId = SEED_JOURNAL_ID
 const defaultProjectId = SEED_PROJECT_ID
 
 // Sentinel ID used when a note is explicitly pinned to the root level
-// alongside membership in other bubbles.
-export const ROOT_BUBBLE_ID = '__root__'
+// alongside membership in other bubbles. Canonically defined in
+// utils/helpers.js next to realBubbleIds; re-exported here for existing
+// importers.
+export { ROOT_BUBBLE_ID } from '../utils/helpers'
 
 export const DEFAULT_TAGS = ['Certain', 'Think About More', 'Not Sure', 'Could Be Wrong']
 

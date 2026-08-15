@@ -2,6 +2,24 @@ export function generateId() {
   return Date.now().toString(36) + Math.random().toString(36).substr(2)
 }
 
+// Sentinel ID marking a note explicitly pinned to its project's root canvas,
+// stored inside bubble_ids alongside real bubble memberships. Canonically
+// defined here, right next to realBubbleIds, so the sentinel and its filter
+// can never drift apart; data/defaultData re-exports it for existing
+// importers. (helpers.js must not import defaultData — that would be a
+// circular import, since defaultData imports generateId from here.)
+export const ROOT_BUBBLE_ID = '__root__'
+
+// A note's REAL bubble memberships: bubble_ids minus the '__root__' canvas
+// sentinel. Accepts a note object or a bare bubble_ids array. Use this —
+// never open-code the filter — wherever emptiness, counts, or matching of
+// bubble membership matter, so no check can quietly treat the sentinel as a
+// real bubble.
+export function realBubbleIds(noteOrIds) {
+  const ids = Array.isArray(noteOrIds) ? noteOrIds : noteOrIds?.bubble_ids
+  return (ids ?? []).filter(bid => bid !== ROOT_BUBBLE_ID)
+}
+
 export function formatDate(isoString) {
   const date = new Date(isoString)
   return date.toLocaleDateString('en-US', {
@@ -67,7 +85,7 @@ export function getBubbleDescendantIds(bubbles, bubbleId) {
 
 export function getNoteCountForBubble(notes, bubbleId, bubbles) {
   const ids = getBubbleDescendantIds(bubbles, bubbleId)
-  return notes.filter(n => n.bubble_ids.some(bid => ids.includes(bid))).length
+  return notes.filter(n => realBubbleIds(n).some(bid => ids.includes(bid))).length
 }
 
 export function contrastColor(hex) {

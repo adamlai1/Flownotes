@@ -1,7 +1,7 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, createContext, useContext } from 'react'
 import { flushSync } from 'react-dom'
 import { motion, AnimatePresence, useMotionValue, animate } from 'framer-motion'
-import { getNoteCountForBubble, getBubbleDescendantIds, getNoteTitle, contrastColor } from '../utils/helpers'
+import { getNoteCountForBubble, getBubbleDescendantIds, getNoteTitle, contrastColor, realBubbleIds } from '../utils/helpers'
 import { buildLockIndex } from '../utils/locks'
 import {
   fitNameFont, nameBoxHeight,
@@ -130,7 +130,7 @@ function levelItemCounts(project, contextKey) {
   const bubbleN = project.bubbles.filter(b => b.parent_id === contextId).length
   const noteN = contextId
     ? project.notes.filter(n => n.bubble_ids.includes(contextId)).length
-    : project.notes.filter(n => n.bubble_ids.length === 0 || n.bubble_ids.includes(ROOT_BUBBLE_ID)).length
+    : project.notes.filter(n => realBubbleIds(n).length === 0 || n.bubble_ids.includes(ROOT_BUBBLE_ID)).length
   return { bubbleN, noteN }
 }
 
@@ -2859,7 +2859,7 @@ export default function BubbleVisualization({
 
   const directNotes = currentId
     ? project.notes.filter(n => n.bubble_ids.includes(currentId))
-    : project.notes.filter(n => n.bubble_ids.length === 0 || n.bubble_ids.includes(ROOT_BUBBLE_ID))
+    : project.notes.filter(n => realBubbleIds(n).length === 0 || n.bubble_ids.includes(ROOT_BUBBLE_ID))
 
   const layoutItems = [
     ...visibleBubbles.map(b => {

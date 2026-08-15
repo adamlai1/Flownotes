@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { formatDate, getNoteTitle, contrastColor } from '../utils/helpers'
+import { formatDate, getNoteTitle, contrastColor, realBubbleIds } from '../utils/helpers'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import { useToast } from '../contexts/ToastContext'
 import { canShareNotes, copyNoteText, shareNoteText } from '../utils/noteShare'
@@ -20,7 +20,7 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
   // from a locked bubble, that hasn't been unlocked this session). Everything derived
   // from the note's content is withheld while it's true — title, preview, tags,
   // bubbles and the connection count would all leak something about the note.
-  const noteBubbles = locked ? [] : bubbles.filter(b => note.bubble_ids.includes(b.id))
+  const noteBubbles = locked ? [] : bubbles.filter(b => realBubbleIds(note).includes(b.id))
   // Count both forward connections (this note → others) and reverse (others → this note)
   const reverseConnectionCount = allNotes
     ? allNotes.filter(n => n.id !== note.id && n.connections.some(c => c.note_id === note.id)).length

@@ -10,7 +10,7 @@
 // The password itself is never stored in plain text: only a salted hash is kept
 // (locally and, when signed in, in the user_preferences row).
 
-import { generateId } from './helpers'
+import { generateId, realBubbleIds } from './helpers'
 
 // Rounds are cheap here because the hash is only defending the *password* against
 // someone reading localStorage — not the content, which isn't protected at all.
@@ -81,7 +81,7 @@ export function buildLockIndex(bubbles = [], notes = [], unlockedIds = EMPTY_SET
   function noteGates(note) {
     const gates = []
     if (note.locked && !isUnlocked(note.id)) gates.push(note.id)
-    for (const bid of note.bubble_ids ?? []) gates.push(...bubbleChainGates(bid))
+    for (const bid of realBubbleIds(note)) gates.push(...bubbleChainGates(bid))
     return [...new Set(gates)]
   }
 

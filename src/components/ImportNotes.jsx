@@ -1,7 +1,7 @@
 import { useState, useRef, useMemo, useEffect } from 'react'
 import { motion } from 'framer-motion'
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url'
-import { getNoteTitle } from '../utils/helpers'
+import { getNoteTitle, ROOT_BUBBLE_ID } from '../utils/helpers'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 
 // ── Text splitting / note building ─────────────────────────────────────────────
@@ -213,7 +213,7 @@ export default function ImportNotes({ project, onImportNotes, onClose, showToast
   function doImport() {
     const count = onImportNotes(notes.map((n, i) => {
       const bubbleId = bubbleFor(i)
-      return { content: n.content, bubble_ids: bubbleId ? [bubbleId] : [] }
+      return { content: n.content, bubble_ids: bubbleId ? [bubbleId] : [ROOT_BUBBLE_ID] }
     }))
     showToast(`Imported ${count} note${count === 1 ? '' : 's'}`)
     onClose()

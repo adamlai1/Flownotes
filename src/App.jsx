@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { AnimatePresence } from 'framer-motion'
 import { createDefaultProject, leastUsedBubbleColor } from './data/defaultData'
-import { generateId } from './utils/helpers'
+import { generateId, realBubbleIds, ROOT_BUBBLE_ID } from './utils/helpers'
 import {
   loadProjectList,
   saveProjectList,
@@ -426,7 +426,11 @@ function buildSeparateImport(localProjects, cloudProjects, cloudList) {
       notes: (p.notes ?? []).map(note => ({
         ...note,
         id: idMap.get(note.id),
-        bubble_ids: (note.bubble_ids ?? []).map(bid => idMap.get(bid)).filter(Boolean),
+        // The '__root__' canvas-pin sentinel is not a bubble id: it survives
+        // the rewrite as-is rather than being mapped (and dropped).
+        bubble_ids: (note.bubble_ids ?? [])
+          .map(bid => (bid === ROOT_BUBBLE_ID ? bid : idMap.get(bid)))
+          .filter(Boolean),
         connections: (note.connections ?? [])
           .filter(c => idMap.has(c.note_id))
           .map(c => ({ ...c, note_id: idMap.get(c.note_id) })),
@@ -1509,10 +1513,15 @@ export default function App() {
     const updated = {
       ...activeProject,
       bubbles: activeProject.bubbles.filter(b => !toRemove.has(b.id)),
-      notes: activeProject.notes.map(n => ({
-        ...n,
-        bubble_ids: n.bubble_ids.filter(bid => !toRemove.has(bid)),
-      })),
+      notes: activeProject.notes.map(n => {
+        const bubble_ids = n.bubble_ids.filter(bid => !toRemove.has(bid))
+        // Losing its last real bubble re-pins the note to the project canvas —
+        // a note is never left with no location.
+        if (realBubbleIds(bubble_ids).length === 0 && !bubble_ids.includes(ROOT_BUBBLE_ID)) {
+          bubble_ids.push(ROOT_BUBBLE_ID)
+        }
+        return { ...n, bubble_ids }
+      }),
     }
     if (selectedBubbleId && toRemove.has(selectedBubbleId)) {
       setSelectedBubbleId(null)
@@ -1554,7 +1563,8 @@ export default function App() {
       content: nd.content || '',
       created_at: now,
       updated_at: now,
-      bubble_ids: nd.bubble_ids || [],
+      // A note always has a location — no target bubble means the canvas.
+      bubble_ids: nd.bubble_ids?.length ? nd.bubble_ids : [ROOT_BUBBLE_ID],
       tags: [],
       connections: [],
     }))
@@ -1571,7 +1581,8 @@ export default function App() {
       content: noteData.content || '',
       created_at: now,
       updated_at: now,
-      bubble_ids: noteData.bubble_ids || [],
+      // The project canvas is the default location for a new note.
+      bubble_ids: noteData.bubble_ids?.length ? noteData.bubble_ids : [ROOT_BUBBLE_ID],
       tags: noteData.tags || [],
       connections: [],
       locked: false,
@@ -1680,11 +1691,18 @@ export default function App() {
       bubbles: current.bubbles.filter(b => !bubblesToRemove.has(b.id)),
       notes: current.notes
         .filter(n => !notesToRemove.has(n.id))
-        .map(n => ({
-          ...n,
-          bubble_ids: n.bubble_ids.filter(bid => !bubblesToRemove.has(bid)),
-          connections: n.connections.filter(c => !notesToRemove.has(c.note_id)),
-        })),
+        .map(n => {
+          const bubble_ids = n.bubble_ids.filter(bid => !bubblesToRemove.has(bid))
+          // Same re-pin rule as deleteBubble: no real bubbles left → canvas.
+          if (realBubbleIds(bubble_ids).length === 0 && !bubble_ids.includes(ROOT_BUBBLE_ID)) {
+            bubble_ids.push(ROOT_BUBBLE_ID)
+          }
+          return {
+            ...n,
+            bubble_ids,
+            connections: n.connections.filter(c => !notesToRemove.has(c.note_id)),
+          }
+        }),
     }
     if (selectedBubbleId && bubblesToRemove.has(selectedBubbleId)) setSelectedBubbleId(null)
     setNoteStack(prev => prev.filter(id => !notesToRemove.has(id)))
@@ -1804,7 +1822,7 @@ export default function App() {
 
   // Create an empty note at current bubble context and open editor
   function handleCreateNote() {
-    const bubbleIds = currentBubbleId ? [currentBubbleId] : []
+    const bubbleIds = currentBubbleId ? [currentBubbleId] : [ROOT_BUBBLE_ID]
     const note = createNote({ content: '', bubble_ids: bubbleIds, tags: [] })
     setNoteStack([note.id])
   }

@@ -1,7 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CONNECTION_TYPES, CUSTOM_TAG_PALETTE, ROOT_BUBBLE_ID } from '../data/defaultData'
-import { getNoteTitle } from '../utils/helpers'
+import { getNoteTitle, realBubbleIds } from '../utils/helpers'
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
 import { useToast } from '../contexts/ToastContext'
@@ -30,7 +30,11 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // DERIVED from the first non-empty line, so the first line stays in the text and
   // is never pulled out / hidden.
   const [text, setText] = useState(note.content || '')
-  const [selectedBubbleIds, setSelectedBubbleIds] = useState(note.bubble_ids)
+  // A note always has at least one location: legacy notes saved with an empty
+  // bubble_ids open as pinned to the project canvas, and the next save
+  // persists that normalization.
+  const [selectedBubbleIds, setSelectedBubbleIds] = useState(() =>
+    (note.bubble_ids ?? []).length ? note.bubble_ids : [ROOT_BUBBLE_ID])
   const [tags, setTags] = useState(note.tags)
   const [tagInput, setTagInput] = useState('')
   const [addingTag, setAddingTag] = useState(false)
@@ -146,10 +150,29 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     scheduleSave(val, selectedBubbleIds, tags, connections)
   }
 
+  // Membership invariants: a note always has at least one selection. The
+  // project-canvas sentinel deselects itself when the FIRST real bubble is
+  // picked (the note has moved into a bubble), re-selects itself when the
+  // last real bubble is removed (a note is never left with no location), can
+  // be re-added manually at any time without evicting real bubbles, and can
+  // only be removed while a real bubble remains.
   function toggleBubble(id) {
-    const updated = selectedBubbleIds.includes(id)
-      ? selectedBubbleIds.filter(b => b !== id)
-      : [...selectedBubbleIds, id]
+    let updated
+    if (selectedBubbleIds.includes(id)) {
+      updated = selectedBubbleIds.filter(b => b !== id)
+      if (id === ROOT_BUBBLE_ID) {
+        if (realBubbleIds(updated).length === 0) return // sole location — keep it
+      } else if (realBubbleIds(updated).length === 0 && !updated.includes(ROOT_BUBBLE_ID)) {
+        updated = [...updated, ROOT_BUBBLE_ID]
+      }
+    } else {
+      updated = [...selectedBubbleIds, id]
+      // Only the 0 → first real bubble transition evicts the sentinel;
+      // adding further bubbles never removes a manually re-selected pin.
+      if (id !== ROOT_BUBBLE_ID && realBubbleIds(selectedBubbleIds).length === 0) {
+        updated = updated.filter(b => b !== ROOT_BUBBLE_ID)
+      }
+    }
     setSelectedBubbleIds(updated)
     scheduleSave(text, updated, tags, connections)
   }
