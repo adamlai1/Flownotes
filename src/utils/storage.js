@@ -40,7 +40,7 @@ export function loadAllProjects(projectList) {
 
 // Per-project layout caches other modules key by project id (bubble positions,
 // page assignments, pinned notes). Swept together with the project blobs.
-const PER_PROJECT_PREFIXES = ['mindmap-project-', 'mindmap-pos-', 'mindmap-pages-', 'mindmap-pins-']
+const PER_PROJECT_PREFIXES = ['mindmap-project-', 'mindmap-pos-', 'mindmap-pages-', 'mindmap-pins-', 'mindmap-sortmode-']
 
 // Remove the project list, every stored project (including orphaned blobs no
 // longer in the list), and all per-project layout caches. Used by sign-out to

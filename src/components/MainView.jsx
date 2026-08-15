@@ -6,13 +6,8 @@ import { formatDateGroup, realBubbleIds, getBubbleDescendantIds, noteTitle } fro
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
 import { useEscapeInput } from '../lib/escapeStack'
-import { TAG_COLORS } from '../data/defaultData'
+import { TAG_COLORS, SORT_MODES } from '../data/defaultData'
 
-const SORT_MODES = [
-  { id: 'newest', label: 'Newest first', dateField: 'created_at', dir: -1 },
-  { id: 'oldest', label: 'Oldest first', dateField: 'created_at', dir: 1 },
-  { id: 'edited',  label: 'Recently edited', dateField: 'updated_at', dir: -1 },
-]
 
 
 export default function MainView({

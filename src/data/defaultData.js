@@ -225,6 +225,16 @@ export function createDefaultProject() {
 // fully valid and keep displaying on every connection that uses them — same
 // pattern as the Self seed bubble: gone from new defaults, untouched in
 // existing data.
+// Note sort options — shared by the All Notes list and the bubble canvas's
+// Sorted layout mode, so the two can never drift apart. Defined here (not in
+// MainView) because BubbleVisualization also needs them and importing from
+// MainView would be circular.
+export const SORT_MODES = [
+  { id: 'newest', label: 'Newest first', dateField: 'created_at', dir: -1 },
+  { id: 'oldest', label: 'Oldest first', dateField: 'created_at', dir: 1 },
+  { id: 'edited',  label: 'Recently edited', dateField: 'updated_at', dir: -1 },
+]
+
 export const CONNECTION_TYPES = [
   'Leads To',
   'Supports',

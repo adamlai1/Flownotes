@@ -8,7 +8,7 @@ import {
   TEXT_PAD, NAME_COUNT_GAP, COUNT_FONT, COUNT_LINE_H,
   NAME_MAX_FONT, NAME_MIN_FONT, NAME_LINE_H,
 } from '../utils/bubbleText'
-import { TAG_COLORS, ROOT_BUBBLE_ID } from '../data/defaultData'
+import { TAG_COLORS, ROOT_BUBBLE_ID, SORT_MODES } from '../data/defaultData'
 import { useTheme } from '../contexts/ThemeContext'
 import { usePreferences, NOTE_SIZE_SCALE } from '../contexts/PreferencesContext'
 import { useLock } from '../contexts/LockContext'
@@ -23,6 +23,19 @@ import BubbleNameInput from './BubbleNameInput'
 
 function posKey(projectId, contextId, itemId) {
   return `${projectId}:${contextId ?? 'root'}:${itemId}`
+}
+
+// Per-level layout mode: absent = Free (the organic physics layout),
+// { sort: '<SORT_MODES id>' } = Sorted (fixed reading grid). Per-device like
+// every other piece of canvas view-state (positions, pages, pins), keyed by
+// the same contextKey the position cache uses, and swept by the sign-out
+// clear alongside them.
+function loadSortModes(projectId) {
+  try { return JSON.parse(localStorage.getItem(`mindmap-sortmode-${projectId}`)) || {} }
+  catch { return {} }
+}
+function saveSortModes(projectId, modes) {
+  try { localStorage.setItem(`mindmap-sortmode-${projectId}`, JSON.stringify(modes)) } catch {}
 }
 
 function loadSavedPositions(projectId) {
@@ -938,6 +951,129 @@ function layoutPenalty(laid, width, height, headerH, bottomPad, safeBottom = 0) 
     }
   }
   return s
+}
+
+// ── Sorted-mode layout ─────────────────────────────────────────────────────────
+// A fixed reading grid instead of the organic physics: note-sized cells filled
+// row-major (top-left → bottom-right) in sort order, so a note's screen
+// position IS its sort position. Bubbles don't participate in the sort (they
+// carry no timestamps at all) — they form a centered block, alphabetical by
+// name for determinism, and notes flow around it skipping the cells the block
+// covers. Overflow uses the same page model as the rest of the canvas: page 1
+// holds the bubble block plus what fits, later pages are pure note grids.
+// Pure and derived every render — it never reads or writes saved positions or
+// page assignments, which is what makes Sorted non-destructive by
+// construction.
+export function computeSortedPages(items, width, height, noteScale, safeBottom, sortId) {
+  if (width <= 0 || height <= 0) return [[]]
+  const noteR = noteRFor(noteScale)
+  const cellW = noteR * 2 * NOTE_HW + NOTE_GAP_X
+  const cellH = noteR * 2 * NOTE_HH + NOTE_GAP_Y
+  const top = SUB_BAR_H + 14
+  // The bottom bound stays above the page-dots band (bottom 20px + 9px dots +
+  // margin) and the home-indicator inset. Reserved unconditionally, not just
+  // when the level paginates: whether dots exist depends on page count, which
+  // depends on this very capacity — a fixpoint not worth 13px.
+  const availH = Math.max(height - top - (37 + safeBottom), cellH)
+  const cols = Math.max(1, Math.floor((width - 2 * EDGE_INSET + NOTE_GAP_X) / cellW))
+  const rows = Math.max(1, Math.floor((availH + NOTE_GAP_Y) / cellH))
+  const gridW = cols * cellW - NOTE_GAP_X
+  const x0 = (width - gridW) / 2 + (cellW - NOTE_GAP_X) / 2 // center of column 0
+  const y0 = top + (cellH - NOTE_GAP_Y) / 2                 // center of row 0
+  const cellCenter = (c, r) => ({ cx: x0 + c * cellW, cy: y0 + r * cellH })
+
+  const mode = SORT_MODES.find(m => m.id === sortId) ?? SORT_MODES[0]
+  const notes = items.filter(i => i.type === 'note').slice().sort((a, b) =>
+    (new Date(a[mode.dateField]) - new Date(b[mode.dateField])) * mode.dir)
+  const bubbles = items.filter(i => i.type === 'bubble').slice().sort((a, b) =>
+    (a.name || '').localeCompare(b.name || ''))
+
+  // Bubble block: uniform floor-radius bubbles in a compact sub-grid, centered
+  // on the page. Uniform size is deliberate — content-scaled radii would make
+  // the block's cell coverage unstable.
+  const bubR = minBubbleRFor(noteScale)
+  const bubW = bubR * 2 * BUB_HW + 14
+  const bubH = bubR * 2 * BUB_HH + 14
+  const placedBubbles = []
+  let blockRect = null
+  if (bubbles.length) {
+    const maxBCols = Math.max(1, Math.floor((width - 2 * EDGE_INSET) / bubW))
+    const maxBRows = Math.max(1, Math.floor(availH / bubH))
+    const bCols = Math.min(Math.max(1, Math.ceil(Math.sqrt(bubbles.length))), maxBCols)
+    const bRows = Math.min(Math.ceil(bubbles.length / bCols), maxBRows)
+    // More bubbles than one centered block can hold is out of scope for the
+    // block (extremely dense levels paginate in Free mode anyway): the
+    // overflow rides in the block's last row positions, clamped.
+    const blockW = bCols * bubW
+    const blockH = bRows * bubH
+    const bx0 = width / 2 - blockW / 2 + bubW / 2
+    const by0 = top + availH / 2 - blockH / 2 + bubH / 2
+    bubbles.forEach((b, i) => {
+      const c = i % bCols
+      const r = Math.min(Math.floor(i / bCols), bRows - 1)
+      placedBubbles.push({ ...b, cx: bx0 + c * bubW, cy: by0 + r * bubH, r: bubR })
+    })
+    blockRect = {
+      left: width / 2 - blockW / 2 - NOTE_GAP_X,
+      right: width / 2 + blockW / 2 + NOTE_GAP_X,
+      topEdge: top + availH / 2 - blockH / 2 - NOTE_GAP_Y,
+      bottomEdge: top + availH / 2 + blockH / 2 + NOTE_GAP_Y,
+    }
+  }
+  const cellBlocked = (c, r) => {
+    if (!blockRect) return false
+    const { cx, cy } = cellCenter(c, r)
+    const hw = (cellW - NOTE_GAP_X) / 2
+    const hh = (cellH - NOTE_GAP_Y) / 2
+    return cx + hw > blockRect.left && cx - hw < blockRect.right &&
+      cy + hh > blockRect.topEdge && cy - hh < blockRect.bottomEdge
+  }
+
+  // The floating + button overlays EVERY page (bottom-right, 1.5rem + safe
+  // inset up from the painted bottom). Cells under its exclusion circle are
+  // skipped — the same radius the free-mode physics barrier enforces, so the
+  // two modes agree about the button — rather than insetting the grid, which
+  // would sacrifice a whole row for one corner. safeBottom is the measured
+  // device inset (0 on desktop), so the reserved area lands on the real
+  // button position for both device classes.
+  const btn = { cx: width - 52, cy: height - 52 - safeBottom, r: PLUS_BTN_EXCL_R + BTN_ROW_PAD }
+  const cellUnderButton = (c, r) => {
+    const { cx, cy } = cellCenter(c, r)
+    const dx = Math.max(Math.abs(cx - btn.cx) - (cellW - NOTE_GAP_X) / 2, 0)
+    const dy = Math.max(Math.abs(cy - btn.cy) - (cellH - NOTE_GAP_Y) / 2, 0)
+    return dx * dx + dy * dy < btn.r * btn.r
+  }
+
+  // Fill pages row-major. Page 0 carries the bubble block and skips its
+  // cells; every page skips the + button's cells.
+  const pages = []
+  let noteIdx = 0
+  let pi = 0
+  do {
+    const pageItems = pi === 0 ? [...placedBubbles] : []
+    const before = noteIdx
+    for (let r = 0; r < rows && noteIdx < notes.length; r++) {
+      for (let c = 0; c < cols && noteIdx < notes.length; c++) {
+        if ((pi === 0 && cellBlocked(c, r)) || cellUnderButton(c, r)) continue
+        const { cx, cy } = cellCenter(c, r)
+        pageItems.push({ ...notes[noteIdx++], cx, cy, r: noteR })
+      }
+    }
+    // Degenerate viewport where the exclusions block every cell of a page:
+    // place the remainder anyway (visible beats hidden-under-a-button) so the
+    // loop always terminates.
+    if (noteIdx === before && noteIdx < notes.length && pi > 0) {
+      for (let r = 0; r < rows && noteIdx < notes.length; r++) {
+        for (let c = 0; c < cols && noteIdx < notes.length; c++) {
+          const { cx, cy } = cellCenter(c, r)
+          pageItems.push({ ...notes[noteIdx++], cx, cy, r: noteR })
+        }
+      }
+    }
+    pages.push(pageItems)
+    pi++
+  } while (noteIdx < notes.length)
+  return pages
 }
 
 export function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteScale = 1, seed = 0, safeBottom = 0) {
@@ -2653,6 +2789,9 @@ export default function BubbleVisualization({
   // ── Drag state ────────────────────────────────────────────────────────────────
   const [draggingId, setDraggingId] = useState(null)
   const [savedPositions, setSavedPositions] = useState({})
+  // Per-level layout mode map (contextKey → { sort }); see loadSortModes.
+  const [sortModes, setSortModes] = useState(() => loadSortModes(project.id))
+  const [layoutMenuOpen, setLayoutMenuOpen] = useState(false)
   // Mutable refs — no React state updates during drag movement
   const dragInfoRef = useRef(null)        // { id, type, cx, cy, r } — pointer's desired position
   const resolvedDragPosRef = useRef(null) // { cx, cy } — actual resolved drag position (may differ if blocked)
@@ -2693,6 +2832,7 @@ export default function BubbleVisualization({
   const assignCacheRef = useRef({ key: null, pageOf: {} })
   const perPageRef = useRef(1)
   const paginatedRef = useRef(false)
+  const sortedRef = useRef(false) // mirrors isSorted for the pointer handlers
   const pagedRef = useRef(null)       // active paged gesture state
   // Briefly true after a re-layout (a cross-page move, a reorganize, a note-size
   // change) so items ease to their new size and position instead of snapping.
@@ -2897,6 +3037,24 @@ export default function BubbleVisualization({
     : null
   const currentId = currentBubble?.id ?? null
 
+  // Layout mode for THIS level. Absent = Free. Reloaded when the project
+  // changes, like the other per-project view-state.
+  useEffect(() => { setSortModes(loadSortModes(project.id)) }, [project.id])
+  const layoutContextKey = currentId ?? 'root'
+  const sortedCfg = sortModes[layoutContextKey] ?? null
+  const isSorted = !!sortedCfg
+
+  function setLayoutModeForLevel(cfg) { // null = Free, { sort } = Sorted
+    const next = { ...sortModes }
+    if (cfg) next[layoutContextKey] = cfg
+    else delete next[layoutContextKey]
+    setSortModes(next)
+    saveSortModes(project.id, next)
+    // Fly, don't teleport: the same layout-animation window the cross-page
+    // moves use eases every item to its new position.
+    pulseLayoutAnim()
+  }
+
   const visibleBubbles = project.bubbles.filter(b => b.parent_id === currentId)
   // Every bubble at this level, mounted or not — the shared name size is scoped to the
   // level, and page windowing means the scope can no longer infer that from what is
@@ -3056,7 +3214,22 @@ export default function BubbleVisualization({
       )
     }
   }
-  const clampedPageIndex = pages.length > 0 ? Math.min(pageIndex, pages.length - 1) : 0
+  // ── Sorted layout mode override ───────────────────────────────────────────────
+  // A derived overlay: while Sorted, it replaces BOTH the per-page float
+  // layout and the page assignment. The saved maps sleep untouched — dragging
+  // is disabled, and drag-end is the only writer — so flipping back to Free
+  // re-derives the exact previous picture. A level that is single-page in
+  // Free and fits one sorted page renders through the single-page branch, so
+  // items keep their mounts and FLY to their grid cells.
+  const sortedPages = (isSorted && size.width > 0)
+    ? computeSortedPages(layoutItems, size.width, size.height, noteScale, size.safeBottom, sortedCfg.sort)
+    : null
+  const useSortedSingle = !!sortedPages && !paginated && sortedPages.length === 1
+  const effPaginated = sortedPages ? !useSortedSingle : paginated
+  const effPages = sortedPages && !useSortedSingle ? sortedPages : pages
+  const effLaid = useSortedSingle ? sortedPages[0] : laidWithOverrides
+
+  const clampedPageIndex = effPages.length > 0 ? Math.min(pageIndex, effPages.length - 1) : 0
 
   // ── Capacity log ──────────────────────────────────────────────────────────────
   // Reports what each page was allowed to hold vs what it actually got, so the fill
@@ -3161,21 +3334,22 @@ export default function BubbleVisualization({
 
   // Keep refs current (used in pointer handlers and RAF loop). In paged mode the
   // "current layout" is the visible page's items (drag physics operate on these).
-  laidWithOverridesRef.current = paginated ? (pages[clampedPageIndex] || []) : laidWithOverrides
+  laidWithOverridesRef.current = effPaginated ? (effPages[clampedPageIndex] || []) : effLaid
   currentIdRef.current = currentId
-  pagesRef.current = pages
+  pagesRef.current = effPages
   perPageRef.current = perPage
-  paginatedRef.current = paginated
+  paginatedRef.current = effPaginated
+  sortedRef.current = isSorted
 
   // Snap the page track on structural changes (resize, page count, entering paged mode).
   useLayoutEffect(() => {
     pageX.set(-pageIndexRef.current * size.width)
-  }, [size.width, pages.length, paginated]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [size.width, effPages.length, effPaginated]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Clamp the current page if the number of pages shrinks.
   useEffect(() => {
-    if (pages.length > 0 && pageIndex > pages.length - 1) setPageIndex(pages.length - 1)
-  }, [pages.length]) // eslint-disable-line react-hooks/exhaustive-deps
+    if (effPages.length > 0 && pageIndex > effPages.length - 1) setPageIndex(effPages.length - 1)
+  }, [effPages.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // TEMP (swipe perf): closes the timer animateToPage opened, once the commit it caused
   // has been applied to the DOM.
@@ -3469,7 +3643,10 @@ export default function BubbleVisualization({
     if (hit && !selectModeRef.current) {
       // Press-and-hold to pick a bubble up — it then drags with the SAME free-form
       // physics (collision resolution, pushing, saving) as the single-page view.
-      st.lpTimer = setTimeout(() => {
+      // Sorted mode disables the pick-up entirely (positions are derived from
+      // the sort, and never saving them is what keeps Sorted non-destructive);
+      // the long-press menu below still works.
+      if (!sortedRef.current) st.lpTimer = setTimeout(() => {
         if (pagedRef.current !== st || st.mode !== 'pending') return
         st.mode = 'drag'
         navigator.vibrate?.(40)
@@ -3726,7 +3903,8 @@ export default function BubbleVisualization({
     // In select mode a press never becomes a drag — pointer-up toggles the item instead.
     if (selectModeRef.current) return
 
-    longPressTimerRef.current = setTimeout(() => {
+    // Sorted mode: no drag pick-up (see the paged handler); menu + tap remain.
+    if (!sortedRef.current) longPressTimerRef.current = setTimeout(() => {
       longPressTimerRef.current = null
       dragActivatedRef.current = true
       navigator.vibrate?.(40)
@@ -4004,9 +4182,60 @@ export default function BubbleVisualization({
           ))}
         </div>
 
-        {/* Right cluster: reorganize + select + view toggle */}
+        {/* Right cluster: layout mode + reorganize + select + view toggle */}
         <div className="flex items-center gap-2 flex-shrink-0">
-        {hasManualLayout && layoutItems.length > 1 && (
+        {/* Layout mode: Free (organic, draggable) vs Sorted (reading grid). */}
+        <div className="relative">
+          <button
+            onClick={() => setLayoutMenuOpen(o => !o)}
+            className={`p-1.5 rounded-lg transition-colors ${isSorted ? 'text-indigo-300 bg-white/10' : 'text-white/50 hover:text-white/90 hover:bg-white/10'}`}
+            aria-label="Layout mode"
+            title="Layout mode"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M4 5h16M4 10h16M4 15h10M4 20h6" />
+            </svg>
+          </button>
+          {layoutMenuOpen && (
+            <div className="fixed inset-0 z-40" onClick={() => setLayoutMenuOpen(false)} />
+          )}
+          {layoutMenuOpen && (
+            <div
+              className="absolute right-0 top-full mt-1.5 rounded-xl shadow-2xl overflow-hidden z-50"
+              style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', minWidth: 190 }}
+            >
+              <button
+                onClick={() => { setLayoutModeForLevel(null); setLayoutMenuOpen(false) }}
+                className="w-full text-left px-4 py-2.5 text-sm transition-colors"
+                style={{
+                  color: !isSorted ? '#818cf8' : 'var(--text-2)',
+                  background: !isSorted ? 'rgba(99,102,241,0.12)' : 'transparent',
+                }}
+              >
+                Free
+              </button>
+              <div style={{ height: 1, background: 'var(--border)' }} />
+              {SORT_MODES.map(m => {
+                const active = sortedCfg?.sort === m.id
+                return (
+                  <button
+                    key={m.id}
+                    onClick={() => { setLayoutModeForLevel({ sort: m.id }); setLayoutMenuOpen(false) }}
+                    className="w-full text-left px-4 py-2.5 text-sm transition-colors"
+                    style={{
+                      color: active ? '#818cf8' : 'var(--text-2)',
+                      background: active ? 'rgba(99,102,241,0.12)' : 'transparent',
+                    }}
+                  >
+                    Sorted · {m.label}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+        </div>
+        {hasManualLayout && layoutItems.length > 1 && !isSorted && (
           <button
             onClick={reorganizeLevel}
             className="p-1.5 rounded-lg text-white/50 hover:text-white/90 hover:bg-white/10 transition-colors"
@@ -4125,7 +4354,7 @@ export default function BubbleVisualization({
                 </div>
               )}
 
-              {paginated ? (
+              {effPaginated ? (
                 /* ── Paged bubbles: horizontal swipe between full pages ────────── */
                 <div
                   className="absolute inset-0"
@@ -4147,9 +4376,9 @@ export default function BubbleVisualization({
                       an unmounted page must not shift the ones after it, and the track's
                       x-translation is -pageIndex * width, which assumes page `pi` sits at
                       exactly pi * width. */}
-                  <motion.div style={{ x: pageX, position: 'relative', height: '100%', width: pages.length * size.width }}>
+                  <motion.div style={{ x: pageX, position: 'relative', height: '100%', width: effPages.length * size.width }}>
                     <BubbleNameFontScope liveIds={levelBubbleIds}>
-                    {pages.map((pageItems, pi) => {
+                    {effPages.map((pageItems, pi) => {
                       if (Math.abs(pi - clampedPageIndex) > 1) return null
                       // The idle bob runs on the current page only, and stops on every
                       // page for the length of a swipe.
@@ -4195,7 +4424,7 @@ export default function BubbleVisualization({
                    children have to stay the motion elements for exit to be tracked. */
                 <BubbleNameFontScope liveIds={levelBubbleIds}>
                 <AnimatePresence>
-                  {laidWithOverrides.map((item, i) =>
+                  {effLaid.map((item, i) =>
                     item.type === 'note' ? (
                       <NoteCard
                         key={`${item.id}-${theme}`}
@@ -4229,12 +4458,12 @@ export default function BubbleVisualization({
       </div>
 
       {/* ── Page indicator dots — fixed, above the + button ───────────────────── */}
-      {paginated && pages.length > 1 && !selectMode && (
+      {effPaginated && effPages.length > 1 && !selectMode && (
         <div
           className="absolute left-0 right-0 flex items-center justify-center gap-2 pointer-events-none z-10"
           style={{ bottom: 'calc(20px + env(safe-area-inset-bottom))' }}
         >
-          {pages.map((_, i) => (
+          {effPages.map((_, i) => (
             <span
               key={i}
               style={{
