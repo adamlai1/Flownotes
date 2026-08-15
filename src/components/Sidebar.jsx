@@ -18,6 +18,7 @@ export default function Sidebar({
   onRenameBubble,
   onDeleteBubble,
   onMoveBubble,
+  onChangeBubbleColor,
   onUpdateCustomTagColors,
   onDeleteCustomTag,
   onRenameCustomTag,
@@ -288,6 +289,7 @@ export default function Sidebar({
                 onRenameBubble={onRenameBubble}
                 onDeleteBubble={onDeleteBubble}
                 onMoveBubble={onMoveBubble}
+                onChangeBubbleColor={onChangeBubbleColor}
                 onAddChildBubble={(parentId) => {
                   setNewBubbleParentId(parentId)
                   setAddingBubble(true)

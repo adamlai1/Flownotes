@@ -16,6 +16,7 @@ import { useToast } from '../contexts/ToastContext'
 import { canShareNotes, copyNoteText, shareNoteText } from '../utils/noteShare'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import ConfirmDialog from './ConfirmDialog'
+import BubbleColorPicker from './BubbleColorPicker'
 
 // ─── Position persistence ─────────────────────────────────────────────────────
 
@@ -2030,13 +2031,15 @@ const LONG_PRESS_MENU_MS = 750
 // Anchored at the press point and clamped to stay on screen. Stops its own pointer
 // events so the canvas's drag handlers underneath don't pick them up.
 
-function LockMenu({ menu, gated, onLock, onCopy, onShare, onDelete, onClose, width, height }) {
+function LockMenu({ menu, gated, onLock, onCopy, onShare, onColor, onDelete, onClose, width, height }) {
   if (!menu) return null
   const item = menu.item
   // Copy/Share are for notes, and never for a hidden one — the lock exists to keep the
   // content out of reach, and a Copy one tap away would be a way around it.
   const showCopy = item.type === 'note' && !gated
   const showShare = showCopy && canShareNotes()
+  // Colour is for bubbles; withheld while locked like every other action.
+  const showColor = item.type === 'bubble' && !gated
   const MENU_W = 176
   // Measured from the rendered rows rather than a fixed figure, since the menu is now
   // two, three or four rows deep depending on what the item is. Only used to keep the
@@ -2044,7 +2047,7 @@ function LockMenu({ menu, gated, onLock, onCopy, onShare, onDelete, onClose, wid
   // bottom edge exactly where a long-press near the bottom puts it.
   const HEADER_H = 30
   const ROW_H = 54
-  const rows = 2 + (showCopy ? 1 : 0) + (showShare ? 1 : 0)
+  const rows = 2 + (showCopy ? 1 : 0) + (showShare ? 1 : 0) + (showColor ? 1 : 0)
   const MENU_H = HEADER_H + rows * ROW_H
   const x = Math.max(8, Math.min(menu.x, width - MENU_W - 8))
   const y = Math.max(SUB_BAR_H + 8, Math.min(menu.y, height - MENU_H - 8))
@@ -2097,6 +2100,22 @@ function LockMenu({ menu, gated, onLock, onCopy, onShare, onDelete, onClose, wid
             >
               <ShareGlyph size={15} color="currentColor" />
               Share
+            </button>
+            <div style={{ height: 1, background: 'var(--border)' }} />
+          </>
+        )}
+        {showColor && (
+          <>
+            <button
+              onClick={e => { e.stopPropagation(); onColor() }}
+              className="w-full flex items-center gap-2 px-3 py-3 text-sm text-left active:opacity-70"
+              style={{ color: 'var(--text)' }}
+            >
+              <span
+                className="flex-shrink-0 rounded-full"
+                style={{ width: 13, height: 13, background: item.color, border: '1.5px solid var(--border)' }}
+              />
+              Change color
             </button>
             <div style={{ height: 1, background: 'var(--border)' }} />
           </>
@@ -2492,8 +2511,11 @@ export default function BubbleVisualization({
   placeBubbleId,
   pageStep,
   onRefresh,
+  onChangeBubbleColor,
 }) {
   const containerRef = useRef(null)
+  // Bubble whose colour picker modal is open (from the long-press menu).
+  const [colorPickerItem, setColorPickerItem] = useState(null)
   const { theme } = useTheme()
   const isLight = theme === 'light'
   const { noteSize } = usePreferences()
@@ -2788,6 +2810,9 @@ export default function BubbleVisualization({
 
     function onTouchStart(e) {
       if (e.touches.length > 1 || expandAnimRef.current || dragActivatedRef.current) return
+      // A touch on a dialog rendered inside the container must not drive the
+      // go-back gesture beneath it.
+      if (e.target.closest?.('[data-modal]')) return
       const touch = e.touches[0]
       swipeRef.current = {
         active: touch.clientX < 28 && navStackRef.current.length > 0,
@@ -3368,7 +3393,23 @@ export default function BubbleVisualization({
   // closes on action. Navigating or switching project drops it too.
   useEffect(() => { setLockMenu(null) }, [project.id, navStack, selectMode])
 
+  // Chrome/overlay guard for the coordinate hit-test handlers. Taps here are
+  // detected by POSITION, not DOM target, so anything rendered above the
+  // canvas — a confirm dialog, the sub-bar, the selection bar — must be
+  // excluded explicitly or a tap on it also lands on whatever item sits at
+  // those coordinates underneath (the click-through bug). Pointer events
+  // cover mouse and touch alike; guarding pointerdown is sufficient because
+  // the move/up handlers no-op without the state it creates. Item cards are
+  // exempt via data-item-id.
+  function pointerOnCanvasChrome(e) {
+    const t = e.target
+    if (!t?.closest) return false
+    if (t.closest('[data-modal]')) return true
+    return !!t.closest('button') && !t.closest('[data-item-id]')
+  }
+
   function onPagedPointerDown(e) {
+    if (pointerOnCanvasChrome(e)) return
     if (!paginatedRef.current || expandAnim || navTimerRef.current) return
     const rect = containerRef.current?.getBoundingClientRect()
     if (!rect) return
@@ -3638,6 +3679,7 @@ export default function BubbleVisualization({
     if (e.pointerType === 'touch' && e.isPrimary === false) return
     if (expandAnim || navTimerRef.current) return
     if (paginatedRef.current) return // paged mode uses its own pointer handlers
+    if (pointerOnCanvasChrome(e)) return
 
     const rect = containerRef.current?.getBoundingClientRect()
     if (!rect) return
@@ -4207,6 +4249,7 @@ export default function BubbleVisualization({
             onLock={() => { closeLockMenu(); toggleItemLock(lockMenu.item) }}
             onCopy={() => { closeLockMenu(); copyItem(lockMenu.item) }}
             onShare={() => { closeLockMenu(); shareItem(lockMenu.item) }}
+            onColor={() => { closeLockMenu(); setColorPickerItem(lockMenu.item) }}
             onDelete={() => { closeLockMenu(); requestDeleteItem(lockMenu.item) }}
           />
       )}
@@ -4231,6 +4274,32 @@ export default function BubbleVisualization({
             </svg>
             Delete{selectedIds.size > 0 ? ` ${selectedIds.size}` : ''}
           </button>
+        </div>
+      )}
+
+      {/* ── Bubble colour picker (long-press menu → Change color) ─────────────── */}
+      {colorPickerItem && (
+        <div
+          data-modal
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.6)' }}
+          onClick={() => setColorPickerItem(null)}
+          onPointerDown={e => e.stopPropagation()}
+          onPointerUp={e => e.stopPropagation()}
+        >
+          <div
+            className="mx-6 w-full max-w-xs rounded-2xl p-5"
+            style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <h2 className="text-white font-semibold text-base text-center mb-4 truncate">
+              {colorPickerItem.name}
+            </h2>
+            <BubbleColorPicker
+              value={project.bubbles.find(b => b.id === colorPickerItem.id)?.color}
+              onChange={c => { onChangeBubbleColor?.(colorPickerItem.id, c); setColorPickerItem(null) }}
+            />
+          </div>
         </div>
       )}
 

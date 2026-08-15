@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import { getNoteCountForBubble } from '../utils/helpers'
 import BubbleNameInput from './BubbleNameInput'
+import BubbleColorPicker from './BubbleColorPicker'
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
@@ -22,6 +23,7 @@ function BubbleNode({
   onRenameBubble,
   onDeleteBubble,
   onAddChildBubble,
+  onChangeBubbleColor,
   lockIndex,
   onRequestUnlock,
 }) {
@@ -30,6 +32,7 @@ function BubbleNode({
   const [renaming, setRenaming] = useState(false)
   const [renameValue, setRenameValue] = useState('')
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [pickingColor, setPickingColor] = useState(false)
   const { draggingId, dropTarget, startDrag } = useContext(DragContext)
   const children = bubbles.filter(b => b.parent_id === bubble.id)
   // A locked bubble is hidden here too, or the sidebar would be a way around the
@@ -44,6 +47,7 @@ function BubbleNode({
   const isNestTarget = dropTarget?.kind === 'nest' && dropTarget.id === bubble.id
 
   useEscapeLayer(showDeleteConfirm, () => setShowDeleteConfirm(false), ESC_LEVEL.modal)
+  useEscapeLayer(pickingColor, () => setPickingColor(false), ESC_LEVEL.modal)
 
   function handleRename() {
     const name = renameValue.trim()
@@ -189,6 +193,12 @@ function BubbleNode({
               >
                 Rename
               </button>
+              <button
+                onClick={() => { setPickingColor(true); setMenuOpen(false) }}
+                className="text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
+              >
+                Change color
+              </button>
                 </>
               )}
               <button
@@ -217,6 +227,7 @@ function BubbleNode({
               onRenameBubble={onRenameBubble}
               onDeleteBubble={onDeleteBubble}
               onAddChildBubble={onAddChildBubble}
+              onChangeBubbleColor={onChangeBubbleColor}
               lockIndex={lockIndex}
               onRequestUnlock={onRequestUnlock}
             />
@@ -229,6 +240,7 @@ function BubbleNode({
           {showDeleteConfirm && (
             <motion.div
               key="bubble-delete-modal"
+              data-modal
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
@@ -263,6 +275,41 @@ function BubbleNode({
                     Delete
                   </button>
                 </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>,
+        document.body
+      )}
+
+      {createPortal(
+        <AnimatePresence>
+          {pickingColor && (
+            <motion.div
+              key="bubble-color-modal"
+              data-modal
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.15 }}
+              className="fixed inset-0 flex items-center justify-center z-50"
+              style={{ background: 'rgba(0,0,0,0.6)' }}
+              onClick={() => setPickingColor(false)}
+            >
+              <motion.div
+                initial={{ opacity: 0, scale: 0.94 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.94 }}
+                transition={{ duration: 0.15 }}
+                className="mx-6 w-full max-w-xs rounded-2xl p-5"
+                style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+                onClick={e => e.stopPropagation()}
+              >
+                <h2 className="text-white font-semibold text-base text-center mb-4 truncate">{bubble.name}</h2>
+                <BubbleColorPicker
+                  value={bubble.color}
+                  onChange={c => { onChangeBubbleColor?.(bubble.id, c); setPickingColor(false) }}
+                />
               </motion.div>
             </motion.div>
           )}
@@ -324,6 +371,7 @@ export default function BubbleTree({
   onDeleteBubble,
   onMoveBubble,
   onAddChildBubble,
+  onChangeBubbleColor,
 }) {
   const rootBubbles = bubbles.filter(b => b.parent_id === parentId)
   const forceExpandIds = getAncestorIds(bubbles, activeBubbleId)
@@ -447,6 +495,7 @@ export default function BubbleTree({
               onRenameBubble={onRenameBubble}
               onDeleteBubble={onDeleteBubble}
               onAddChildBubble={onAddChildBubble}
+              onChangeBubbleColor={onChangeBubbleColor}
               lockIndex={lockIndex}
               onRequestUnlock={handleRequestUnlock}
             />

@@ -1,4 +1,4 @@
-import { generateId } from '../utils/helpers'
+import { generateId, ROOT_BUBBLE_ID } from '../utils/helpers'
 
 // Fixed, well-known ids for everything the app seeds — identical on every
 // install, so the same starter bubble/project matches by id across devices
@@ -7,9 +7,20 @@ import { generateId } from '../utils/helpers'
 // collide with generateId() output, which is lowercase alphanumerics only.
 export const SEED_PROJECT_ID = 'seed:project'
 export const SEED_IDEAS_ID = 'seed:ideas'
+// No longer seeded (new installs get Lists/Watch List as the nesting demo
+// instead), but the constant stays: the one-time legacy-id migration still
+// remaps old installs' random-id "Self" onto it, and accounts that already
+// have the bubble keep it forever.
 export const SEED_IDEAS_SELF_ID = 'seed:ideas-self'
 export const SEED_TODO_ID = 'seed:todo'
 export const SEED_JOURNAL_ID = 'seed:journal'
+// Added after the four above. The legacy-id migration deliberately does NOT
+// know about these: no legacy-era install ever had a random-id "Lists" or
+// "Watch List" to remap, and teaching the migration their names would fold a
+// user's own same-named bubble into them.
+export const SEED_LISTS_ID = 'seed:lists'
+export const SEED_LISTS_WATCHLIST_ID = 'seed:lists-watchlist'
+export const SEED_INTRO_NOTE_ID = 'seed:note-intro'
 
 const ideasId = SEED_IDEAS_ID
 const ideasSelfId = SEED_IDEAS_SELF_ID
@@ -19,9 +30,9 @@ const defaultProjectId = SEED_PROJECT_ID
 
 // Sentinel ID used when a note is explicitly pinned to the root level
 // alongside membership in other bubbles. Canonically defined in
-// utils/helpers.js next to realBubbleIds; re-exported here for existing
-// importers.
-export { ROOT_BUBBLE_ID } from '../utils/helpers'
+// utils/helpers.js next to realBubbleIds (imported above, since the seed
+// note below uses it); re-exported here for existing importers.
+export { ROOT_BUBBLE_ID }
 
 export const DEFAULT_TAGS = ['Certain', 'Think About More', 'Not Sure', 'Could Be Wrong']
 
@@ -78,45 +89,71 @@ export function leastUsedBubbleColor(siblingColors = [], projectColors = []) {
 
 // The starting structure a brand-new install is seeded with. Kept deliberately small
 // and unopinionated — it is scaffolding to show what bubbles ARE, not a filing system
-// anyone has to adopt. "Self" is the one nested bubble, there purely to demonstrate that
-// bubbles hold bubbles; everything else the user invents themselves.
+// anyone has to adopt. "Watch List" inside "Lists" is the one nested bubble, there
+// purely to demonstrate that bubbles hold bubbles; the one seed note lives on the
+// project canvas AND in To Do at once, teaching that notes live in many places
+// without a tooltip. Everything else the user invents themselves.
 //
 // This runs only when there is no local project list at all (see initializeData in
 // App.jsx). Changing it never reaches an existing install: local data loads from
-// storage, and cloud data overwrites local on sign-in. Nothing here migrates anybody.
+// storage, and cloud data overwrites local on sign-in. Nothing here migrates anybody
+// — accounts seeded under the old shape (with "Self", without Lists) keep exactly
+// what they have.
+// Static templates shared by createDefaultProject and the pristine checks
+// below, so "what the app seeds" and "what counts as untouched" can never
+// drift apart.
+const SEED_BUBBLES = [
+  { id: ideasId, name: 'Ideas', parent_id: null, color: '#6366f1' },
+  { id: toDoId, name: 'To Do', parent_id: null, color: '#22c55e' },
+  { id: journalId, name: 'Journal', parent_id: null, color: '#14b8a6' },
+  { id: SEED_LISTS_ID, name: 'Lists', parent_id: null, color: '#8b5cf6' },
+  { id: SEED_LISTS_WATCHLIST_ID, name: 'Watch List', parent_id: SEED_LISTS_ID, color: '#f97316' },
+]
+const SEED_NOTE_CONTENT =
+  'This note is also in To Do — tap the "To Do" bubble to see. Notes can live in as many bubbles as you want.'
+
+// "Untouched seed content" — items the app created that the user has not made
+// their own. Used to keep app-created content from tripping the guest⇄cloud
+// merge dialog on a fresh device: pristine seed items don't count as
+// local-only work, while an edited one is real user data and does. The tests
+// compare SHAPE, not timestamps — closing the note editor always rewrites
+// updated_at even with zero changes, so a timestamp rule would mark the
+// teaching note "edited" the moment someone opens it, which the note itself
+// invites. A pristine note may still have a rewritten bubble_ids (deleting a
+// seed bubble re-pins it); membership alone doesn't make it the user's.
+export function isPristineSeedBubble(bubble) {
+  const t = SEED_BUBBLES.find(s => s.id === bubble.id)
+  return !!t && bubble.name === t.name &&
+    (bubble.parent_id ?? null) === (t.parent_id ?? null) &&
+    bubble.color === t.color
+}
+
+export function isPristineSeedNote(note) {
+  return note.id === SEED_INTRO_NOTE_ID &&
+    note.content === SEED_NOTE_CONTENT &&
+    (note.tags ?? []).length === 0 &&
+    (note.connections ?? []).length === 0
+}
+
 export function createDefaultProject() {
   const now = new Date().toISOString()
   return {
     id: defaultProjectId,
     name: 'Personal Notes',
     created_at: now,
-    bubbles: [
+    bubbles: SEED_BUBBLES.map(b => ({ ...b })),
+    notes: [
       {
-        id: ideasId,
-        name: 'Ideas',
-        parent_id: null,
-        color: '#6366f1',
-      },
-      {
-        id: ideasSelfId,
-        name: 'Self',
-        parent_id: ideasId,
-        color: '#8b5cf6',
-      },
-      {
-        id: toDoId,
-        name: 'To Do',
-        parent_id: null,
-        color: '#22c55e',
-      },
-      {
-        id: journalId,
-        name: 'Journal',
-        parent_id: null,
-        color: '#14b8a6',
+        id: SEED_INTRO_NOTE_ID,
+        content: SEED_NOTE_CONTENT,
+        created_at: now,
+        updated_at: now,
+        bubble_ids: [ROOT_BUBBLE_ID, toDoId],
+        tags: [],
+        connections: [],
+        locked: false,
       },
     ],
-    notes: [],
     customTagColors: { ...TAG_COLORS },
     // Every default tag gets a stable id so cloud sync never inserts a null id.
     customTagIds: Object.fromEntries(

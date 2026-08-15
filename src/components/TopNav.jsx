@@ -19,19 +19,10 @@ export default function TopNav({
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const userMenuRef = useRef(null)
 
-  useEffect(() => {
-    function handleClick(e) {
-      if (userMenuRef.current && !userMenuRef.current.contains(e.target)) {
-        setUserMenuOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    document.addEventListener('touchstart', handleClick)
-    return () => {
-      document.removeEventListener('mousedown', handleClick)
-      document.removeEventListener('touchstart', handleClick)
-    }
-  }, [])
+  // Dismissal is a real backdrop (rendered with the menu below), not a
+  // document listener: a document-level outside-close lets the very tap that
+  // dismisses the menu also activate whatever it lands on — e.g. opening a
+  // bubble on the canvas. The backdrop swallows that tap instead.
   const [dropdownOpen, setDropdownOpen] = useState(false)
   const [newProjectName, setNewProjectName] = useState('')
   const [creatingProject, setCreatingProject] = useState(false)
@@ -39,22 +30,6 @@ export default function TopNav({
   const [renameValue, setRenameValue] = useState('')
   const dropdownRef = useRef(null)
   const newNameRef = useRef(null)
-
-  useEffect(() => {
-    function handleClick(e) {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
-        setDropdownOpen(false)
-        setCreatingProject(false)
-        setRenamingId(null)
-      }
-    }
-    document.addEventListener('mousedown', handleClick)
-    document.addEventListener('touchstart', handleClick)
-    return () => {
-      document.removeEventListener('mousedown', handleClick)
-      document.removeEventListener('touchstart', handleClick)
-    }
-  }, [])
 
   useEffect(() => {
     if (creatingProject && newNameRef.current) newNameRef.current.focus()
@@ -118,6 +93,12 @@ export default function TopNav({
           </svg>
         </button>
 
+        {dropdownOpen && (
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => { setDropdownOpen(false); setCreatingProject(false); setRenamingId(null) }}
+          />
+        )}
         {dropdownOpen && (
           <div className="absolute top-full left-0 mt-1 w-64 bg-gray-900 rounded-xl shadow-xl border border-gray-800 z-50 py-1">
             <div className="px-3 py-1.5 text-xs font-semibold text-gray-500 uppercase tracking-wider">Projects</div>
@@ -270,6 +251,9 @@ export default function TopNav({
               )}
             </button>
 
+            {userMenuOpen && (
+              <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
+            )}
             {userMenuOpen && (
               <div className="absolute top-full right-0 mt-1 w-52 bg-gray-900 rounded-xl shadow-xl border border-gray-800 z-50 py-1">
                 <div className="px-3 py-2 border-b border-gray-800">

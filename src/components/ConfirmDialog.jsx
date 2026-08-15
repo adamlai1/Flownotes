@@ -26,6 +26,11 @@ export default function ConfirmDialog({
           className="fixed inset-0 flex items-center justify-center"
           style={{ zIndex: 70, background: 'rgba(0,0,0,0.6)' }}
           onClick={onCancel}
+          // The bubble canvas detects taps by pointer position, not DOM target
+          // — stopping only clicks lets a tap on this dialog fall through to
+          // the item beneath. Contain the pointer events too.
+          onPointerDown={e => e.stopPropagation()}
+          onPointerUp={e => e.stopPropagation()}
         >
           <motion.div
             initial={{ opacity: 0, scale: 0.94 }}

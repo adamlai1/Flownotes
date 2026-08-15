@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { AnimatePresence } from 'framer-motion'
-import { createDefaultProject, leastUsedBubbleColor } from './data/defaultData'
+import { createDefaultProject, leastUsedBubbleColor, isPristineSeedBubble, isPristineSeedNote } from './data/defaultData'
 import { generateId, realBubbleIds, ROOT_BUBBLE_ID } from './utils/helpers'
 import {
   loadProjectList,
@@ -1089,12 +1089,18 @@ export default function App() {
             // would make their local copies look local-only and raise the
             // dialog for nothing.
             for (const n of peek.unassignedNotes ?? []) cloudNoteIds.add(n.id)
+            // Untouched seed content never gates the dialog: the app created
+            // it, so a fresh install's teaching note or starter bubbles being
+            // absent from an older account is not the user's work at stake.
+            // An EDITED seed item is real user data and counts like any
+            // other. When genuine local-only items raise the dialog, pristine
+            // seed items simply ride along with whichever choice is made.
             for (const p of localProjects) {
               for (const n of p.notes ?? []) {
-                if (!cloudNoteIds.has(n.id)) localOnlyCount++
+                if (!cloudNoteIds.has(n.id) && !isPristineSeedNote(n)) localOnlyCount++
               }
               for (const b of p.bubbles ?? []) {
-                if (!cloudBubbleIds.has(b.id)) localOnlyBubbleCount++
+                if (!cloudBubbleIds.has(b.id) && !isPristineSeedBubble(b)) localOnlyBubbleCount++
               }
             }
           }
@@ -1498,6 +1504,17 @@ export default function App() {
     const updated = {
       ...activeProject,
       bubbles: activeProject.bubbles.map(b => b.id === bubbleId ? { ...b, name: newName } : b),
+    }
+    updateProject(updated)
+  }
+
+  // Recoloring is a plain field update — bubbles.color already exists locally
+  // and in the cloud schema, so this syncs like any other bubble edit.
+  function changeBubbleColor(bubbleId, color) {
+    const current = activeProjectRef.current
+    const updated = {
+      ...current,
+      bubbles: current.bubbles.map(b => b.id === bubbleId ? { ...b, color } : b),
     }
     updateProject(updated)
   }
@@ -1975,6 +1992,7 @@ export default function App() {
           onRenameBubble={renameBubble}
           onDeleteBubble={deleteBubble}
           onMoveBubble={moveBubble}
+          onChangeBubbleColor={changeBubbleColor}
           onUpdateCustomTagColors={updateCustomTagColors}
           onDeleteCustomTag={deleteCustomTag}
           onRenameCustomTag={renameCustomTag}
@@ -1997,6 +2015,7 @@ export default function App() {
             onCurrentBubbleChange={setCurrentBubbleId}
             navigateBubbleId={navigateBubbleId}
             placeBubbleId={placeBubbleId}
+            onChangeBubbleColor={changeBubbleColor}
             searchFocusNonce={searchFocusNonce}
             pageStep={pageStep}
             onRefresh={handleRefresh}

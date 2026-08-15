@@ -2,7 +2,7 @@ import { useMemo, useState, useRef, useEffect } from 'react'
 import NoteCard from './NoteCard'
 import BubbleVisualization from './BubbleVisualization'
 import ConfirmDialog from './ConfirmDialog'
-import { formatDateGroup, realBubbleIds } from '../utils/helpers'
+import { formatDateGroup, realBubbleIds, getBubbleDescendantIds } from '../utils/helpers'
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
 import { useEscapeInput } from '../lib/escapeStack'
@@ -27,6 +27,7 @@ export default function MainView({
   onCurrentBubbleChange,
   navigateBubbleId,
   placeBubbleId,
+  onChangeBubbleColor,
   searchFocusNonce,
   pageStep,
   onRefresh,
@@ -62,6 +63,9 @@ export default function MainView({
   }
 
   const [activeBubbleId, setActiveBubbleId] = useState('')
+  // Bubble filter scope: 'all' includes notes filed in nested child bubbles,
+  // 'direct' only notes filed in the selected bubble itself.
+  const [bubbleScope, setBubbleScope] = useState('all')
   const [activeTag, setActiveTag] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
   const searchInputRef = useRef(null)
@@ -128,18 +132,10 @@ export default function MainView({
     })
   }
 
-  useEffect(() => {
-    if (!showSortMenu) return
-    function handleOutside(e) {
-      if (sortMenuRef.current && !sortMenuRef.current.contains(e.target)) setShowSortMenu(false)
-    }
-    document.addEventListener('mousedown', handleOutside)
-    document.addEventListener('touchstart', handleOutside)
-    return () => {
-      document.removeEventListener('mousedown', handleOutside)
-      document.removeEventListener('touchstart', handleOutside)
-    }
-  }, [showSortMenu])
+  // Sort-menu dismissal is a real backdrop (rendered with the menu below),
+  // not a document listener: a document-level outside-close lets the very tap
+  // that dismisses the menu also activate whatever it lands on. The backdrop
+  // swallows that tap instead.
 
   function handleSortChange(id) {
     setSortMode(id)
@@ -180,12 +176,19 @@ export default function MainView({
 
   const filteredNotes = useMemo(() => {
     if (!activeBubbleId && !activeTag) return searchedNotes
+    // 'all' scope matches on the bubble and every descendant; membership is
+    // always via realBubbleIds so the canvas sentinel never counts.
+    const scopeIds = activeBubbleId && bubbleScope === 'all'
+      ? new Set(getBubbleDescendantIds(project.bubbles, activeBubbleId))
+      : null
     return searchedNotes.filter(note => {
-      const matchesBubble = activeBubbleId === '' || realBubbleIds(note).includes(activeBubbleId)
+      const ids = realBubbleIds(note)
+      const matchesBubble = activeBubbleId === '' ||
+        (scopeIds ? ids.some(id => scopeIds.has(id)) : ids.includes(activeBubbleId))
       const matchesTag = activeTag === '' || note.tags.includes(activeTag)
       return matchesBubble && matchesTag
     })
-  }, [searchedNotes, activeBubbleId, activeTag])
+  }, [searchedNotes, activeBubbleId, activeTag, bubbleScope, project.bubbles])
 
   const pinnedNotes = useMemo(
     () => filteredNotes.filter(n => pinnedIds.has(n.id)),
@@ -233,6 +236,7 @@ export default function MainView({
           placeBubbleId={placeBubbleId}
           pageStep={pageStep}
           onRefresh={onRefresh}
+          onChangeBubbleColor={onChangeBubbleColor}
         />
       ) : (
     <main
@@ -311,6 +315,9 @@ export default function MainView({
                   </svg>
                   <span className="hidden sm:inline">{currentSortMode.label}</span>
                 </button>
+                {showSortMenu && (
+                  <div className="fixed inset-0 z-20" onClick={() => setShowSortMenu(false)} />
+                )}
                 {showSortMenu && (
                   <div
                     className="absolute right-0 top-full mt-1.5 rounded-xl shadow-2xl overflow-hidden z-30"
@@ -448,6 +455,27 @@ export default function MainView({
                   >
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M19 9l-7 7-7-7" />
                   </svg>
+                </div>
+              )}
+
+              {/* All/Direct scope — only meaningful while a bubble is selected */}
+              {activeBubbleId && (
+                <div
+                  className="flex-shrink-0 flex rounded-lg overflow-hidden text-xs font-medium"
+                  style={{ border: '1px solid var(--input-border)' }}
+                >
+                  {[['all', 'All'], ['direct', 'Direct']].map(([id, label]) => (
+                    <button
+                      key={id}
+                      onClick={() => setBubbleScope(id)}
+                      className="px-2.5 py-1.5 transition-colors"
+                      style={bubbleScope === id
+                        ? { background: 'var(--hover)', color: 'var(--text)' }
+                        : { background: 'var(--input-bg)', color: 'var(--text-muted)' }}
+                    >
+                      {label}
+                    </button>
+                  ))}
                 </div>
               )}
 
