@@ -298,6 +298,63 @@ function mergeGuestAndCloud(localProjects, cloudProjects) {
   return [...projectsById.values()].map(p => ({ ...p, notes: notesByProject.get(p.id) ?? [] }))
 }
 
+// The merge dialog's "Keep separate" choice: rebuild the device's projects as
+// brand-new projects for the account. Every project, bubble, and note gets a
+// fresh id, so nothing can collide with — or silently fold into — the
+// account's existing rows; the guest's seed bubbles get ordinary generated ids
+// for the same reason (reusing the canonical seed:* ids would merge them into
+// the account's own seed bubbles). One id map spans all projects so a
+// connection between notes in different projects survives the rewrite. Names
+// take a numeric suffix on the project's real name ("Personal Notes 2"),
+// incremented past every name the account already uses. Custom tags are
+// account-global (upserted by name), so only tag names the account does NOT
+// already have come across — an existing tag's color is never overwritten —
+// and their ids are dropped so the upload generates fresh ones. Pure: storage
+// and cloud writes are the caller's job.
+function buildSeparateImport(localProjects, cloudProjects, cloudList) {
+  const takenNames = new Set(cloudList.map(p => p.name))
+  const accountTagNames = new Set(Object.keys(cloudProjects[0]?.customTagColors ?? {}))
+
+  const idMap = new Map()
+  for (const p of localProjects) {
+    for (const b of p.bubbles ?? []) idMap.set(b.id, generateId())
+    for (const n of p.notes ?? []) idMap.set(n.id, generateId())
+  }
+
+  return localProjects.map(p => {
+    let n = 2
+    let name = `${p.name} ${n}`
+    while (takenNames.has(name)) { n++; name = `${p.name} ${n}` }
+    takenNames.add(name)
+
+    const guestTags = Object.entries(p.customTagColors ?? {})
+      .filter(([tagName]) => !accountTagNames.has(tagName))
+
+    return {
+      id: generateId(),
+      name,
+      created_at: p.created_at ?? new Date().toISOString(),
+      bubbles: (p.bubbles ?? []).map(b => ({
+        ...b,
+        id: idMap.get(b.id),
+        // A parent that somehow isn't in this import can't be reached under any
+        // id — promote to root rather than leak the old id into the account.
+        parent_id: b.parent_id != null ? (idMap.get(b.parent_id) ?? null) : null,
+      })),
+      notes: (p.notes ?? []).map(note => ({
+        ...note,
+        id: idMap.get(note.id),
+        bubble_ids: (note.bubble_ids ?? []).map(bid => idMap.get(bid)).filter(Boolean),
+        connections: (note.connections ?? [])
+          .filter(c => idMap.has(c.note_id))
+          .map(c => ({ ...c, note_id: idMap.get(c.note_id) })),
+      })),
+      customTagColors: guestTags.length ? Object.fromEntries(guestTags) : undefined,
+      customTagIds: undefined,
+    }
+  })
+}
+
 function initializeData() {
   let projectList = loadProjectList()
   if (!projectList) {
@@ -358,7 +415,7 @@ function LoginScreen() {
   )
 }
 
-// Blocking three-way chooser shown when a sign-in finds notes both on this device
+// Blocking four-way chooser shown when a sign-in finds notes both on this device
 // and in the account. Deliberately NOT dismissable — no backdrop tap, no escape
 // layer, no default action — because every way out is a real decision about
 // someone's notes. Resolved only through onChoose.
@@ -390,7 +447,19 @@ function GuestMergeDialog({ localCount, localBubbleCount, cloudCount, onChoose }
             onClick={() => onChoose('merge')}
             className="w-full py-2.5 rounded-xl text-sm font-medium bg-blue-600 hover:bg-blue-500 text-white transition-colors"
           >
-            Keep both
+            Merge together
+            <span className="block text-xs font-normal opacity-75">
+              Combine into your account&rsquo;s projects
+            </span>
+          </button>
+          <button
+            onClick={() => onChoose('separate')}
+            className="w-full py-2.5 rounded-xl text-sm font-medium border border-blue-500 text-blue-400 hover:bg-blue-500/10 transition-colors"
+          >
+            Keep separate
+            <span className="block text-xs font-normal opacity-75">
+              Import device notes as a new project
+            </span>
           </button>
           <button
             onClick={() => onChoose('cloud')}
@@ -675,7 +744,8 @@ export default function App() {
     if (syncedUserRef.current === user.id) return
     syncedUserRef.current = user.id
 
-    // Resolves with 'merge' | 'cloud' | 'cancel' once the user picks a button.
+    // Resolves with 'merge' | 'separate' | 'cloud' | 'cancel' once the user
+    // picks a button.
     function askMergeChoice(counts) {
       return new Promise(resolve => {
         mergeChoiceRef.current = resolve
@@ -859,6 +929,49 @@ export default function App() {
               await uploadLocalData(needNewlineFix)
             } else if (choice === 'cloud') {
               await applyCloudData(cloudData, needNewlineFix)
+            } else if (choice === 'separate') {
+              // 'separate' — the device's data becomes brand-new projects in
+              // the account (fresh ids, suffixed names; see
+              // buildSeparateImport) and the account's own projects are left
+              // untouched. The one-time seed-id migration of the cloud side
+              // still runs, exactly as the other write paths do — skipping it
+              // here would store legacy cloud ids locally and reopen the
+              // remap-then-flush duplication window on the next launch. All
+              // cloud writes are awaited BEFORE local storage is replaced, so
+              // a failure partway leaves the device's data intact and the
+              // next sign-in simply asks again.
+              const seedFix = migrateSeedIds(cloudData.projects)
+              const cloudProjects = seedFix.projects
+              const cloudList = seedFix.changed
+                ? cloudData.projectList.map(e =>
+                    seedFix.projectIdMap.has(e.id) ? { ...e, id: seedFix.projectIdMap.get(e.id) } : e)
+                : cloudData.projectList
+              let imported = buildSeparateImport(
+                loadAllProjects(loadProjectList() ?? []),
+                cloudProjects,
+                cloudList,
+              )
+              // The newline fix is applied to what this path writes (the
+              // imports). The flag stays unset so the cloud side still gets
+              // its fix from the next applyCloudData run.
+              if (needNewlineFix) imported = migrateProjectsNewline(imported).projects
+              if (seedFix.changed) await syncAllToCloud(user.id, cloudProjects)
+              await syncAllToCloud(user.id, imported)
+              await purgeLegacySeedRows(seedFix)
+              const combinedList = [
+                ...cloudList,
+                ...imported.map(p => ({ id: p.id, name: p.name, created_at: p.created_at })),
+              ]
+              saveProjectList(combinedList)
+              for (const p of [...cloudProjects, ...imported]) saveProject(p)
+              setProjectList(combinedList)
+              // Land on the first imported project — proof at a glance that
+              // nothing the guest made was lost.
+              setActiveProject(migrateTagColors(imported[0]))
+              setSelectedBubbleId(null)
+              setNoteStack([])
+              setCurrentBubbleId(null)
+              localStorage.setItem(DATA_OWNER_KEY, user.id)
             } else {
               // 'merge' — union both sides, then write the cloud FIRST. Local
               // storage is only replaced once the upload succeeds, so a failed
