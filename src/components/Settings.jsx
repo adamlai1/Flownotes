@@ -108,7 +108,7 @@ const KeyCap = ({ children }) => (
   </kbd>
 )
 
-export default function Settings({ onClose, zIndex = 50, project, onImportNotes, onSignOut }) {
+export default function Settings({ onClose, zIndex = 50, project, onImportNotes, onSignOut, onDeleteAccount }) {
   const { theme, toggleTheme } = useTheme()
   const { noteSize, setNoteSize } = usePreferences()
   const { user, guestMode, signInWithGoogle } = useAuth()
@@ -509,6 +509,21 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes,
                     </div>
                   </Fragment>
                 ))}
+              </Card>
+            </div>
+          )}
+
+          {/* DELETE ACCOUNT — the most destructive action in the app, kept at
+              the very bottom on its own, away from routine controls */}
+          {user && (
+            <div>
+              <Card>
+                <button
+                  onClick={() => onDeleteAccount?.()}
+                  className="w-full flex items-center justify-center px-4 py-3.5 active:opacity-70 transition-opacity"
+                >
+                  <span className="text-sm font-medium text-red-400">Delete account</span>
+                </button>
               </Card>
             </div>
           )}
