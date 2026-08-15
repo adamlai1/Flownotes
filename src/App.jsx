@@ -186,6 +186,29 @@ const SEED_PROJECT_NAME = 'Personal Notes'
 // generateId() output only — never 'seed:*', never the '__root__' sentinel.
 const isLegacyId = id => typeof id === 'string' && /^[0-9a-z]+$/.test(id)
 
+// Legacy seed furniture in a bubble list: the root bubbles with the seed
+// names (and "Self" under the Ideas that resolves canonically), mapped to
+// their fixed ids. Besides driving the remap, this doubles as the residue
+// test in migrateSeedIds: only a project born from a seed carries this
+// furniture — a project the user created starts empty — so a legacy twin is
+// distinguishable from a genuine user project that merely shares the name.
+function seedBubbleMap(bubbles) {
+  const present = new Set(bubbles.map(b => b.id))
+  const idMap = new Map() // legacy bubble id → canonical seed id
+  for (const [name, canonical] of Object.entries(SEED_ROOT_BUBBLES)) {
+    if (present.has(canonical)) continue
+    const legacy = bubbles.find(b =>
+      (b.parent_id ?? null) === null && b.name === name && isLegacyId(b.id))
+    if (legacy) idMap.set(legacy.id, canonical)
+  }
+  if (!present.has(SEED_IDEAS_SELF_ID)) {
+    const self = bubbles.find(b => b.name === 'Self' && isLegacyId(b.id) &&
+      (idMap.get(b.parent_id) ?? b.parent_id) === SEED_IDEAS_ID)
+    if (self) idMap.set(self.id, SEED_IDEAS_SELF_ID)
+  }
+  return idMap
+}
+
 // Pure: returns { projects, changed, oldBubbleIds, projectIdMap } and never
 // touches storage. oldBubbleIds / projectIdMap tell the caller which stale
 // cloud rows to delete — the upsert sync can never remove them itself.
@@ -194,26 +217,26 @@ function migrateSeedIds(projects) {
   const oldBubbleIds = []
   const projectIdMap = new Map() // legacy project id → SEED_PROJECT_ID
 
-  // The seeded project: first legacy-id project with the seed name, and only
-  // when nothing already holds the canonical id.
-  const canonicalProject = projects.find(p => p.id === SEED_PROJECT_ID)
-  if (!canonicalProject) {
-    const legacy = projects.find(p => p.name === SEED_PROJECT_NAME && isLegacyId(p.id))
-    if (legacy) projectIdMap.set(legacy.id, SEED_PROJECT_ID)
-  } else {
-    // The canonical project already existing does NOT mean the migration is
-    // done: the cloud half is a two-phase move (upsert under new ids, then
-    // purge the old rows), and an interruption between the phases — or the
-    // pre-pull outbox flush planting the remapped project first — leaves a
-    // legacy twin behind that the old "already migrated" guard then protected
-    // forever. Recognize such residue by identity, not just name: the remap
-    // copies created_at verbatim, so residue always matches the canonical
-    // project's timestamp, while a project the user genuinely created under
-    // the seed name gets its own creation time and never folds.
-    const twin = projects.find(p =>
-      p !== canonicalProject && p.name === SEED_PROJECT_NAME && isLegacyId(p.id) &&
-      (p.created_at ?? null) === (canonicalProject.created_at ?? null))
-    if (twin) projectIdMap.set(twin.id, SEED_PROJECT_ID)
+  // Project mapping. A canonical row already existing does NOT mean the
+  // migration is done: the cloud half is a two-phase move (upsert under new
+  // ids, then purge the old rows), so an interruption strands a twin — and,
+  // common since sign-out started clearing devices, a fresh install seeds
+  // seed:project directly with its own created_at, so a later sign-in plants
+  // a canonical row no timestamp can tie back to the twins. Residue is
+  // recognized by BIRTH STRUCTURE instead: a legacy-id project with the seed
+  // name folds only when it still carries legacy seed furniture (see
+  // seedBubbleMap) — every seed project of any era was born with it, while a
+  // project the user created under the same name is born empty and never
+  // maps. However many such twins exist, they all fold. When no canonical
+  // project exists at all, the first legacy-named project still maps without
+  // the furniture check — the original adoption rule, unchanged.
+  const canonicalExists = projects.some(p => p.id === SEED_PROJECT_ID)
+  for (const p of projects) {
+    if (p.id === SEED_PROJECT_ID || p.name !== SEED_PROJECT_NAME || !isLegacyId(p.id)) continue
+    const firstWithoutCanonical = !canonicalExists && projectIdMap.size === 0
+    if (firstWithoutCanonical || seedBubbleMap(p.bubbles ?? []).size > 0) {
+      projectIdMap.set(p.id, SEED_PROJECT_ID)
+    }
   }
 
   const out = projects.map(project => {
@@ -224,19 +247,7 @@ function migrateSeedIds(projects) {
     }
 
     const bubbles = p.bubbles ?? []
-    const present = new Set(bubbles.map(b => b.id))
-    const idMap = new Map() // legacy bubble id → canonical seed id
-    for (const [name, canonical] of Object.entries(SEED_ROOT_BUBBLES)) {
-      if (present.has(canonical)) continue
-      const legacy = bubbles.find(b =>
-        (b.parent_id ?? null) === null && b.name === name && isLegacyId(b.id))
-      if (legacy) idMap.set(legacy.id, canonical)
-    }
-    if (!present.has(SEED_IDEAS_SELF_ID)) {
-      const self = bubbles.find(b => b.name === 'Self' && isLegacyId(b.id) &&
-        (idMap.get(b.parent_id) ?? b.parent_id) === SEED_IDEAS_ID)
-      if (self) idMap.set(self.id, SEED_IDEAS_SELF_ID)
-    }
+    const idMap = seedBubbleMap(bubbles)
     if (!idMap.size) return p
 
     changed = true
