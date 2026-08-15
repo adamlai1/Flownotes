@@ -13,8 +13,9 @@ export default function TopNav({
   onOpenSettings,
   isDesktop,
   syncStatus,
+  onSignOut,
 }) {
-  const { user, signOut } = useAuth()
+  const { user } = useAuth()
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const userMenuRef = useRef(null)
 
@@ -278,7 +279,7 @@ export default function TopNav({
                   <div className="text-xs text-gray-500 truncate">{user.email}</div>
                 </div>
                 <button
-                  onClick={() => { signOut(); setUserMenuOpen(false) }}
+                  onClick={() => { onSignOut?.(); setUserMenuOpen(false) }}
                   className="w-full text-left px-3 py-2 text-sm text-red-400 hover:bg-gray-800 transition-colors"
                 >
                   Sign out

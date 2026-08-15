@@ -68,7 +68,7 @@ import CreateBubbleSheet from './components/CreateBubbleSheet'
 import CreateButton from './components/CreateButton'
 import { ThemeProvider } from './contexts/ThemeContext'
 import { PreferencesProvider } from './contexts/PreferencesContext'
-import { ToastProvider } from './contexts/ToastContext'
+import { ToastProvider, useToast } from './contexts/ToastContext'
 import { LockProvider } from './contexts/LockContext'
 import { useAuth } from './contexts/AuthContext'
 import { useEscapeShortcut, useKeyShortcuts } from './lib/escapeStack'
@@ -452,6 +452,13 @@ function SignOutWarningDialog({ pending, onChoose }) {
   )
 }
 
+// App itself sits above ToastProvider, so it can't call useToast — this bridge
+// renders just inside the provider and hands showToast up through a ref.
+function ToastBridge({ toastRef }) {
+  toastRef.current = useToast()
+  return null
+}
+
 export default function App() {
   const { user, loading, guestMode, signOut, continueAsGuest } = useAuth()
   // Single keydown listener for the whole app — Escape (layers register themselves) and
@@ -470,6 +477,7 @@ export default function App() {
   // the promise handleSignOut is awaiting. Same shape as the merge prompt.
   const [signOutWarning, setSignOutWarning] = useState(null) // null | { pending }
   const signOutChoiceRef = useRef(null)
+  const toastRef = useRef(null) // showToast, bridged up from inside ToastProvider
   const cloudSaveTimerRef = useRef(null)
   const flushingRef = useRef(false)
   const flushAgainRef = useRef(false)
@@ -968,13 +976,21 @@ export default function App() {
       if (!proceed) return
     }
 
+    // supabase.auth.signOut() does NOT reject on failure — it resolves with
+    // { error } (and only removes the local session when that error is null),
+    // so the returned error must be checked explicitly: a try/catch alone would
+    // sail past an offline failure and clear data under a still-live session.
     try {
-      await signOut()
+      const { error } = await signOut()
+      if (error) throw error
     } catch (e) {
       // Still signed in — leave everything untouched rather than clearing data
       // out from under a session that didn't actually end.
       console.error('Sign-out failed; local data left untouched:', e)
-      setSyncStatus('error')
+      setSyncStatus(navigator.onLine ? 'error' : 'offline')
+      toastRef.current?.(navigator.onLine
+        ? 'Sign-out failed — please try again'
+        : 'You’re offline — signing out needs a connection')
       return
     }
 
@@ -1532,6 +1548,7 @@ export default function App() {
     <ThemeProvider>
     <PreferencesProvider>
     <ToastProvider>
+    <ToastBridge toastRef={toastRef} />
     <LockProvider onRemoveAllLocks={clearAllLocks}>
     <div
       data-app-root=""
@@ -1552,6 +1569,7 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         isDesktop={isDesktop}
         syncStatus={syncStatus}
+        onSignOut={handleSignOut}
       />
 
       <div className="relative flex flex-1 min-h-0 overflow-hidden" style={{ background: 'var(--bg)' }}>
