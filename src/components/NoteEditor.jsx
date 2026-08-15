@@ -49,6 +49,34 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   const [future, setFuture] = useState([])
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const bodyRef = useRef(null)
+  const scrollAreaRef = useRef(null)
+
+  // Desktop-only wheel chaining for the body textarea. Its
+  // overscroll-behavior: contain (kept — it is what the touch path needs)
+  // makes it a scroll container that swallows wheel events even when it has
+  // nothing to scroll, so the editor page beneath never moves. Chain by
+  // hand: with no overflow every wheel tick forwards to the scroll area;
+  // with overflow the textarea scrolls natively and only the ticks it cannot
+  // consume — top edge scrolling up, bottom edge scrolling down, each
+  // direction independently — are forwarded. Purely additive (no
+  // preventDefault, no focus changes), so text selection, caret placement
+  // and typing are untouched; wheel events never fire from touch, so mobile
+  // scrolling is untouched too.
+  function handleBodyWheel(e) {
+    const el = e.currentTarget
+    const outer = scrollAreaRef.current
+    if (!outer) return
+    const scrollable = el.scrollHeight > el.clientHeight
+    const atTop = el.scrollTop <= 0
+    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
+    if (!scrollable || (e.deltaY < 0 && atTop) || (e.deltaY > 0 && atBottom)) {
+      // deltaMode: 0 = pixels, 1 = lines (Firefox), 2 = pages.
+      const step = e.deltaMode === 1 ? e.deltaY * 16
+        : e.deltaMode === 2 ? e.deltaY * outer.clientHeight
+        : e.deltaY
+      outer.scrollTop += step
+    }
+  }
   const tagInputRef = useRef(null)
   const saveTimerRef = useRef(null)
   const swipeRef = useRef({ active: false, startX: 0, currentX: 0 })
@@ -470,7 +498,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       </div>
 
       {/* ── Scroll area — grid row 2 (1fr), only this scrolls ───────────────── */}
-      <div style={{ overflowY: 'auto', minHeight: 0, WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
+      <div ref={scrollAreaRef} style={{ overflowY: 'auto', minHeight: 0, WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
 
         {/* Text content */}
         <div className="px-5 md:px-10 pt-4 md:pt-8 pb-3 border-b border-white/10">
@@ -478,6 +506,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             ref={bodyRef}
             value={text}
             onChange={handleTextChange}
+            onWheel={handleBodyWheel}
             placeholder="Start writing…"
             autoComplete="off"
             autoCorrect="on"
