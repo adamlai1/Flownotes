@@ -1,5 +1,7 @@
 import { Fragment, useEffect, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { Capacitor } from '@capacitor/core'
+import { Browser } from '@capacitor/browser'
 import { useTheme } from '../contexts/ThemeContext'
 import { usePreferences } from '../contexts/PreferencesContext'
 import { useAuth } from '../contexts/AuthContext'
@@ -107,6 +109,14 @@ const KeyCap = ({ children }) => (
     {children}
   </kbd>
 )
+
+// System pages open in the in-app browser on native (@capacitor/browser —
+// kicking the user out to Safari would drop them out of the app) and in a
+// new tab on web.
+function openExternal(url) {
+  if (Capacitor.isNativePlatform()) Browser.open({ url })
+  else window.open(url, '_blank', 'noopener')
+}
 
 export default function Settings({ onClose, zIndex = 50, project, onImportNotes, onSignOut, onDeleteAccount }) {
   const { theme, toggleTheme } = useTheme()
@@ -512,6 +522,27 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes,
               </Card>
             </div>
           )}
+
+          {/* LINKS — the site's policy and help pages. The .html extensions are
+              deliberate: the host serves no clean URLs (bare /privacy and
+              /support 404). */}
+          <div>
+            <Card>
+              <button
+                onClick={() => openExternal('https://nubblenotes.com/privacy.html')}
+                className="w-full flex items-center px-4 py-3.5 active:opacity-70 transition-opacity"
+              >
+                <span className="text-sm font-medium" style={{ color: 'var(--text)' }}>Privacy Policy</span>
+              </button>
+              <Divider />
+              <button
+                onClick={() => openExternal('https://nubblenotes.com/support.html')}
+                className="w-full flex items-center px-4 py-3.5 active:opacity-70 transition-opacity"
+              >
+                <span className="text-sm font-medium" style={{ color: 'var(--text)' }}>Support</span>
+              </button>
+            </Card>
+          </div>
 
           {/* DELETE ACCOUNT — the most destructive action in the app, kept at
               the very bottom on its own, away from routine controls */}
