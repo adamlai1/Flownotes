@@ -2695,6 +2695,9 @@ export default function BubbleVisualization({
   const [confirmDelete, setConfirmDelete] = useState(false)
   // The single item queued for deletion from its long-press menu (null when none).
   const [confirmDeleteItem, setConfirmDeleteItem] = useState(null)
+  // "Default" in the layout menu queues a destructive one-shot reset of this
+  // level's saved positions; it overwrites the arrangement with no undo.
+  const [confirmReorganize, setConfirmReorganize] = useState(false)
   const selectModeRef = useRef(false)
   selectModeRef.current = selectMode
   function toggleSelectItem(id) {
@@ -3518,6 +3521,75 @@ export default function BubbleVisualization({
     Object.keys(savedPositions).some(k => k.startsWith(levelPrefix)) ||
     Object.keys(savedPages).some(k => k.startsWith(levelPrefix))
 
+  // ── Breadcrumb overflow (two-line wrap + priority collapse) ────────────────────
+  // The trail wraps to at most two lines. When even two lines overflow it
+  // drops levels one at a time (crumbStage = dropped count, greedy minimum)
+  // instead of ellipsing names, folding the dropped band into the middle
+  // of the trail as one tappable menu chip in the contiguous gap. The current
+  // level is always rendered in full and never dropped. The canvas layouts (physics AND sorted
+  // grid) keep using the constant SUB_BAR_H as their top bound on purpose: if
+  // the measured bar height fed the layouts, sorted capacity — and therefore
+  // page counts — would change with navigation depth and name length, and free
+  // positions would get re-clamped. A wrapped second line instead overlays the
+  // canvas top, backed by a scrim (see the sub-bar render).
+  const [crumbStage, setCrumbStage] = useState(0)
+  const [crumbMenuOpen, setCrumbMenuOpen] = useState(false)
+  const [crumbTwoLine, setCrumbTwoLine] = useState(false)
+  const crumbRowRef = useRef(null)
+  // Re-derive the stage from scratch whenever the trail's text or the width
+  // changes; the measuring effect below escalates it again as needed.
+  const crumbNamesKey = [project.name, ...navStack.map(it => it.name)].join('\u0000')
+  useLayoutEffect(() => { setCrumbStage(0); setCrumbMenuOpen(false) }, [crumbNamesKey, size.width])
+  // Trail indices are 0 = root ... crumbDepth = current. Keep-priority is root,
+  // current, then alternating inward from both ends (parent, second-from-root,
+  // third-from-current, third-from-root, ...); the drop order is that list
+  // reversed with the current level excluded, so the innermost middles drop
+  // first and the root drops very last. Because the alternation eats inward,
+  // any dropped prefix of that order is one contiguous middle band.
+  const crumbDepth = navStack.length
+  const crumbKeepOrder = [0]
+  if (crumbDepth > 0) crumbKeepOrder.push(crumbDepth)
+  for (let lo = 1, hi = crumbDepth - 1, takeHi = true; lo <= hi; takeHi = !takeHi) {
+    crumbKeepOrder.push(takeHi ? hi-- : lo++)
+  }
+  const crumbDropOrder = crumbKeepOrder.slice().reverse().filter(i => i !== crumbDepth)
+  const crumbDropped = new Set(crumbDropOrder.slice(0, Math.min(crumbStage, crumbDropOrder.length)))
+  // One line (incl. the bar's vertical padding) tops out at SUB_BAR_H; past
+  // +20px a third row has started, so collapse further. Runs after every
+  // commit and converges because the stage only moves up, capped at 2. Both
+  // setStates bail out when the value is unchanged.
+  useLayoutEffect(() => {
+    const el = crumbRowRef.current
+    if (!el) { setCrumbTwoLine(false); return }
+    const h = el.getBoundingClientRect().height
+    setCrumbTwoLine(h > SUB_BAR_H + 2)
+    if (h > SUB_BAR_H + 20 && crumbStage < crumbDropOrder.length) setCrumbStage(s => s + 1)
+  })
+  // What the "…" chip stands in for; depth is the zoomOutTo target.
+  const crumbCollapsed = [...crumbDropped].sort((a, b) => a - b).map(i => i === 0
+    ? { id: '__crumb_root', name: project.name, depth: 0 }
+    : { id: navStack[i - 1].id, name: navStack[i - 1].name, depth: i })
+  // The visible trail splits around the contiguous gap the chip occupies.
+  const crumbGapEnd = crumbDropped.size ? Math.max(...crumbDropped) : -1
+  const crumbTrail = navStack.map((it, i) => ({ item: it, depth: i + 1 }))
+  const crumbLeftTrail = crumbTrail.filter(e => !crumbDropped.has(e.depth) && e.depth < crumbGapEnd)
+  const crumbRightTrail = crumbTrail.filter(e => !crumbDropped.has(e.depth) && e.depth > crumbGapEnd)
+  const renderCrumbSeg = ({ item, depth }) => (
+    <span key={item.id} className="flex items-center gap-0.5 min-w-0">
+      <span className="text-white/25 text-xs flex-shrink-0 px-0.5">&rsaquo;</span>
+      <button
+        onClick={() => zoomOutTo(depth)}
+        className={`text-sm text-left transition-colors ${
+          depth === navStack.length
+            ? 'text-white/80 font-semibold'
+            : 'text-white/40 hover:text-white/65 whitespace-nowrap'
+        }`}
+      >
+        {item.name}
+      </button>
+    </span>
+  )
+
   // ── Paged interactions (swipe between pages + drag with cross-page move) ───────
   function animateToPage(idx) {
     const clamped = Math.max(0, Math.min(idx, pagesRef.current.length - 1))
@@ -4123,25 +4195,44 @@ export default function BubbleVisualization({
       {/* ── Sub-bar: breadcrumb (left) + view toggle (right) ─────────────────── */}
       <div
         className="absolute top-0 left-0 right-0 z-10"
-        style={{ height: SUB_BAR_H }}
+        style={{
+          minHeight: SUB_BAR_H,
+          // A wrapped (two-line) trail hangs below the canvas's fixed top bound
+          // (the layouts keep using SUB_BAR_H — see the breadcrumb overflow
+          // block), so back it with a scrim to stay legible over whatever sits
+          // underneath. Events still bubble to the canvas handlers, which hit-
+          // test by position, so items under the scrim stay tappable.
+          background: crumbTwoLine
+            ? (isLight
+              ? 'linear-gradient(to bottom, rgba(245,245,240,0.9) 55%, rgba(245,245,240,0))'
+              : 'linear-gradient(to bottom, rgba(16,16,20,0.8) 55%, rgba(16,16,20,0))')
+            : 'none',
+        }}
       >
-        <div className="px-4 md:px-6 h-full flex items-center justify-between">
+        <div className="px-4 md:px-6 flex items-start justify-between">
         {selectMode ? (
           <>
-            <span className="text-sm font-semibold text-white/90">
+            <span className="text-sm font-semibold text-white/90 flex items-center" style={{ height: SUB_BAR_H }}>
               {selectedIds.size} selected
             </span>
             <button
               onClick={exitSelect}
               className="text-sm font-medium text-white/50 hover:text-white/90 transition-colors flex-shrink-0"
+              style={{ height: SUB_BAR_H }}
             >
               Cancel
             </button>
           </>
         ) : (
         <>
-        {/* Breadcrumb — back arrow + text sit tight to the left edge */}
-        <div className="flex items-center gap-0.5 min-w-0 flex-1 mr-3">
+        {/* Breadcrumb — back arrow + trail sit tight to the left edge. Wraps to
+            two lines; past that levels drop one at a time by keep-priority
+            into the "…" menu. The current level is never truncated. */}
+        <div
+          ref={crumbRowRef}
+          className="flex items-center flex-wrap gap-x-0.5 min-w-0 flex-1 mr-3"
+          style={{ minHeight: SUB_BAR_H, alignContent: 'center', rowGap: 2, paddingTop: 8, paddingBottom: 8 }}
+        >
           <button
             onClick={navStack.length > 0 ? zoomOut : undefined}
             className="flex-shrink-0 p-1 rounded-lg text-white/50 hover:text-white/90 hover:bg-white/10 transition-colors"
@@ -4155,35 +4246,57 @@ export default function BubbleVisualization({
           {/* Every breadcrumb segment goes through zoomOutTo, so tapping the parent
               level animates exactly like the back arrow. The root segment is depth 0;
               segment i sits at depth i + 1. */}
-          <button
-            onClick={() => zoomOutTo(0)}
-            className={`text-sm transition-colors flex-shrink-0 truncate ${
-              navStack.length === 0 ? 'text-white/80 font-semibold' : 'text-white/40 hover:text-white/70'
-            }`}
-            style={{ maxWidth: 120 }}
-          >
-            {project.name}
-          </button>
-          {navStack.map((item, i) => (
-            <span key={item.id} className="flex items-center gap-0.5 min-w-0">
-              <span className="text-white/25 text-xs flex-shrink-0 px-0.5">›</span>
+          {!crumbDropped.has(0) && (
+            <button
+              onClick={() => zoomOutTo(0)}
+              className={`text-sm transition-colors whitespace-nowrap ${
+                navStack.length === 0 ? 'text-white/80 font-semibold' : 'text-white/40 hover:text-white/70'
+              }`}
+            >
+              {project.name}
+            </button>
+          )}
+          {crumbLeftTrail.map(renderCrumbSeg)}
+          {crumbCollapsed.length > 0 && (
+            <span className="relative flex items-center gap-0.5 flex-shrink-0">
+              {!crumbDropped.has(0) && <span className="text-white/25 text-xs flex-shrink-0 px-0.5">&rsaquo;</span>}
               <button
-                onClick={() => zoomOutTo(i + 1)}
-                className={`text-sm transition-colors truncate ${
-                  i === navStack.length - 1
-                    ? 'text-white/80 font-semibold'
-                    : 'text-white/40 hover:text-white/65'
-                }`}
-                style={{ maxWidth: i === navStack.length - 1 ? 140 : 72 }}
+                onClick={() => setCrumbMenuOpen(o => !o)}
+                className="text-sm px-1.5 rounded-md text-white/40 hover:text-white/70 hover:bg-white/10 transition-colors"
+                aria-label="Show hidden levels"
+                title="Show hidden levels"
               >
-                {item.name}
+                …
               </button>
+              {crumbMenuOpen && (
+                <div className="fixed inset-0 z-40" onClick={() => setCrumbMenuOpen(false)} />
+              )}
+              {crumbMenuOpen && (
+                <div
+                  className="absolute left-0 top-full mt-1.5 rounded-xl shadow-2xl overflow-hidden z-50"
+                  style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', minWidth: 160, maxWidth: 240 }}
+                >
+                  {crumbCollapsed.map(c => (
+                    <button
+                      key={c.id}
+                      onClick={() => { setCrumbMenuOpen(false); zoomOutTo(c.depth) }}
+                      className="block w-full text-left px-4 py-2.5 text-sm truncate transition-colors"
+                      style={{ color: 'var(--text-2)' }}
+                    >
+                      {c.name}
+                    </button>
+                  ))}
+                </div>
+              )}
             </span>
-          ))}
+          )}
+          {crumbRightTrail.map(renderCrumbSeg)}
         </div>
 
-        {/* Right cluster: layout mode + reorganize + select + view toggle */}
-        <div className="flex items-center gap-2 flex-shrink-0">
+        {/* Right cluster: layout mode + select + view toggle. Pinned to the
+            first breadcrumb line: fixed SUB_BAR_H height so a wrapped trail
+            grows the bar downward without moving the controls. */}
+        <div className="flex items-center gap-2 flex-shrink-0" style={{ height: SUB_BAR_H }}>
         {/* Layout mode: Free (organic, draggable) vs Sorted (reading grid). */}
         <div className="relative">
           <button
@@ -4215,6 +4328,34 @@ export default function BubbleVisualization({
               >
                 Free
               </button>
+              {/* "Default" is a one-shot action, not a mode: it overwrites this
+                  level's saved positions with the physics spawn layout and leaves
+                  the level in Free. Hidden while Sorted (saved positions aren't in
+                  play there), like the old canvas Reorganize button; styled as an
+                  action row — icon, muted, never the active highlight — so it
+                  doesn't read as a fourth view. Disabled when there's nothing to
+                  reset. */}
+              {!isSorted && (
+                <button
+                  onClick={() => { setLayoutMenuOpen(false); setConfirmReorganize(true) }}
+                  disabled={!hasManualLayout || layoutItems.length <= 1}
+                  className="w-full text-left px-4 py-2 transition-colors flex items-center gap-2.5 disabled:opacity-40"
+                  style={{ color: 'var(--text-2)' }}
+                >
+                  <svg className="w-3.5 h-3.5 flex-shrink-0 opacity-70" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                    <rect x="4" y="4" width="7" height="7" rx="1.5" strokeWidth={2} />
+                    <rect x="13" y="4" width="7" height="7" rx="1.5" strokeWidth={2} />
+                    <rect x="4" y="13" width="7" height="7" rx="1.5" strokeWidth={2} />
+                    <rect x="13" y="13" width="7" height="7" rx="1.5" strokeWidth={2} />
+                  </svg>
+                  <span>
+                    <span className="block text-sm leading-tight">Default</span>
+                    <span className="block text-[11px] leading-tight" style={{ color: 'var(--text-2)', opacity: 0.6 }}>
+                      Resets bubble positions
+                    </span>
+                  </span>
+                </button>
+              )}
               <div style={{ height: 1, background: 'var(--border)' }} />
               {SORT_MODES.map(m => {
                 const active = sortedCfg?.sort === m.id
@@ -4235,21 +4376,6 @@ export default function BubbleVisualization({
             </div>
           )}
         </div>
-        {hasManualLayout && layoutItems.length > 1 && !isSorted && (
-          <button
-            onClick={reorganizeLevel}
-            className="p-1.5 rounded-lg text-white/50 hover:text-white/90 hover:bg-white/10 transition-colors"
-            aria-label="Reorganize layout"
-            title="Reorganize layout"
-          >
-            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-              <rect x="4" y="4" width="7" height="7" rx="1.5" strokeWidth={2} />
-              <rect x="13" y="4" width="7" height="7" rx="1.5" strokeWidth={2} />
-              <rect x="4" y="13" width="7" height="7" rx="1.5" strokeWidth={2} />
-              <rect x="13" y="13" width="7" height="7" rx="1.5" strokeWidth={2} />
-            </svg>
-          </button>
-        )}
         <button
           onClick={() => setSelectMode(true)}
           className="p-1.5 rounded-lg text-white/50 hover:text-white/90 hover:bg-white/10 transition-colors"
@@ -4657,6 +4783,18 @@ export default function BubbleVisualization({
               : { noteIds: [], bubbleIds: [it.id] })
           }
           setConfirmDeleteItem(null)
+        }}
+      />
+
+      <ConfirmDialog
+        open={confirmReorganize}
+        title="Reset to default layout?"
+        message="This replaces your arrangement on this level with the automatic layout. This can't be undone."
+        confirmLabel="Reset"
+        onCancel={() => setConfirmReorganize(false)}
+        onConfirm={() => {
+          reorganizeLevel()
+          setConfirmReorganize(false)
         }}
       />
     </div>

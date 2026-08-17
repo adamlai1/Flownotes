@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
+import { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { CONNECTION_TYPES, CUSTOM_TAG_PALETTE, ROOT_BUBBLE_ID } from '../data/defaultData'
 import { getNoteTitle, noteTitle, realBubbleIds, connectionType, generateId } from '../utils/helpers'
@@ -384,6 +384,44 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // A locked note's title must not surface through the connections UI either — it's
   // shown as "Locked" in existing connections, and can't be picked as a new one.
   const lockIndex = buildLockIndex(project.bubbles, project.notes, unlockedIds)
+
+  // Back-button label, capped the same way for EVERY origin (bubble and
+  // project names can run as long as note titles). Orientation is the job,
+  // not fidelity: roughly a couple of words. Over the cap it's cut at the
+  // character budget with an ellipsis; if even that can't leave a few
+  // readable characters (or the label is blank), the chevron stands alone.
+  const BACK_LABEL_MAX = 10
+  // The centered title's reserve on EACH side is MEASURED, not assumed: after
+  // each commit the layout effect below reads the real rendered width of the
+  // back button and of the icon cluster, takes the wider of the two plus a
+  // small gap, and applies it to both sides — so the box stays symmetric
+  // around the panel's center, can't collide with either side at any label
+  // length, and a short (or absent) back label hands the title the room it
+  // isn't using. TITLE_INSET is only the pre-measurement fallback, sized for
+  // the worst case (pad + chevron + a full capped label).
+  const TITLE_INSET = 128
+  const [titleInset, setTitleInset] = useState(TITLE_INSET)
+  const headerRowRef = useRef(null)
+  const backBtnRef = useRef(null)
+  const iconGroupRef = useRef(null)
+  useLayoutEffect(() => {
+    const hdr = headerRowRef.current
+    const back = backBtnRef.current
+    const icons = iconGroupRef.current
+    if (!hdr || !back || !icons) return
+    const h = hdr.getBoundingClientRect()
+    const leftSide = back.getBoundingClientRect().right - h.left
+    const rightSide = h.right - icons.getBoundingClientRect().left
+    const next = Math.round(Math.max(leftSide, rightSide)) + 8
+    setTitleInset(prev => (prev === next ? prev : next))
+  })
+  const backTrimmed = (backLabel ?? '').trim()
+  const backCut = backTrimmed.length > BACK_LABEL_MAX
+    ? backTrimmed.slice(0, BACK_LABEL_MAX - 1).trimEnd()
+    : backTrimmed
+  const backText = backTrimmed.length > BACK_LABEL_MAX
+    ? (backCut.length >= 4 ? backCut + '…' : '')
+    : backTrimmed
   const connectableNotes = project.notes.filter(
     n => n.id !== note.id && !lockIndex.gatedNoteIds.has(n.id)
   )
@@ -422,6 +460,11 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       onMouseDown={isDesktop ? (e => { if (e.target === e.currentTarget) handleClose() }) : undefined}
     >
     <div
+      // The column is minmax(0, 1fr), NOT the implicit auto: grid items
+      // default to min-width auto, so the header's intrinsic width (a nowrap
+      // title) would otherwise blow the track — and with it every row —
+      // wider than the panel. minmax(0,1fr) caps the track at the panel
+      // width, which is what lets min-w-0 flex items inside actually shrink.
       style={isDesktop ? {
         position: 'relative',
         width: '100%',
@@ -429,13 +472,15 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         background: 'var(--surface)',
         display: 'grid',
         gridTemplateRows: 'auto 1fr',
+        gridTemplateColumns: 'minmax(0, 1fr)',
         overflow: 'hidden',
         borderLeft: '1px solid var(--border)',
         borderRight: '1px solid var(--border)',
       } : {
         position: 'absolute', top: 0, right: 0, bottom: 0, left: 0,
         background: 'var(--surface)',
-        display: 'grid', gridTemplateRows: 'auto 1fr', overflow: 'hidden',
+        display: 'grid', gridTemplateRows: 'auto 1fr',
+        gridTemplateColumns: 'minmax(0, 1fr)', overflow: 'hidden',
         transform: `translateX(${swipeOffset}px)`, transition: swipeTransition,
         // Left-edge shadow gives the sliding panel depth over the revealed layer.
         boxShadow: '-8px 0 24px rgba(0,0,0,0.35)',
@@ -446,6 +491,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     >
       {/* ── Header — grid row 1 (auto height, never scrolls) ─────────────────── */}
       <div
+        ref={headerRowRef}
         className="relative flex items-center px-3 border-b border-white/10"
         style={{
           paddingTop: 'max(12px, env(safe-area-inset-top))', paddingBottom: 10,
@@ -453,19 +499,24 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         }}
       >
         <button
+          ref={backBtnRef}
           onClick={handleClose}
           className="flex items-center gap-0.5 text-indigo-400 hover:text-indigo-300 font-medium text-[15px] py-1 -ml-1 flex-shrink-0 transition-colors z-10 max-w-[140px]"
         >
           <svg className="w-5 h-5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M15 19l-7-7 7-7" />
           </svg>
-          <span className="truncate">{backLabel}</span>
+          {backText && <span className="truncate">{backText}</span>}
         </button>
 
         {/* Title. Follows the first body line until manually edited (tap to
             edit); a manual title is fixed and no longer tracks the body, and
-            clearing it reverts to deriving. The side buttons keep z-10, so
-            they stay clickable where the centered strip would overlap. */}
+            clearing it reverts to deriving. Absolutely positioned in a box
+            centered on the panel (the measured titleInset each side), so it
+            stays centered at any back-label length; out of flow, it also
+            can't blow the grid track (and the panel's minmax(0,1fr) column
+            guards that regardless). The back button and icons carry z-10, so
+            they layer above it and keep their full hit areas. */}
         {editingTitle ? (
           <input
             autoFocus
@@ -478,14 +529,14 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             }}
             placeholder="Untitled"
             aria-label="Note title"
-            className="absolute inset-x-0 mx-auto w-1/2 text-center text-[15px] font-semibold outline-none bg-transparent px-2"
-            style={{ color: 'var(--text)', userSelect: 'text', WebkitUserSelect: 'text' }}
+            className="absolute text-center text-[15px] font-semibold outline-none bg-transparent px-2"
+            style={{ left: titleInset, right: titleInset, color: 'var(--text)', userSelect: 'text', WebkitUserSelect: 'text' }}
           />
         ) : (
           <button
             onClick={startTitleEdit}
-            className="absolute inset-x-0 mx-auto w-1/2 text-center text-[15px] font-semibold truncate px-2"
-            style={{ color: displayTitle ? 'var(--text)' : '#6b7280' }}
+            className="absolute text-center text-[15px] font-semibold truncate px-2"
+            style={{ left: titleInset, right: titleInset, color: displayTitle ? 'var(--text)' : '#6b7280' }}
             title="Edit title"
           >
             {displayTitle || 'Untitled'}
@@ -494,30 +545,34 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
 
         <div className="flex-1" />
 
-        {/* Copy — the text as it stands in the editor, not the last saved version, so
-            what lands on the clipboard is what's on screen. */}
-        <button
-          onClick={() => copyNoteText({ content: text, title: customTitle || null }).then(showToast)}
-          disabled={!text.trim()}
-          className="p-1.5 rounded-lg transition-opacity flex-shrink-0 z-10 text-gray-400 disabled:opacity-25"
-          title="Copy note"
-        >
-          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-              d="M8 8V5a1 1 0 011-1h10a1 1 0 011 1v10a1 1 0 01-1 1h-3M5 8h10a1 1 0 011 1v10a1 1 0 01-1 1H5a1 1 0 01-1-1V9a1 1 0 011-1z" />
-          </svg>
-        </button>
+        {/* Icon cluster — one wrapper so the title-inset measurement reads the
+            group's true extent in a single rect. */}
+        <div ref={iconGroupRef} className="flex items-center flex-shrink-0">
+          {/* Copy — the text as it stands in the editor, not the last saved version, so
+              what lands on the clipboard is what's on screen. */}
+          <button
+            onClick={() => copyNoteText({ content: text, title: customTitle || null }).then(showToast)}
+            disabled={!text.trim()}
+            className="p-1.5 rounded-lg transition-opacity flex-shrink-0 z-10 text-gray-400 disabled:opacity-25"
+            title="Copy note"
+          >
+            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M8 8V5a1 1 0 011-1h10a1 1 0 011 1v10a1 1 0 01-1 1h-3M5 8h10a1 1 0 011 1v10a1 1 0 01-1 1H5a1 1 0 01-1-1V9a1 1 0 011-1z" />
+            </svg>
+          </button>
 
-        <button
-          onClick={handleDelete}
-          className="p-1.5 text-gray-500 hover:text-red-500 rounded-lg transition-colors -mr-1 flex-shrink-0 z-10"
-          title="Delete note"
-        >
-          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-              d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-          </svg>
-        </button>
+          <button
+            onClick={handleDelete}
+            className="p-1.5 text-gray-500 hover:text-red-500 rounded-lg transition-colors -mr-1 flex-shrink-0 z-10"
+            title="Delete note"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            </svg>
+          </button>
+        </div>
       </div>
 
       {/* ── Scroll area — grid row 2 (1fr), only this scrolls ───────────────── */}

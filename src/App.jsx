@@ -2072,9 +2072,19 @@ export default function App() {
           const prevNote = index > 0
             ? activeProject.notes.find(n => n.id === noteStack[index - 1])
             : null
+          // The label names the ACTUAL return destination. closeTopNote only
+          // pops this stack — it never moves the canvas or flips the view —
+          // so for the base note the destination is whatever viewMode /
+          // currentBubbleId say right now (both are live state; the canvas
+          // reports level changes via onCurrentBubbleChange). For stacked
+          // notes, back pops to the note beneath, so its title is the label.
           const backLabel = prevNote
             ? (noteTitle(prevNote) || 'Untitled')
-            : 'Notes'
+            : viewMode === 'chronological'
+              ? 'Notes'
+              : currentBubbleId
+                ? (activeProject.bubbles.find(b => b.id === currentBubbleId)?.name ?? activeProject.name)
+                : activeProject.name
           return (
             <NoteEditor
               key={noteId}
