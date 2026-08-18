@@ -116,7 +116,7 @@ const SEED_BUBBLES = [
 const SEED_NOTE_CONTENT =
   'Notes can live in multiple bubbles\nThis note is also in To Do — tap the "To Do" bubble to see it there.'
 const SEED_HOLD_NOTE_CONTENT =
-  'Hold to move, keep holding for more\nPress and drag any bubble or note to move it. Hold still for a moment instead and a menu appears — rename or recolor a bubble, copy or share a note, lock, delete. The + button holds too: tap it for a note, hold it to create a bubble.'
+  'Hold to move, keep holding for more\nPress and drag any bubble, note, or sidebar row to move it. Hold still for a moment instead and a menu appears — rename or recolor a bubble, copy or share a note, lock, delete. The + button holds too: tap it for a note, hold it to create a bubble.'
 const SEED_TAGS_NOTE_CONTENT =
   'Tag your thinking, link your notes\nTag a note with how sure you are — Certain, Think About More, Not Sure, Could Be Wrong — or make your own tags however you see fit. Scroll down inside any note to add a connection: pick another note and how they relate, like "Leads To" or "Opposing Ideas". You can add your own connection types too.'
 
@@ -132,7 +132,11 @@ const SEED_NOTE_TEXTS = {
     // Original single-line wording, from before the title/body split.
     'This note is also in To Do — tap the "To Do" bubble to see. Notes can live in as many bubbles as you want.',
   ],
-  [SEED_HOLD_NOTE_ID]: [SEED_HOLD_NOTE_CONTENT],
+  [SEED_HOLD_NOTE_ID]: [
+    SEED_HOLD_NOTE_CONTENT,
+    // Earlier wording, from before the sidebar rows became draggable.
+    'Hold to move, keep holding for more\nPress and drag any bubble or note to move it. Hold still for a moment instead and a menu appears — rename or recolor a bubble, copy or share a note, lock, delete. The + button holds too: tap it for a note, hold it to create a bubble.',
+  ],
   [SEED_TAGS_NOTE_ID]: [
     SEED_TAGS_NOTE_CONTENT,
     // Earlier wording, from before the connection-type defaults were renamed.
