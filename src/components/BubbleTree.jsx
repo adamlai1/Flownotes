@@ -7,6 +7,9 @@ import BubbleColorPicker from './BubbleColorPicker'
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
+import {
+  LONG_PRESS_MENU_MS, DRAG_PICKUP_PAGED_MS, PRESS_MOVE_CANCEL_PX,
+} from '../utils/pressArbitration'
 
 // Shared drag state for the whole tree. Provided by BubbleTree, consumed by every
 // BubbleNode and RootDropZone so they can start drags and render drop indicators.
@@ -26,6 +29,7 @@ function BubbleNode({
   onChangeBubbleColor,
   lockIndex,
   onRequestUnlock,
+  onToggleLock,
 }) {
   const [expanded, setExpanded] = useState(true)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -33,7 +37,11 @@ function BubbleNode({
   const [renameValue, setRenameValue] = useState('')
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [pickingColor, setPickingColor] = useState(false)
-  const { draggingId, dropTarget, startDrag } = useContext(DragContext)
+  const { draggingId, dropTarget, startDrag, cancelDrag } = useContext(DragContext)
+  // Press-and-hold arbitration state for the current press (see handleRowPointerDown),
+  // and a flag that eats the click a drag or menu press would otherwise leave behind.
+  const pressRef = useRef(null)
+  const suppressClickRef = useRef(false)
   const children = bubbles.filter(b => b.parent_id === bubble.id)
   // A locked bubble is hidden here too, or the sidebar would be a way around the
   // lock: its name, its note count and (by selecting it) its whole contents.
@@ -59,6 +67,83 @@ function BubbleNode({
     setShowDeleteConfirm(true)
   }
 
+  // Press-and-hold arbitration — the same sequence as the canvas (see
+  // utils/pressArbitration.js): a stationary press picks the row up for
+  // drag-to-reorder, holding still all the way to the menu threshold abandons
+  // the pickup and opens the options menu, and moving early hands the press
+  // to the scroller. A plain tap resolves before either timer and selects via
+  // the row's onClick as before.
+  function handleRowPointerDown(e) {
+    if (e.button != null && e.button !== 0) return
+    const st = {
+      mode: 'pending',
+      startX: e.clientX, startY: e.clientY,
+      lastX: e.clientX, lastY: e.clientY,
+      dragTimer: null, menuTimer: null,
+    }
+    pressRef.current = st
+
+    const clearTimers = () => {
+      if (st.dragTimer) { clearTimeout(st.dragTimer); st.dragTimer = null }
+      if (st.menuTimer) { clearTimeout(st.menuTimer); st.menuTimer = null }
+    }
+    const teardown = () => {
+      clearTimers()
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onCancel)
+      if (pressRef.current === st) pressRef.current = null
+    }
+
+    const onMove = (ev) => {
+      if (st.mode === 'menu') return
+      st.lastX = ev.clientX; st.lastY = ev.clientY
+      if (Math.hypot(ev.clientX - st.startX, ev.clientY - st.startY) > PRESS_MOVE_CANCEL_PX) {
+        // Moved → this press is never a menu; before pickup it's a scroll, so
+        // the press dies and the scroller keeps the gesture.
+        if (st.menuTimer) { clearTimeout(st.menuTimer); st.menuTimer = null }
+        if (st.mode === 'pending') teardown()
+      }
+    }
+    const onUp = () => {
+      teardown()
+      // The click that follows this release must be eaten if the press became a
+      // drag or a menu — cleared on a macrotask so the click sees the flag first.
+      setTimeout(() => { suppressClickRef.current = false }, 0)
+    }
+    const onCancel = () => {
+      if (st.mode === 'drag') cancelDrag()
+      teardown()
+      setTimeout(() => { suppressClickRef.current = false }, 0)
+    }
+
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onCancel)
+
+    st.dragTimer = setTimeout(() => {
+      st.dragTimer = null
+      if (pressRef.current !== st || st.mode !== 'pending') return
+      st.mode = 'drag'
+      suppressClickRef.current = true
+      navigator.vibrate?.(40)
+      startDrag(bubble, {
+        clientX: st.lastX, clientY: st.lastY,
+        preventDefault() {}, stopPropagation() {},
+      })
+    }, DRAG_PICKUP_PAGED_MS)
+
+    st.menuTimer = setTimeout(() => {
+      st.menuTimer = null
+      if (pressRef.current !== st) return
+      if (st.mode === 'drag') cancelDrag()
+      st.mode = 'menu'
+      suppressClickRef.current = true
+      navigator.vibrate?.(15)
+      setMenuOpen(true)
+    }, LONG_PRESS_MENU_MS)
+  }
+
   return (
     <div>
       <div
@@ -74,23 +159,6 @@ function BubbleNode({
           transition: 'background 100ms, outline-color 100ms',
         }}
       >
-        {/* Drag handle — grab to reparent. touch-action:none so a drag from here
-            doesn't scroll the sidebar on touch devices. */}
-        <button
-          onPointerDown={e => startDrag(bubble, e)}
-          onClick={e => e.stopPropagation()}
-          className="w-4 h-6 flex items-center justify-center text-gray-700 hover:text-gray-400 flex-shrink-0"
-          style={{ touchAction: 'none', cursor: 'grab' }}
-          title="Drag to move"
-          aria-label="Drag to move bubble"
-        >
-          <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
-            <circle cx="9" cy="6" r="1.6" /><circle cx="15" cy="6" r="1.6" />
-            <circle cx="9" cy="12" r="1.6" /><circle cx="15" cy="12" r="1.6" />
-            <circle cx="9" cy="18" r="1.6" /><circle cx="15" cy="18" r="1.6" />
-          </svg>
-        </button>
-
         {/* Expand/collapse toggle */}
         {children.length > 0 && !gated ? (
           <button
@@ -128,10 +196,15 @@ function BubbleNode({
           </div>
         ) : (
           <button
-            onClick={() => gated ? onRequestUnlock?.(bubble) : onSelectBubble(bubble.id)}
-            className={`flex-1 flex items-center gap-1.5 px-2 py-1.5 rounded-lg text-sm transition-colors text-left min-w-0 ${
+            onPointerDown={handleRowPointerDown}
+            onClick={() => {
+              if (suppressClickRef.current) { suppressClickRef.current = false; return }
+              gated ? onRequestUnlock?.(bubble) : onSelectBubble(bubble.id)
+            }}
+            className={`flex-1 flex items-center gap-2 px-2 py-2 rounded-lg text-sm transition-colors text-left min-w-0 ${
               isSelected ? 'bg-indigo-950 text-indigo-400 font-medium' : 'text-gray-300 hover:bg-gray-800'
             }`}
+            style={{ minHeight: 44 }}
           >
             <span
               className="w-2.5 h-2.5 rounded-full flex-shrink-0"
@@ -152,20 +225,7 @@ function BubbleNode({
           </button>
         )}
 
-        {/* Actions menu toggle — always visible */}
-        {!renaming && (
-          <button
-            onClick={e => { e.stopPropagation(); setMenuOpen(m => !m) }}
-            className="flex-shrink-0 p-1.5 text-gray-700 hover:text-gray-400 rounded"
-            title="Bubble options"
-          >
-            <svg className="w-3.5 h-3.5" fill="currentColor" viewBox="0 0 24 24">
-              <circle cx="5" cy="12" r="1.5" /><circle cx="12" cy="12" r="1.5" /><circle cx="19" cy="12" r="1.5" />
-            </svg>
-          </button>
-        )}
-
-        {/* Actions dropdown */}
+        {/* Actions dropdown — opened by press-and-hold on the row */}
         {menuOpen && !renaming && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
@@ -199,6 +259,12 @@ function BubbleNode({
               >
                 Change color
               </button>
+              <button
+                onClick={() => { onToggleLock?.(bubble); setMenuOpen(false) }}
+                className="text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
+              >
+                {bubble.locked ? 'Remove Lock' : 'Lock'}
+              </button>
                 </>
               )}
               <button
@@ -230,6 +296,7 @@ function BubbleNode({
               onChangeBubbleColor={onChangeBubbleColor}
               lockIndex={lockIndex}
               onRequestUnlock={onRequestUnlock}
+              onToggleLock={onToggleLock}
             />
           ))}
         </div>
@@ -372,10 +439,11 @@ export default function BubbleTree({
   onMoveBubble,
   onAddChildBubble,
   onChangeBubbleColor,
+  onSetBubbleLocked,
 }) {
   const rootBubbles = bubbles.filter(b => b.parent_id === parentId)
   const forceExpandIds = getAncestorIds(bubbles, activeBubbleId)
-  const { unlockedIds, requestUnlock } = useLock()
+  const { unlockedIds, requestUnlock, ensurePassword, relockIds } = useLock()
   const lockIndex = useMemo(
     () => buildLockIndex(bubbles, notes, unlockedIds),
     [bubbles, notes, unlockedIds]
@@ -385,9 +453,22 @@ export default function BubbleTree({
     requestUnlock(lockIndex.gatingIdsFor({ ...bubble, type: 'bubble' }))
   }
 
+  // Same decision the canvas menu's toggleItemLock makes, for a sidebar row.
+  function handleToggleLock(bubble) {
+    if (lockIndex.gatedBubbleIds.has(bubble.id)) {
+      handleRequestUnlock(bubble)
+      return
+    }
+    if (bubble.locked) { onSetBubbleLocked?.(bubble.id, false); return }
+    ensurePassword(() => { relockIds(bubble.id); onSetBubbleLocked?.(bubble.id, true) })
+  }
+
   // drag = { id, name, color, x, y } while a drag is in progress, else null.
   const [drag, setDrag] = useState(null)
   const [dropTarget, setDropTarget] = useState(null)
+  // Root element of the tree — used to find the enclosing scroll container for
+  // edge auto-scroll during a drag.
+  const treeRef = useRef(null)
   // Refs so the global pointer listeners always read the latest values without
   // re-subscribing on every pointer move.
   const dragIdRef = useRef(null)
@@ -413,13 +494,27 @@ export default function BubbleTree({
     document.body.classList.add('bubble-dragging')
   }
 
+  // Abandon an in-flight drag without moving anything — used when a held press
+  // gives up the pickup in favor of the row's menu, mirroring the canvas.
+  function cancelDrag() {
+    document.body.classList.remove('bubble-dragging')
+    setDrag(null)
+    setDropTarget(null)
+    dragIdRef.current = null
+    forbiddenRef.current = null
+    dropRef.current = null
+  }
+
   // Global pointer listeners live only while a drag is active.
   useEffect(() => {
     if (!drag) return
 
-    function onMove(e) {
-      const x = e.clientX, y = e.clientY
-      setDrag(d => (d ? { ...d, x, y } : d))
+    // Last known pointer position — shared by the move handler and the
+    // auto-scroll loop, which re-resolves the drop target while the list moves
+    // under a stationary pointer.
+    const last = { x: drag.x, y: drag.y }
+
+    function updateDropTarget(x, y) {
       // The floating preview has pointer-events:none, so elementFromPoint returns
       // the row/zone underneath rather than the preview.
       const el = document.elementFromPoint(x, y)
@@ -445,6 +540,57 @@ export default function BubbleTree({
       setDropTarget(null); dropRef.current = null
     }
 
+    function onMove(e) {
+      const x = e.clientX, y = e.clientY
+      last.x = x; last.y = y
+      setDrag(d => (d ? { ...d, x, y } : d))
+      updateDropTarget(x, y)
+    }
+
+    // ── Edge auto-scroll ────────────────────────────────────────────────────
+    // Holding the drag near the scroll container's top or bottom edge scrolls
+    // the list so a bubble can be dropped outside the current viewport. Speed
+    // ramps with proximity: ~0 at the zone's inner boundary, EDGE_SCROLL_MAX_SPEED
+    // at (or past) the very edge. scrollTop is set programmatically and clamped
+    // by the browser at the ends, so it never enters the overscroll range and
+    // never triggers the container's rubber-band bounce.
+    const EDGE_SCROLL_ZONE = 48         // px from each edge
+    const EDGE_SCROLL_MAX_SPEED = 700   // px/s at the very edge
+    let scroller = null
+    for (let el = treeRef.current?.parentElement; el; el = el.parentElement) {
+      const oy = getComputedStyle(el).overflowY
+      if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight) {
+        scroller = el
+        break
+      }
+    }
+
+    let rafId = null
+    let lastFrameT = null
+    function autoScrollFrame(t) {
+      rafId = requestAnimationFrame(autoScrollFrame)
+      if (!scroller) return
+      const dt = lastFrameT == null ? 16 : Math.min(48, t - lastFrameT)
+      lastFrameT = t
+      const rect = scroller.getBoundingClientRect()
+      let dir = 0, ratio = 0
+      if (last.y < rect.top + EDGE_SCROLL_ZONE) {
+        dir = -1
+        ratio = Math.min(1, (rect.top + EDGE_SCROLL_ZONE - last.y) / EDGE_SCROLL_ZONE)
+      } else if (last.y > rect.bottom - EDGE_SCROLL_ZONE) {
+        dir = 1
+        ratio = Math.min(1, (last.y - (rect.bottom - EDGE_SCROLL_ZONE)) / EDGE_SCROLL_ZONE)
+      }
+      if (!dir) return
+      const before = scroller.scrollTop
+      scroller.scrollTop = before + dir * EDGE_SCROLL_MAX_SPEED * ratio * (dt / 1000)
+      // At the ends scrollTop stops changing — nothing to re-resolve then. The
+      // drop indicator only needs a refresh when rows actually moved under the
+      // pointer.
+      if (scroller.scrollTop !== before) updateDropTarget(last.x, last.y)
+    }
+    rafId = requestAnimationFrame(autoScrollFrame)
+
     function onUp() {
       const t = dropRef.current
       const id = dragIdRef.current
@@ -461,10 +607,19 @@ export default function BubbleTree({
       dropRef.current = null
     }
 
+    // The drag now starts from a press on a pan-y scroll surface (no dedicated
+    // handle), so native scrolling must be blocked for the drag's duration or
+    // the first vertical move would scroll the list and cancel the pointer.
+    // The pickup only fires on a stationary press, so no scroll is in flight yet.
+    function preventScroll(e) { e.preventDefault() }
+    window.addEventListener('touchmove', preventScroll, { passive: false })
+
     window.addEventListener('pointermove', onMove, { passive: false })
     window.addEventListener('pointerup', onUp)
     window.addEventListener('pointercancel', onUp)
     return () => {
+      if (rafId) cancelAnimationFrame(rafId)
+      window.removeEventListener('touchmove', preventScroll)
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
       window.removeEventListener('pointercancel', onUp)
@@ -476,11 +631,11 @@ export default function BubbleTree({
   // Safety: always drop the body class if this tree unmounts mid-drag.
   useEffect(() => () => document.body.classList.remove('bubble-dragging'), [])
 
-  const ctx = { draggingId: drag?.id ?? null, dropTarget, startDrag }
+  const ctx = { draggingId: drag?.id ?? null, dropTarget, startDrag, cancelDrag }
 
   return (
     <DragContext.Provider value={ctx}>
-      <div>
+      <div ref={treeRef}>
         <RootDropZone zoneId="0" />
         {rootBubbles.map((bubble, i) => (
           <Fragment key={bubble.id}>
@@ -498,6 +653,7 @@ export default function BubbleTree({
               onChangeBubbleColor={onChangeBubbleColor}
               lockIndex={lockIndex}
               onRequestUnlock={handleRequestUnlock}
+              onToggleLock={handleToggleLock}
             />
             <RootDropZone zoneId={String(i + 1)} />
           </Fragment>
