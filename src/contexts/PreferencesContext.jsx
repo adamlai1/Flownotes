@@ -49,7 +49,7 @@ function parseSizes(raw, legacyClass) {
 // scale the whole card (and its text) proportionally.
 export const NOTE_SIZE_SCALE = { small: 1, medium: 1.3, large: 1.6 }
 
-const PreferencesContext = createContext({ noteSize: 'small', setNoteSize: () => {} })
+const PreferencesContext = createContext({ noteSize: 'medium', setNoteSize: () => {} })
 
 export function PreferencesProvider({ children }) {
   const { user } = useAuth()
@@ -110,7 +110,10 @@ export function PreferencesProvider({ children }) {
     }
   }
 
-  const noteSize = sizes[deviceClass] ?? 'small'
+  // The default for a class with no stored value. Never written anywhere —
+  // storage only ever holds explicit choices, so this is a default, not a
+  // migration: a user who deliberately picked 'small' has it stored and keeps it.
+  const noteSize = sizes[deviceClass] ?? 'medium'
 
   return (
     <PreferencesContext.Provider value={{ noteSize, setNoteSize }}>

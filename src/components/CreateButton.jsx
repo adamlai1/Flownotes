@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { useTheme } from '../contexts/ThemeContext'
-import { CORNER_RATIO } from './BubbleVisualization'
 
 // ─── Floating create button ───────────────────────────────────────────────────
 //
@@ -18,7 +17,11 @@ import { CORNER_RATIO } from './BubbleVisualization'
 // width-52 / height-52 centre it is measured from), so the size and inset are not free to
 // change here alone.
 const SIZE = 56
-const RADIUS = Math.round(SIZE * CORNER_RATIO)
+// Deliberately rounder than the bubbles' shared CORNER_RATIO (22% → 12px here),
+// which read as a square with modest corners. ~29% is squircle territory, and
+// breaking from the canvas shapes' ratio is the point: material already sets the
+// button apart (solid tile vs lit glass); the silhouette now does too.
+const RADIUS = Math.round(SIZE * 0.29)
 
 // One flat indigo, the accent the rest of the app already uses. No ramp, no edge light,
 // no translucency: the button shares the bubbles' silhouette, so MATERIAL is what has to

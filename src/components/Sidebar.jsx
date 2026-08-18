@@ -188,7 +188,15 @@ export default function Sidebar({
         {/* Fixed top row: X close button (mobile) + All Notes — mirrors the TopNav hamburger position */}
         <div
           className="flex-shrink-0 flex items-center border-b border-gray-800"
-          style={{ backgroundColor: 'var(--sidebar)', paddingTop: 'max(8px, env(safe-area-inset-top))' }}
+          style={{
+            backgroundColor: 'var(--sidebar)',
+            // Same vertical padding as TopNav (max() top + 8px bottom) so the X
+            // stays level with the hamburger it mirrors. The bottom 8px was
+            // missing entirely, which left the highlight pill sitting visibly
+            // low in the header.
+            paddingTop: 'max(8px, env(safe-area-inset-top))',
+            paddingBottom: 8,
+          }}
         >
           {!isDesktop && (
             <button
