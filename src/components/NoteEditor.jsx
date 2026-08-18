@@ -674,9 +674,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
 
           {/* Bubble membership */}
           <div>
-            <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Bubble</p>
+            <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Project</p>
             <div className="space-y-0.5">
-              {/* Root-level option — always shown first */}
+              {/* Project root — selecting it puts the note loose on the canvas */}
               {(() => {
                 const selected = selectedBubbleIds.includes(ROOT_BUBBLE_ID)
                 const color = '#6b7280'
@@ -699,6 +699,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                   </button>
                 )
               })()}
+            </div>
+            <div className="my-3" style={{ borderTop: '1px solid var(--border)' }} />
+            <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Bubble</p>
+            <div className="space-y-0.5">
               {renderBubbleChips()}
             </div>
           </div>
