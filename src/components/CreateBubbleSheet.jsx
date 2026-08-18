@@ -80,10 +80,18 @@ export default function CreateBubbleSheet({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.15 }}
-          className={`fixed left-0 w-full flex justify-center ${hasHardwareKeyboard ? 'items-center' : 'items-start'}`}
+          // The DIM is sized to the layout viewport (fixed inset-0), which iOS does
+          // NOT shrink for the keyboard — when it was sized to the visual viewport,
+          // the bottom of the screen lost its dim the moment the keyboard opened.
+          // Only the POSITIONING LAYER inside tracks the visual viewport, keeping
+          // the card in the visible area above the keyboard.
+          className="fixed inset-0"
+          style={{ zIndex: 70, background: 'rgba(0,0,0,0.6)' }}
+          onClick={onCancel}
+        >
+        <div
+          className={`absolute left-0 w-full flex justify-center ${hasHardwareKeyboard ? 'items-center' : 'items-start'}`}
           style={{
-            zIndex: 70,
-            background: 'rgba(0,0,0,0.6)',
             top: viewport.height == null ? 0 : viewport.top,
             height: viewport.height ?? '100%',
             // Touch devices: anchored near the top rather than centred. iOS (webview
@@ -97,7 +105,6 @@ export default function CreateBubbleSheet({
             // Safari at nubblenotes.com needs the fix as much as the app does.
             ...(hasHardwareKeyboard ? {} : { paddingTop: 'calc(env(safe-area-inset-top, 0px) + 56px)' }),
           }}
-          onClick={onCancel}
         >
           <motion.div
             initial={{ opacity: 0, scale: 0.94 }}
@@ -159,6 +166,7 @@ export default function CreateBubbleSheet({
               </button>
             </div>
           </motion.div>
+        </div>
         </motion.div>
       )}
     </AnimatePresence>

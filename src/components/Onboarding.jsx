@@ -45,7 +45,9 @@ export default function Onboarding({ onDismiss }) {
         animate={{ y: 0, opacity: 1 }}
         transition={{ delay: 0.1, duration: 0.35 }}
         className="mb-6 flex items-center justify-center w-16 h-16 rounded-2xl"
-        style={{ background: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }}
+        // Neutral raised chip — was an indigo→violet gradient, the last decorative
+        // gradient in the app.
+        style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.1)' }}
       >
         <svg className="w-8 h-8 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <circle cx="12" cy="12" r="3" strokeWidth={2} />
@@ -99,7 +101,9 @@ export default function Onboarding({ onDismiss }) {
         transition={{ delay: 0.34, duration: 0.35 }}
         onClick={onDismiss}
         className="w-full max-w-xs py-3.5 rounded-2xl text-white font-semibold text-[16px] transition-opacity active:opacity-80"
-        style={{ background: 'linear-gradient(135deg, #6366f1, #8b5cf6)' }}
+        // Flat indigo — gradient dropped; the CTA keeps the accent colour because
+        // it is the primary action, not decoration.
+        style={{ background: '#6366f1' }}
       >
         Get Started
       </motion.button>

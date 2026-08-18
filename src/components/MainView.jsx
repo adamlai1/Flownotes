@@ -20,6 +20,8 @@ export default function MainView({
   onSetNoteLocked,
   onSetBubbleLocked,
   onCurrentBubbleChange,
+  onAddNotesToBubble,
+  headerControlsEl,
   navigateBubbleId,
   placeBubbleId,
   onChangeBubbleColor,
@@ -221,7 +223,11 @@ export default function MainView({
   const selectedBubble = project.bubbles.find(b => b.id === activeBubbleId)
 
   return (
-    <div style={{ position: 'relative', flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg)' }}>
+    // Transparent (was var(--bg)): this box spans the whole content area, and an
+    // opaque ground here was covering the shell-level vignette band everywhere
+    // below the header. The All Notes <main> inside keeps its own opaque ground —
+    // the vignette doesn't apply in that mode.
+    <div style={{ position: 'relative', flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
       {viewMode === 'bubble' ? (
         <BubbleVisualization
           project={project}
@@ -232,6 +238,8 @@ export default function MainView({
           viewMode={viewMode}
           onSetViewMode={onSetViewMode}
           onCurrentBubbleChange={onCurrentBubbleChange}
+          onAddNotesToBubble={onAddNotesToBubble}
+          headerControlsEl={headerControlsEl}
           navigateToBubbleId={navigateBubbleId}
           placeBubbleId={placeBubbleId}
           pageStep={pageStep}
@@ -250,8 +258,10 @@ export default function MainView({
           under it rather than showing through. */}
       <div className="sticky top-0 z-10" style={{ background: 'var(--bg)' }}>
         <div className="px-4 md:px-6">
-          {/* Title row — h-[52px] matches bubble view sub-bar height exactly */}
-          <div className="flex items-center justify-between" style={{ height: 52 }}>
+          {/* Title row — same geometry as the bubble view's sub-bar: 40px band,
+              content top-aligned with a 2px inset, so switching views doesn't
+              move the header line. */}
+          <div className="flex items-start justify-between" style={{ minHeight: 40, paddingTop: 2 }}>
             {selectMode ? (
               <>
                 <div className="flex items-center gap-2">
@@ -268,6 +278,15 @@ export default function MainView({
                     className="text-sm font-medium text-indigo-400 hover:text-indigo-300 transition-colors"
                   >
                     {filteredNotes.length > 0 && filteredNotes.every(n => selectedIds.has(n.id)) ? 'Deselect all' : 'Select all'}
+                  </button>
+                  {/* Opens the SAME confirm dialog the old floating pill used —
+                      never deletes directly. */}
+                  <button
+                    onClick={() => setConfirmDelete(true)}
+                    disabled={selectedIds.size === 0}
+                    className="text-sm font-semibold text-red-400 hover:text-red-300 transition-colors disabled:opacity-40"
+                  >
+                    Delete{selectedIds.size > 0 ? ` ${selectedIds.size}` : ''}
                   </button>
                   <button
                     onClick={exitSelect}
@@ -373,9 +392,13 @@ export default function MainView({
                   },
                   {
                     id: 'chronological',
+                    // Stacked rounded cards, matching the canvas sub-bar's toggle —
+                    // the hamburger glyph belongs to the sidebar toggle alone.
                     icon: (
                       <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                        <rect x="4" y="3.5" width="16" height="4" rx="1.5" strokeWidth={2} />
+                        <rect x="4" y="10" width="16" height="4" rx="1.5" strokeWidth={2} />
+                        <rect x="4" y="16.5" width="16" height="4" rx="1.5" strokeWidth={2} />
                       </svg>
                     ),
                   },
@@ -624,25 +647,8 @@ export default function MainView({
         )}
       </div>
 
-      {/* Selection action bar — centered pill, clear of the floating + button */}
-      {selectMode && (
-        <div
-          className="fixed left-0 right-0 flex justify-center pointer-events-none z-40"
-          style={{ bottom: 'calc(18px + env(safe-area-inset-bottom))' }}
-        >
-          <button
-            onClick={() => setConfirmDelete(true)}
-            disabled={selectedIds.size === 0}
-            className="pointer-events-auto flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-semibold text-white shadow-lg transition-opacity disabled:opacity-40"
-            style={{ background: '#dc2626' }}
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-            </svg>
-            Delete{selectedIds.size > 0 ? ` ${selectedIds.size}` : ''}
-          </button>
-        </div>
-      )}
+      {/* The selection delete action lives in the select-mode header row (left of
+          Cancel), matching the canvas — the floating red pill it replaced is gone. */}
 
       <ConfirmDialog
         open={confirmDelete}

@@ -3,11 +3,12 @@ import { createContext, useContext, useState, useEffect } from 'react'
 const ThemeContext = createContext({ theme: 'dark', toggleTheme: () => {} })
 
 // The browser paints the status-bar region with theme-color, and the header is what
-// sits under it — so this must track the header's rendered background exactly:
-// bg-gray-900 (#111827) in dark, var(--card) (#FAFAF7) in light. The page background
-// (#1C1C1E) is deliberately NOT used here; it made the status bar visibly seam against
-// the navy nav.
-const THEME_COLOR = { dark: '#111827', light: '#FAFAF7' }
+// sits under it — so this must track the header's rendered background exactly. The
+// header bar is now containerless on the pure-black ground, so dark is #000000
+// (was navy #111827, which left a visible navy strip above the black header).
+// Light keeps the light surface. Also mirrored in index.html's meta (initial
+// paint before this runs) and public/manifest.json's theme_color.
+const THEME_COLOR = { dark: '#000000', light: '#FAFAF7' }
 
 function applyTheme(theme) {
   document.documentElement.setAttribute('data-theme', theme)

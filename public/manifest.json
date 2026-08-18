@@ -1,11 +1,11 @@
-{
+﻿{
   "name": "Nubble",
   "short_name": "Nubble",
   "description": "A mind-mapping notes app",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#19191A",
-  "theme_color": "#111827",
+  "background_color": "#000000",
+  "theme_color": "#000000",
   "orientation": "portrait",
   "icons": [
     {

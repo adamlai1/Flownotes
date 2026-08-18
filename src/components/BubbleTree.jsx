@@ -250,7 +250,10 @@ function BubbleNode({
         {menuOpen && !renaming && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
-            <div className="absolute right-0 top-full mt-0.5 flex flex-col bg-gray-900 rounded-lg shadow-lg border border-gray-800 z-20 py-1 min-w-[130px]">
+            <div
+              className="absolute right-0 top-full mt-0.5 flex flex-col rounded-lg shadow-lg z-20 py-1 min-w-[130px]"
+              style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+            >
               {gated ? (
                 /* Add child / Rename are withheld while locked — the rename field
                    would put the hidden name straight back on screen. */

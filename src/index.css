@@ -13,7 +13,8 @@
   /* EXPERIMENT (neutral scheme): was #111827 (navy-tinted) — now the same neutral
      dark as the canvas shell. Revert by restoring the old value. */
   --sidebar:     #1C1C1E;
-  --card:        #111827;
+  /* EXPERIMENT (neutral scheme): was #111827 (navy) — neutral dark surface. */
+  --card:        #1C1C1E;
   --text:        #ffffff;
   --text-2:      rgba(255,255,255,0.7);
   --text-muted:  #6b7280;

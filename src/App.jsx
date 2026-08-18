@@ -92,7 +92,9 @@ function AppVignette({ bubble }) {
   return (
     <div
       aria-hidden
-      className="absolute inset-0 pointer-events-none"
+      // fixed, not absolute: resolves against the viewport itself — safe-area top
+      // to bottom, edge to edge — independent of any ancestor's bounds.
+      className="fixed inset-0 pointer-events-none"
       style={{
         boxShadow: vignetteShadowFor(bubble.color, theme === 'light'),
         transition: 'box-shadow 0.6s ease-in-out',
@@ -789,6 +791,10 @@ export default function App() {
   const [navigateBubbleId, setNavigateBubbleId] = useState(null)
   const [currentBubbleId, setCurrentBubbleId] = useState(null) // tracks where user is in bubble nav
   const [viewMode, setViewMode] = useState('bubble') // 'bubble' | 'chronological'
+  // The header's row-1 slot the canvas portals its view controls into (layout
+  // mode / select / view toggle). A state, not a ref, so the canvas re-renders
+  // and mounts the portal once the slot element exists.
+  const [headerControlsEl, setHeaderControlsEl] = useState(null)
   const [isDesktop, setIsDesktop] = useState(() => window.matchMedia('(min-width: 768px)').matches)
   const [sidebarOpen, setSidebarOpen] = useState(() => window.matchMedia('(min-width: 768px)').matches)
 
@@ -1684,6 +1690,26 @@ export default function App() {
     })
   }
 
+  // "Add to" from select mode: append a bubble to each selected note's
+  // memberships. Notes are many-to-many, so every existing membership is kept;
+  // the root sentinel is dropped only when the note previously had NO real
+  // bubble — the same auto-deselect rule the note editor's picker applies.
+  function addNotesToBubble(noteIds, bubbleId) {
+    const current = activeProjectRef.current
+    const idSet = new Set(noteIds)
+    updateProject({
+      ...current,
+      notes: current.notes.map(n => {
+        if (!idSet.has(n.id)) return n
+        const ids = n.bubble_ids ?? []
+        if (ids.includes(bubbleId)) return n
+        const real = realBubbleIds(ids)
+        const base = real.length === 0 ? real : ids
+        return { ...n, bubble_ids: [...base, bubbleId] }
+      }),
+    })
+  }
+
   function setBubbleLocked(bubbleId, locked) {
     const current = activeProjectRef.current
     updateProject({
@@ -2022,6 +2048,15 @@ export default function App() {
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen(o => !o)}
         onOpenSettings={() => setSettingsOpen(true)}
+        onGoToProjectRoot={() => {
+          // Already at the root canvas → no-op, not a jarring re-navigation.
+          if (viewMode === 'bubble' && currentBubbleId === null) return
+          setSelectedBubbleId(null)
+          setViewMode('bubble')
+          setNavigateBubbleId('root:' + Date.now())
+        }}
+        atProjectRoot={viewMode === 'bubble' && currentBubbleId === null}
+        controlsSlotRef={setHeaderControlsEl}
         isDesktop={isDesktop}
         syncStatus={syncStatus}
         onSignOut={handleSignOut}
@@ -2068,6 +2103,8 @@ export default function App() {
             onSetNoteLocked={setNoteLocked}
             onSetBubbleLocked={setBubbleLocked}
             onCurrentBubbleChange={setCurrentBubbleId}
+            onAddNotesToBubble={addNotesToBubble}
+            headerControlsEl={headerControlsEl}
             navigateBubbleId={navigateBubbleId}
             placeBubbleId={placeBubbleId}
             onChangeBubbleColor={changeBubbleColor}

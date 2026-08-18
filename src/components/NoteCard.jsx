@@ -74,20 +74,20 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
         </svg>
       )}
 
-      {/* Selection checkbox (select mode) or the options menu (normal) */}
+      {/* Selection badge (select mode, SELECTED cards only — unselected cards get
+          no circle: everything is selectable in select mode, so the empty-circle
+          affordance was pure noise) or the options menu (normal) */}
       {selectMode ? (
+        selected && (
         <span
           className="absolute top-3 right-3 w-5 h-5 rounded-full flex items-center justify-center transition-colors"
-          style={selected
-            ? { background: '#6366f1' }
-            : { border: '1.5px solid rgb(75,85,99)' }}
+          style={{ background: '#6366f1' }}
         >
-          {selected && (
-            <svg className="w-3 h-3 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={4} d="M5 13l4 4L19 7" />
-            </svg>
-          )}
+          <svg className="w-3 h-3 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={4} d="M5 13l4 4L19 7" />
+          </svg>
         </span>
+        )
       ) : (
         <button
           onClick={e => { e.stopPropagation(); setShowMenu(m => !m) }}
