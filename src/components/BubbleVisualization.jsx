@@ -2014,9 +2014,11 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
           borderRadius: `${CORNER_RATIO * 100}%`,
           background: isLight
             ? solidBg
-            : `radial-gradient(135deg, rgba(255,255,255,0.24) 0%, rgba(${rgb},0.22) 55%, rgba(${rgb},0.07) 100%)`,
-          backdropFilter: isLight ? 'none' : 'blur(24px)',
-          WebkitBackdropFilter: isLight ? 'none' : 'blur(24px)',
+            : NOTE_CARD_SURFACE === 'flat'
+              ? 'var(--surface-2)'
+              : `radial-gradient(135deg, rgba(255,255,255,0.24) 0%, rgba(${rgb},0.22) 55%, rgba(${rgb},0.07) 100%)`,
+          backdropFilter: isLight || NOTE_CARD_SURFACE === 'flat' ? 'none' : 'blur(24px)',
+          WebkitBackdropFilter: isLight || NOTE_CARD_SURFACE === 'flat' ? 'none' : 'blur(24px)',
           border: isLight
             ? `1.5px solid rgba(${rgb},${isDragging ? '0.7' : '0.5'})`
             : `1.5px solid ${isDragging ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.28)'}`,
@@ -2304,6 +2306,39 @@ const BOTTOM_PAD = 0           // no bottom barrier — bubbles reach the bottom
 // blocks. Note the app runs under StrictMode, so in dev every render body — including
 // the layout below — executes TWICE per commit; halve the layout figures accordingly.
 const DEBUG_SWIPE_PERF = false
+
+// EXPERIMENT (neutral scheme): how the current bubble's colour appears on its canvas.
+//   'vignette' — subtle tint fading in from all four edges, neutral centre, so notes
+//                and the empty state sit on a clean field
+//   'wash'     — the previous full-canvas tint, kept for comparison/revert
+export const BUBBLE_BG_VARIANT = 'vignette'
+
+// Vignette geometry — drawn as an inset box-shadow overlay, so the neutral centre
+// is a ROUNDED RECTANGLE following the screen's shape (an ellipse either missed the
+// edge midpoints or crept toward the centre).
+//   VIGNETTE_CORNER — blur px: rounds the neutral centre's corners AND feathers the
+//                     band; raise for more generous rounding
+//   VIGNETTE_SPREAD — spread px: negative thins the band (depth ≈ CORNER + SPREAD)
+const VIGNETTE_CORNER = 40
+const VIGNETTE_SPREAD = 0
+
+// The vignette layer itself lives at the APP SHELL (see AppVignette in App.jsx) so
+// the band spans the full screen — safe-area top to bottom — instead of clipping at
+// the canvas boundary below the header. Its geometry and strength stay defined here,
+// next to their dials.
+export function vignetteShadowFor(color, isLight) {
+  const rgb = hexToRgb(color)
+  return `inset 0 0 ${VIGNETTE_CORNER}px ${VIGNETTE_SPREAD}px rgba(${rgb},${isLight ? 0.075 : 0.2})`
+}
+
+// EXPERIMENT (neutral scheme): note squares on the canvas. Every note is hardcoded
+// to '#a5b4fc' (indigo-300), so the 'glass' treatment — white sheen + colour wash +
+// backdrop blur — was pure decoration, not identity, and en masse it read as an
+// ambient glow over the whole view. 'flat' is a solid neutral card; category
+// BUBBLES keep their lit glass either way (their colour means something).
+//   'flat'  — solid neutral dark surface
+//   'glass' — the previous lit-glass gradient, kept for comparison/revert
+const NOTE_CARD_SURFACE = 'glass'
 
 const PLUS_BTN_EXCL_R = 36    // no-go radius around the floating + button
 
@@ -4185,12 +4220,40 @@ export default function BubbleVisualization({
         // farthest-corner drift), and whatever the OUTER stop is here must equal the
         // solid underlay (--bg / #root), html/body, and (dark) manifest
         // background_color — change one, change all five together.
-        background: isLight
-          ? `radial-gradient(ellipse 120% 75% at 50% 30%, rgba(${rgb},0.10) 0%, #F5F5F0 40%, #E8E8E2 94%)`
-          : `radial-gradient(ellipse 120% 75% at 55% 30%, rgba(${rgb},0.30) 0%, #10101A 45%, #19191A 80%, #19191A 94%)`,
+        // EXPERIMENT (neutral scheme): the root is always the neutral field — there is
+        // no bubble there, so no colour means anything (the old indigo fallback wash
+        // implied the root was part of the bubble system; rgb fallback was
+        // '99,102,241'). Inside a bubble, BUBBLE_BG_VARIANT picks how the bubble's
+        // colour shows: 'vignette' layers an edge fade of the colour OVER the same
+        // neutral field, keeping the centre clean; 'wash' restores the previous
+        // full-canvas tint for comparison.
+        background: (() => {
+          // Flat, not a gradient: when the colour wash was neutralized the gradient
+          // SHAPE was kept with grey stops, and its brighter centre (#222224 at
+          // 55% 30%) read as a soft grey glow in the upper-middle. Flat --bg also
+          // satisfies the seam rule above trivially — every stop equals the shell.
+          // EXPERIMENT: pitch-black test — was '#19191A' (dark). Changed together
+          // with --bg / html / body / #root in index.css per the seam rule.
+          const neutral = isLight ? '#E8E8E2' : '#000000'
+          if (BUBBLE_BG_VARIANT === 'wash') {
+            if (!currentBubble) return neutral
+            return isLight
+              ? `radial-gradient(ellipse 120% 75% at 50% 30%, rgba(${rgb},0.10) 0%, #F5F5F0 40%, #E8E8E2 94%)`
+              : `radial-gradient(ellipse 120% 75% at 55% 30%, rgba(${rgb},0.30) 0%, #10101A 45%, #19191A 80%, #19191A 94%)`
+          }
+          // 'vignette' mode: the canvas paints NOTHING of its own — the app shell
+          // behind it is the same flat --bg ground, and staying transparent is what
+          // lets the shell-level band (AppVignette in App.jsx) show through the
+          // canvas area instead of being covered by an opaque box.
+          return 'transparent'
+        })(),
         transition: 'background 0.6s ease-in-out',
       }}
     >
+      {/* The vignette band formerly rendered here was clipped at this container's
+          top edge (it starts below the header). It now lives at the app shell —
+          see AppVignette in App.jsx and vignetteShadowFor above. */}
+
       {/* ── Sub-bar: breadcrumb (left) + view toggle (right) ─────────────────── */}
       <div
         className="absolute top-0 left-0 right-0 z-10"
@@ -4470,9 +4533,13 @@ export default function BubbleVisualization({
                     initial={{ opacity: 0, y: 8 }}
                     animate={{ opacity: 1, y: 0 }}
                   >
-                    <div className="text-4xl mb-3 opacity-20">○</div>
-                    <p className="text-white/25 text-sm font-medium">Nothing here yet</p>
-                    <p className="text-white/15 text-xs mt-1">
+                    {/* Contrast raised from opacity-20 / white-25 / white-15 — this is
+                        the screen a new user sees most, and it was too faint to read.
+                        The /65 and /45 steps also have light-theme overrides, which
+                        the old /15 hint did not. */}
+                    <div className="text-4xl mb-3 opacity-40">○</div>
+                    <p className="text-white/65 text-sm font-medium">Nothing here yet</p>
+                    <p className="text-white/45 text-xs mt-1">
                       {currentId ? 'Tap + to add a note' : 'Open the sidebar to add a bubble'}
                     </p>
                   </motion.div>

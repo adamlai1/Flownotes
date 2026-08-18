@@ -69,12 +69,37 @@ import Settings from './components/Settings'
 import Onboarding from './components/Onboarding'
 import CreateBubbleSheet from './components/CreateBubbleSheet'
 import CreateButton from './components/CreateButton'
-import { ThemeProvider } from './contexts/ThemeContext'
+import { ThemeProvider, useTheme } from './contexts/ThemeContext'
+import { BUBBLE_BG_VARIANT, vignetteShadowFor } from './components/BubbleVisualization'
 import { PreferencesProvider } from './contexts/PreferencesContext'
 import { ToastProvider, useToast } from './contexts/ToastContext'
 import { LockProvider } from './contexts/LockContext'
 import { useAuth } from './contexts/AuthContext'
 import { useEscapeShortcut, useKeyShortcuts } from './lib/escapeStack'
+
+// EXPERIMENT (neutral scheme): the bubble-colour vignette, drawn at the app shell
+// so the band spans the FULL screen — safe-area top to bottom — instead of clipping
+// at the canvas boundary below the header. Rendered as the app root's first
+// positioned child with no z-index: the content wrapper (also positioned) follows
+// it in DOM order and paints above, so every item, header control and breadcrumb
+// sits over the band, exactly as they did over the old canvas-level layer.
+// currentBubbleId is only ever a level the user has opened, so a locked bubble's
+// colour cannot leak into the header zone. Geometry/strength live with their dials
+// in BubbleVisualization (vignetteShadowFor).
+function AppVignette({ bubble }) {
+  const { theme } = useTheme()
+  if (!bubble || BUBBLE_BG_VARIANT !== 'vignette') return null
+  return (
+    <div
+      aria-hidden
+      className="absolute inset-0 pointer-events-none"
+      style={{
+        boxShadow: vignetteShadowFor(bubble.color, theme === 'light'),
+        transition: 'box-shadow 0.6s ease-in-out',
+      }}
+    />
+  )
+}
 
 // How long the + button has to be held before it creates a bubble instead of a note.
 // Deliberately the same figure as the bubble view's LONG_PRESS_MENU_MS: the app has one
@@ -1982,6 +2007,11 @@ export default function App() {
       // the first effect tick. h-dvh alone left the column an inset short in standalone.
       style={{ background: 'var(--bg)', height: 'var(--app-h, 100dvh)' }}
     >
+      <AppVignette
+        bubble={viewMode === 'bubble'
+          ? activeProject.bubbles.find(b => b.id === currentBubbleId)
+          : null}
+      />
       <TopNav
         projectList={projectList}
         activeProject={activeProject}
@@ -1997,7 +2027,9 @@ export default function App() {
         onSignOut={handleSignOut}
       />
 
-      <div className="relative flex flex-1 min-h-0 overflow-hidden" style={{ background: 'var(--bg)' }}>
+      {/* Transparent (was var(--bg)): the app root behind paints the same ground,
+          and an opaque box here would cover the shell-level vignette band. */}
+      <div className="relative flex flex-1 min-h-0 overflow-hidden">
         <Sidebar
           open={sidebarOpen}
           isDesktop={isDesktop}

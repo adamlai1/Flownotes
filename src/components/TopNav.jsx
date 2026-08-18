@@ -59,8 +59,18 @@ export default function TopNav({
   }
 
   return (
-    <nav className="flex items-center px-3 py-2 bg-gray-900 border-b border-gray-800 z-30 flex-shrink-0"
-      style={{ paddingTop: 'max(8px, env(safe-area-inset-top))', boxShadow: 'var(--nav-shadow, none)' }}
+    // EXPERIMENT (neutral scheme): originally bg-gray-900 (navy #111827) with a
+    // border-b and nav shadow; then var(--surface). Now the bar has NO container at
+    // all — no surface, border, or shadow — its controls float directly on the
+    // ground (--bg, pure black in dark). The safe-area paddingTop stays: it is what
+    // keeps the controls out of the notch/clock area. Revert by restoring
+    // 'border-b border-gray-800' and background 'var(--surface)' +
+    // boxShadow 'var(--nav-shadow, none)'.
+    // Transparent + relative: the app-shell vignette band (AppVignette) paints
+    // behind this bar, so the bar must not cover it — and being positioned makes
+    // the z-30 effective, keeping the controls crisp above the band.
+    <nav className="relative flex items-center px-3 py-2 z-30 flex-shrink-0"
+      style={{ paddingTop: 'max(8px, env(safe-area-inset-top))', background: 'transparent' }}
     >
       {/* Left: Hamburger */}
       <div className="flex items-center flex-1">
@@ -81,7 +91,12 @@ export default function TopNav({
       <div className="relative" ref={dropdownRef}>
         <button
           onClick={() => { setDropdownOpen(o => !o); setCreatingProject(false); setRenamingId(null) }}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-950 hover:bg-indigo-900 text-indigo-300 rounded-lg text-sm font-medium transition-colors max-w-[200px] sm:max-w-xs"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors max-w-[200px] sm:max-w-xs"
+          // EXPERIMENT (neutral scheme): was 'bg-indigo-950 hover:bg-indigo-900
+          // text-indigo-300' — now the same neutral raised treatment as the
+          // sidebar's project row. Revert by restoring those classes and dropping
+          // this style.
+          style={{ background: 'var(--hover)', color: 'var(--text)' }}
         >
           <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
