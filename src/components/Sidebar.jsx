@@ -228,7 +228,7 @@ export default function Sidebar({
           {/* Bubbles section */}
           <div className="px-3 pt-4 pb-2">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Bubbles</span>
+              <span className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Bubbles</span>
               <button
                 onClick={() => { setNewBubbleParentId(null); setAddingBubble(true) }}
                 className="text-gray-500 hover:text-indigo-400 transition-colors"
@@ -305,7 +305,7 @@ export default function Sidebar({
           {/* Tags section */}
           <div className="px-3 pt-4 pb-3 border-t border-gray-800 mt-2">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-xs font-semibold text-gray-400 uppercase tracking-wider">Tags</span>
+              <span className="text-sm font-semibold text-gray-400 uppercase tracking-wider">Tags</span>
               <button
                 onClick={() => setAddingTag(true)}
                 className="text-gray-500 hover:text-indigo-400 transition-colors"
@@ -321,7 +321,7 @@ export default function Sidebar({
             {customTagEntries.map(([tag, color]) =>
               editingTag === tag ? (
                 <div key={tag} className="flex items-center gap-2 px-2 py-1 rounded-lg bg-gray-800 mt-0.5">
-                  <span className="text-sm font-medium" style={{ color }}>#</span>
+                  <span className="text-base font-medium" style={{ color }}>#</span>
                   <input
                     ref={editTagInputRef}
                     value={editTagName}
@@ -331,7 +331,7 @@ export default function Sidebar({
                       if (e.key === 'Escape') { setEditingTag(null); setEditTagName('') }
                     }}
                     onBlur={() => commitEditTag(tag)}
-                    className="flex-1 text-sm bg-transparent outline-none text-gray-300"
+                    className="flex-1 text-base bg-transparent outline-none text-gray-300"
                   />
                 </div>
               ) : (
@@ -339,10 +339,10 @@ export default function Sidebar({
                   key={tag}
                   type="button"
                   className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg mt-0.5 text-left"
-                  style={{ backgroundColor: contextTag === tag ? '#1f2937' : 'transparent' }}
+                  style={{ backgroundColor: contextTag === tag ? '#1f2937' : 'transparent', minHeight: 38 }}
                   onClick={e => { e.stopPropagation(); setContextTag(contextTag === tag ? null : tag) }}
                 >
-                  <span className="text-sm font-medium flex-1 truncate" style={{ color }}>#{tag}</span>
+                  <span className="text-base font-medium flex-1 truncate" style={{ color }}>#{tag}</span>
                   {contextTag === tag && (
                     <span className="flex items-center gap-1 flex-shrink-0">
                       <button
@@ -364,7 +364,7 @@ export default function Sidebar({
             {/* New tag input */}
             {addingTag && (
               <div className="flex items-center gap-2 px-2 py-1.5 bg-gray-800 rounded-lg mt-0.5">
-                <span className="text-sm font-medium text-blue-400">#</span>
+                <span className="text-base font-medium text-blue-400">#</span>
                 <input
                   ref={newTagInputRef}
                   value={newTagName}
@@ -375,7 +375,7 @@ export default function Sidebar({
                   }}
                   onBlur={handleAddTag}
                   placeholder="Tag name…"
-                  className="flex-1 text-sm bg-transparent outline-none text-gray-300 placeholder-gray-500"
+                  className="flex-1 text-base bg-transparent outline-none text-gray-300 placeholder-gray-500"
                 />
               </div>
             )}

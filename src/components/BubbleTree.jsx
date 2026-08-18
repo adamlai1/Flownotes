@@ -201,10 +201,10 @@ function BubbleNode({
               if (suppressClickRef.current) { suppressClickRef.current = false; return }
               gated ? onRequestUnlock?.(bubble) : onSelectBubble(bubble.id)
             }}
-            className={`flex-1 flex items-center gap-2 px-2 py-2 rounded-lg text-sm transition-colors text-left min-w-0 ${
+            className={`flex-1 flex items-center gap-2 px-2 py-1.5 rounded-lg text-base transition-colors text-left min-w-0 ${
               isSelected ? 'bg-indigo-950 text-indigo-400 font-medium' : 'text-gray-300 hover:bg-gray-800'
             }`}
-            style={{ minHeight: 44 }}
+            style={{ minHeight: 38 }}
           >
             <span
               className="w-2.5 h-2.5 rounded-full flex-shrink-0"
@@ -221,7 +221,7 @@ function BubbleNode({
             ) : (
               <span className="truncate">{bubble.name}</span>
             )}
-            <span className="ml-auto text-xs text-gray-400 flex-shrink-0">{noteCount || ''}</span>
+            <span className="ml-auto text-xs text-gray-400 opacity-70 flex-shrink-0">{noteCount || ''}</span>
           </button>
         )}
 
