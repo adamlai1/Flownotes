@@ -62,6 +62,11 @@ export function AuthProvider({ children }) {
     return signInWithProvider('apple')
   }
 
+  // No browser redirect involved, so the same call works on web and native.
+  function signInWithEmail(email, password) {
+    return supabase.auth.signInWithPassword({ email, password })
+  }
+
   function signOut() {
     return supabase.auth.signOut()
   }
@@ -72,7 +77,7 @@ export function AuthProvider({ children }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, guestMode, signInWithGoogle, signInWithApple, signOut, continueAsGuest }}>
+    <AuthContext.Provider value={{ user, loading, guestMode, signInWithGoogle, signInWithApple, signInWithEmail, signOut, continueAsGuest }}>
       {children}
     </AuthContext.Provider>
   )

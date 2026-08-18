@@ -536,7 +536,29 @@ function initializeData() {
 }
 
 function LoginScreen() {
-  const { signInWithGoogle, signInWithApple, continueAsGuest } = useAuth()
+  const { signInWithGoogle, signInWithApple, signInWithEmail, continueAsGuest } = useAuth()
+  const [showEmail, setShowEmail] = useState(false)
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [emailError, setEmailError] = useState(null)
+  const [submitting, setSubmitting] = useState(false)
+
+  async function handleEmailSignIn(e) {
+    e.preventDefault()
+    if (submitting) return
+    setEmailError(null)
+    setSubmitting(true)
+    try {
+      const { error } = await signInWithEmail(email.trim(), password)
+      if (error) setEmailError(error.message)
+      // On success onAuthStateChange sets the user and this screen unmounts.
+    } catch (err) {
+      setEmailError(err?.message || 'Sign in failed')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
   return (
     <div className="flex flex-col items-center justify-center h-dvh bg-[#1C1C1E] gap-6 px-6">
       <div className="text-center mb-2">
@@ -568,6 +590,47 @@ function LoginScreen() {
           </svg>
           Sign in with Apple
         </button>
+
+        {!showEmail ? (
+          <button
+            onClick={() => setShowEmail(true)}
+            className="text-gray-400 hover:text-gray-200 text-sm py-1 transition-colors"
+          >
+            Sign in with email
+          </button>
+        ) : (
+          <form onSubmit={handleEmailSignIn} className="flex flex-col gap-2 w-full">
+            <input
+              type="email"
+              value={email}
+              onChange={e => setEmail(e.target.value)}
+              placeholder="Email"
+              autoComplete="email"
+              required
+              autoFocus
+              className="w-full px-4 py-2.5 rounded-xl bg-white/10 text-white placeholder-gray-500 text-sm border border-gray-700 focus:border-indigo-500 focus:outline-none"
+            />
+            <input
+              type="password"
+              value={password}
+              onChange={e => setPassword(e.target.value)}
+              placeholder="Password"
+              autoComplete="current-password"
+              required
+              className="w-full px-4 py-2.5 rounded-xl bg-white/10 text-white placeholder-gray-500 text-sm border border-gray-700 focus:border-indigo-500 focus:outline-none"
+            />
+            {emailError && (
+              <p className="text-red-400 text-xs text-center">{emailError}</p>
+            )}
+            <button
+              type="submit"
+              disabled={submitting}
+              className="w-full px-6 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm font-medium transition-colors"
+            >
+              {submitting ? 'Signing in…' : 'Sign In'}
+            </button>
+          </form>
+        )}
 
         <button
           onClick={continueAsGuest}
