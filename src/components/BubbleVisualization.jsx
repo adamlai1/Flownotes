@@ -1,5 +1,6 @@
 import { useState, useEffect, useLayoutEffect, useRef, useMemo, useCallback, createContext, useContext } from 'react'
 import { flushSync } from 'react-dom'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence, useMotionValue, animate } from 'framer-motion'
 import { getNoteCountForBubble, getBubbleDescendantIds, noteTitle, contrastColor, realBubbleIds } from '../utils/helpers'
 import { buildLockIndex } from '../utils/locks'
@@ -2127,27 +2128,37 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
 // The clicked bubble itself expands to fill the screen (or shrinks back).
 // Only one visual exists — the original bubble is hidden while this animates.
 
-function ZoomExpand({ anim, size, onDone }) {
+// Portaled to document.body with position:fixed so the expansion covers the FULL
+// screen — including the app header above the canvas container, whose
+// overflow:hidden used to clip it. `offset` translates the bubble's canvas-local
+// coordinates into viewport space. zIndex 35 sits above the transparent nav
+// (z-30) but below the + button (fixed z-40, above the zoom exactly as before)
+// and below editors/modals (z-50+), none of which can be open mid-zoom anyway.
+// Being a React portal, an interrupted zoom unmounts with the component — no
+// orphaned element is possible.
+function ZoomExpand({ anim, size, onDone, offset }) {
   if (!anim || !size.width) return null
 
   const { phase, cx, cy, r, color } = anim
   const rgb = hexToRgb(color)
+  const ox = offset?.left ?? 0
+  const oy = offset?.top ?? 0
 
   const bubbleRect = {
-    left: cx - r * BUB_HW, top: cy - r * BUB_HH,
+    left: ox + cx - r * BUB_HW, top: oy + cy - r * BUB_HH,
     width: r * 2 * BUB_HW, height: r * 2 * BUB_HH,
     borderRadius: bubbleCornerPx(r),
   }
-  const screenRect = { left: 0, top: 0, width: size.width, height: size.height, borderRadius: 0 }
+  const screenRect = { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight, borderRadius: 0 }
 
   const from = phase === 'in' ? bubbleRect : screenRect
   const to   = phase === 'in' ? screenRect : bubbleRect
 
-  return (
+  return createPortal(
     <motion.div
       style={{
-        position: 'absolute',
-        zIndex: 30,
+        position: 'fixed',
+        zIndex: 35,
         pointerEvents: 'none',
         background: `radial-gradient(135deg, rgba(255,255,255,0.18) 0%, rgba(${rgb},0.88) 55%, rgba(${rgb},0.97) 100%)`,
         boxShadow: `0 8px 40px rgba(${rgb},0.5), inset 0 1.5px 0 rgba(255,255,255,0.35)`,
@@ -2156,7 +2167,8 @@ function ZoomExpand({ anim, size, onDone }) {
       animate={to}
       transition={{ duration: 0.38, ease: [0.4, 0, 0.2, 1] }}
       onAnimationComplete={onDone}
-    />
+    />,
+    document.body
   )
 }
 
@@ -4705,8 +4717,17 @@ export default function BubbleVisualization({
           />
       )}
 
-      {/* ── ZoomExpand — outside swipe wrapper so it covers the header too ───── */}
-      <ZoomExpand anim={expandAnim} size={size} onDone={handleExpandDone} />
+      {/* ── ZoomExpand — portaled to body so it covers the whole screen, app
+             header included; offset maps canvas coords to the viewport ────────── */}
+      <ZoomExpand
+        anim={expandAnim}
+        size={size}
+        onDone={handleExpandDone}
+        offset={expandAnim ? (() => {
+          const rect = containerRef.current?.getBoundingClientRect()
+          return rect ? { left: rect.left, top: rect.top } : undefined
+        })() : undefined}
+      />
 
       {/* ── Selection delete bar — centered, clear of the + button ────────────── */}
       {selectMode && (
