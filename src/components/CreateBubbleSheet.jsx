@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
+import { useEscapeLayer, ESC_LEVEL, KEYBOARD_MEDIA_QUERY } from '../lib/escapeStack'
 import { BUBBLE_COLORS } from '../data/defaultData'
 import BubbleNameInput from './BubbleNameInput'
 import BubbleColorPicker from './BubbleColorPicker'
@@ -37,6 +37,10 @@ export default function CreateBubbleSheet({
   open, parentName, siblingNames = [], defaultColor, focusNonce, onCreate, onCancel,
 }) {
   const viewport = useVisualViewport()
+  // Desktop (fine pointer, hardware keyboard) vs touch — the same distinction the
+  // rest of the app draws with this query. Sampled per render; the sheet remounts
+  // its overlay on every open, which is when the answer matters.
+  const hasHardwareKeyboard = window.matchMedia(KEYBOARD_MEDIA_QUERY).matches
   const [name, setName] = useState('')
   const [color, setColor] = useState(defaultColor ?? BUBBLE_COLORS[0])
   const inputRef = useRef(null)
@@ -76,12 +80,22 @@ export default function CreateBubbleSheet({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.15 }}
-          className="fixed left-0 w-full flex items-center justify-center"
+          className={`fixed left-0 w-full flex justify-center ${hasHardwareKeyboard ? 'items-center' : 'items-start'}`}
           style={{
             zIndex: 70,
             background: 'rgba(0,0,0,0.6)',
             top: viewport.height == null ? 0 : viewport.top,
             height: viewport.height ?? '100%',
+            // Touch devices: anchored near the top rather than centred. iOS (webview
+            // and mobile Safari alike) decides whether to pan the page AT FOCUS TIME,
+            // from where the input sits in the full-height layout — a centred sheet
+            // puts it mid-screen, under the incoming software keyboard, and the whole
+            // canvas gets scrolled up to reveal it. This high the input is always
+            // clear of the keyboard, so no pan ever happens. Desktop has no software
+            // keyboard, and a sheet pinned to the top of a large window looks wrong,
+            // so it stays centred there. Not gated on isNativePlatform — mobile
+            // Safari at nubblenotes.com needs the fix as much as the app does.
+            ...(hasHardwareKeyboard ? {} : { paddingTop: 'calc(env(safe-area-inset-top, 0px) + 56px)' }),
           }}
           onClick={onCancel}
         >
