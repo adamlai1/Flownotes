@@ -2003,6 +2003,7 @@ export default function App() {
             if (!isDesktop) setSidebarOpen(false)
           }}
           onAddBubble={addBubble}
+          onSetBubbleLocked={setBubbleLocked}
           onRenameBubble={renameBubble}
           onDeleteBubble={deleteBubble}
           onMoveBubble={moveBubble}

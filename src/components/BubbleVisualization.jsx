@@ -14,6 +14,9 @@ import { usePreferences, NOTE_SIZE_SCALE } from '../contexts/PreferencesContext'
 import { useLock } from '../contexts/LockContext'
 import { useToast } from '../contexts/ToastContext'
 import { canShareNotes, copyNoteText, shareNoteText } from '../utils/noteShare'
+import {
+  LONG_PRESS_MENU_MS, DRAG_PICKUP_MS, DRAG_PICKUP_PAGED_MS, PRESS_MOVE_CANCEL_PX,
+} from '../utils/pressArbitration'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import ConfirmDialog from './ConfirmDialog'
 import BubbleColorPicker from './BubbleColorPicker'
@@ -2157,12 +2160,8 @@ function ZoomExpand({ anim, size, onDone }) {
 
 // ─── Layout constants & shared helpers ────────────────────────────────────────
 
-// Press-and-hold on an item without moving for this long opens its menu. It's
-// deliberately well past the drag threshold (100ms here, 220ms in paged mode): any
-// movement at all cancels the menu and the press stays a drag, so the two gestures
-// never compete. Raised by half from 500ms — the menu now carries a destructive action,
-// so it should take a deliberate hold to reach rather than a slightly slow tap.
-const LONG_PRESS_MENU_MS = 750
+// Press-and-hold timings live in utils/pressArbitration.js, shared with the
+// sidebar bubble list so the two long-press gestures can't drift apart.
 
 // ─── Long-press item menu ─────────────────────────────────────────────────────
 // Anchored at the press point and clamped to stay on screen. Stops its own pointer
@@ -3726,7 +3725,7 @@ export default function BubbleVisualization({
         dragInfoRef.current = { id: slot.id, type: slot.type, cx: slot.cx, cy: slot.cy, r: slot.r }
         setDraggingId(hit.id)
         dragRafRef.current = requestAnimationFrame(runDragFrame)
-      }, 220)
+      }, DRAG_PICKUP_PAGED_MS)
 
       // Keep holding without moving and the pick-up gives way to the item's menu.
       const menuX = e.clientX, menuY = e.clientY
@@ -3984,7 +3983,7 @@ export default function BubbleVisualization({
       dragInfoRef.current = { id: currentHit.id, type: currentHit.type, cx: currentHit.cx, cy: currentHit.cy, r: currentHit.r }
       setDraggingId(currentHit.id)
       dragRafRef.current = requestAnimationFrame(runDragFrame)
-    }, 100)
+    }, DRAG_PICKUP_MS)
 
     // Held in place (never moved) → give up the drag and open the item's menu.
     const menuX = e.clientX, menuY = e.clientY
@@ -4000,7 +3999,7 @@ export default function BubbleVisualization({
     if (menuTimerRef.current && pendingPointerRef.current) {
       const mdx = e.clientX - pendingPointerRef.current.startClientX
       const mdy = e.clientY - pendingPointerRef.current.startClientY
-      if (Math.hypot(mdx, mdy) > 9) {
+      if (Math.hypot(mdx, mdy) > PRESS_MOVE_CANCEL_PX) {
         clearTimeout(menuTimerRef.current)
         menuTimerRef.current = null
       }
@@ -4009,7 +4008,7 @@ export default function BubbleVisualization({
     if (pendingPointerRef.current && !dragActivatedRef.current) {
       const dx = e.clientX - pendingPointerRef.current.startClientX
       const dy = e.clientY - pendingPointerRef.current.startClientY
-      if (Math.hypot(dx, dy) > 9) {
+      if (Math.hypot(dx, dy) > PRESS_MOVE_CANCEL_PX) {
         clearTimeout(longPressTimerRef.current)
         longPressTimerRef.current = null
         pendingPointerRef.current = null

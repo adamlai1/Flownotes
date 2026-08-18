@@ -19,6 +19,7 @@ export default function Sidebar({
   onDeleteBubble,
   onMoveBubble,
   onChangeBubbleColor,
+  onSetBubbleLocked,
   onUpdateCustomTagColors,
   onDeleteCustomTag,
   onRenameCustomTag,
@@ -220,7 +221,9 @@ export default function Sidebar({
           </button>
         </div>
 
-        <div style={{ flex: 1, overflowY: 'scroll', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'none', touchAction: 'pan-y', paddingBottom: '300px' }}>
+        {/* overscroll-behavior: contain (not none) — chaining to the page behind is
+            still blocked, but the list itself keeps iOS rubber-band bounce. */}
+        <div style={{ flex: 1, overflowY: 'scroll', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain', touchAction: 'pan-y', paddingBottom: '300px' }}>
 
           {/* Bubbles section */}
           <div className="px-3 pt-4 pb-2">
@@ -290,6 +293,7 @@ export default function Sidebar({
                 onDeleteBubble={onDeleteBubble}
                 onMoveBubble={onMoveBubble}
                 onChangeBubbleColor={onChangeBubbleColor}
+                onSetBubbleLocked={onSetBubbleLocked}
                 onAddChildBubble={(parentId) => {
                   setNewBubbleParentId(parentId)
                   setAddingBubble(true)
