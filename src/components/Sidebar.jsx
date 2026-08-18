@@ -214,11 +214,17 @@ export default function Sidebar({
           <button
             onClick={() => { onSelectBubble(null); onClose() }}
             className={`flex-1 text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 mr-2 ${
-              activeBubbleId === null
-                ? 'bg-indigo-950 text-indigo-400'
-                : 'text-gray-400 hover:bg-gray-800'
+              activeBubbleId === null ? '' : 'text-gray-400 hover:bg-gray-800'
             }`}
-            style={{ WebkitTapHighlightColor: 'transparent', outline: 'none' }}
+            style={{
+              WebkitTapHighlightColor: 'transparent',
+              outline: 'none',
+              // EXPERIMENT (neutral scheme): the active pill was saturated indigo
+              // ('bg-indigo-950 text-indigo-400'); the project isn't a bubble and has
+              // no colour, so it gets a neutral raised treatment instead. Revert by
+              // restoring those classes and dropping these two style props.
+              ...(activeBubbleId === null ? { background: 'var(--hover)', color: 'var(--text)' } : {}),
+            }}
           >
             <svg className="w-4 h-4 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}

@@ -1,4 +1,4 @@
-@tailwind base;
+﻿@tailwind base;
 @tailwind components;
 @tailwind utilities;
 
@@ -6,10 +6,13 @@
 :root {
   /* --bg is the canvas underlay and must equal the dark canvas gradient's OUTER stop
      (see BubbleVisualization) — the seam colours anchor to the gradient, not vice versa. */
-  --bg:          #19191A;
+  /* EXPERIMENT: pitch-black test — was #19191A. */
+  --bg:          #000000;
   --surface:     #1C1C1E;
   --surface-2:   #2C2C2E;
-  --sidebar:     #111827;
+  /* EXPERIMENT (neutral scheme): was #111827 (navy-tinted) — now the same neutral
+     dark as the canvas shell. Revert by restoring the old value. */
+  --sidebar:     #1C1C1E;
   --card:        #111827;
   --text:        #ffffff;
   --text-2:      rgba(255,255,255,0.7);
@@ -130,7 +133,7 @@
     min-height: 100dvh;
     margin: 0;
     padding: 0;
-    background-color: #19191A; /* = dark gradient outer stop */
+    background-color: #000000; /* EXPERIMENT: pitch-black test — was #19191A (= dark gradient outer stop) */
     overscroll-behavior: none;
   }
   html[data-theme="light"] {
@@ -140,7 +143,7 @@
     min-height: 100dvh;
     margin: 0;
     padding: 0;
-    background-color: #19191A; /* = dark gradient outer stop */
+    background-color: #000000; /* EXPERIMENT: pitch-black test — was #19191A (= dark gradient outer stop) */
     color: var(--text);
     touch-action: manipulation;
     overscroll-behavior: none;
@@ -152,7 +155,7 @@
     min-height: 100dvh;
     margin: 0;
     padding: 0;
-    background-color: #19191A; /* = dark gradient outer stop */
+    background-color: #000000; /* EXPERIMENT: pitch-black test — was #19191A (= dark gradient outer stop) */
     touch-action: manipulation;
   }
   [data-theme="light"] #root {

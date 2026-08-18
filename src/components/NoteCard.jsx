@@ -57,15 +57,19 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
   return (
     <div
       onClick={selectMode ? onToggleSelect : onClick}
-      className="relative bg-gray-900 rounded-xl shadow-sm hover:shadow-md transition-all cursor-pointer group p-4"
+      className="relative rounded-xl shadow-sm hover:shadow-md transition-all cursor-pointer group p-4"
       style={{
-        border: `1px solid ${selected ? '#6366f1' : 'rgb(31,41,55)'}`,
+        // Neutral surface (was navy bg-gray-900 with a gray-800 border). The
+        // selection ring keeps the app-wide indigo — it marks a functional state,
+        // same as the canvas SelectionOverlay.
+        background: 'var(--surface)',
+        border: `1px solid ${selected ? '#6366f1' : 'var(--border)'}`,
         boxShadow: selected ? '0 0 0 1px #6366f1' : undefined,
       }}
     >
       {/* Pin icon — hidden in select mode (menu/checkbox take that corner) */}
       {pinned && !selectMode && (
-        <svg className="absolute top-3 right-9 w-3.5 h-3.5 text-indigo-400" viewBox="0 0 24 24" fill="currentColor">
+        <svg className="absolute top-3 right-9 w-3.5 h-3.5 text-gray-400" viewBox="0 0 24 24" fill="currentColor">
           <path d="M16 12V4h1V2H7v2h1v8l-2 2v2h5v6h2v-6h5v-2l-2-2z" />
         </svg>
       )}
@@ -101,7 +105,10 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
       {showMenu && !selectMode && (
         <>
           <div className="fixed inset-0 z-10" onClick={e => { e.stopPropagation(); setShowMenu(false) }} />
-          <div className="absolute top-8 right-3 bg-gray-900 rounded-lg shadow-lg border border-gray-800 z-20 py-1 min-w-[120px]">
+          <div
+            className="absolute top-8 right-3 rounded-lg shadow-lg z-20 py-1 min-w-[120px]"
+            style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+          >
             <button
               onClick={e => { e.stopPropagation(); onTogglePin?.(); setShowMenu(false) }}
               className="w-full text-left px-3 py-2 text-sm text-gray-300 hover:bg-gray-800"
@@ -167,54 +174,61 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
         )}
       </div>
 
-      {/* Timestamp */}
-      <p className="text-xs text-gray-400 mt-2">{formatDate(note.created_at)}</p>
-
-      {/* Bubble badges */}
-      {noteBubbles.length > 0 && (
-        <div className="flex flex-wrap gap-1.5 mt-2">
-          {noteBubbles.map(bubble => (
-            <span
-              key={bubble.id}
-              className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium"
-              style={{
-                backgroundColor: bubble.color + '22',
-                color: bubble.color,
-                border: `1px solid ${bubble.color}44`,
-              }}
-            >
-              {bubble.name}
-            </span>
-          ))}
-        </div>
-      )}
-
-      {/* Tags — displayed as hashtags to visually distinguish from bubble pills */}
-      {!locked && note.tags.length > 0 && (
-        <div className="flex flex-wrap gap-2 mt-2">
-          {note.tags.map(tag => {
-            const color = TAG_COLORS[tag] || customTagColors[tag]
-            return (
+      {/* Timestamp (left) + bubble badges (bottom-right, same line) */}
+      <div className="flex items-end justify-between gap-2 mt-2">
+        <p className="text-xs text-gray-400 flex-shrink-0">{formatDate(note.created_at)}</p>
+        {noteBubbles.length > 0 && (
+          <div className="flex flex-wrap justify-end gap-1.5 min-w-0">
+            {noteBubbles.map(bubble => (
               <span
-                key={tag}
-                className="text-xs font-medium"
-                style={{ color: color || 'rgb(107,114,128)' }}
+                key={bubble.id}
+                className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium max-w-[9rem]"
+                style={{
+                  backgroundColor: bubble.color + '22',
+                  color: bubble.color,
+                  border: `1px solid ${bubble.color}44`,
+                }}
               >
-                #{tag}
+                <span className="truncate">{bubble.name}</span>
               </span>
-            )
-          })}
-        </div>
-      )}
+            ))}
+          </div>
+        )}
+      </div>
 
-      {/* Connections indicator — counts both forward and reverse connections */}
-      {totalConnectionCount > 0 && (
-        <div className="flex items-center gap-1 mt-2 text-xs text-gray-400">
-          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-              d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
-          </svg>
-          {totalConnectionCount} connection{totalConnectionCount !== 1 ? 's' : ''}
+      {/* Bottom row: tags bottom-left as a compact hashtag cluster (first 3 +
+          "+N" overflow count — wrapping would grow the card), connections
+          indicator on the right. */}
+      {(totalConnectionCount > 0 || (!locked && note.tags.length > 0)) && (
+        <div className="flex items-end justify-between gap-2 mt-2">
+          {!locked && note.tags.length > 0 ? (
+            <div className="flex items-center gap-x-2 min-w-0">
+              {note.tags.slice(0, 3).map(tag => {
+                const color = TAG_COLORS[tag] || customTagColors[tag]
+                return (
+                  <span
+                    key={tag}
+                    className="text-xs font-medium truncate max-w-[8rem]"
+                    style={{ color: color || 'rgb(107,114,128)' }}
+                  >
+                    #{tag}
+                  </span>
+                )
+              })}
+              {note.tags.length > 3 && (
+                <span className="text-xs text-gray-500 flex-shrink-0">+{note.tags.length - 3}</span>
+              )}
+            </div>
+          ) : <span />}
+          {totalConnectionCount > 0 && (
+            <div className="flex items-center gap-1 text-xs text-gray-400 flex-shrink-0">
+              <svg className="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                  d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+              </svg>
+              {totalConnectionCount} connection{totalConnectionCount !== 1 ? 's' : ''}
+            </div>
+          )}
         </div>
       )}
 

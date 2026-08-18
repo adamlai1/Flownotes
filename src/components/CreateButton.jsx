@@ -23,12 +23,21 @@ const SIZE = 56
 // button apart (solid tile vs lit glass); the silhouette now does too.
 const RADIUS = Math.round(SIZE * 0.29)
 
-// One flat indigo, the accent the rest of the app already uses. No ramp, no edge light,
-// no translucency: the button shares the bubbles' silhouette, so MATERIAL is what has to
-// tell them apart. Bubbles are lit glass — gradient, backdrop blur, coloured glow. This is
-// a solid opaque tile that casts an ordinary shadow, which is what makes it read as a
-// control sitting on top of the canvas rather than one more thing floating in it.
-const INDIGO = '#4F46E5' // indigo-600
+// One flat colour. No ramp, no edge light, no translucency: the button shares the
+// bubbles' silhouette, so MATERIAL is what has to tell them apart. Bubbles are lit
+// glass — gradient, backdrop blur, coloured glow. This is a solid opaque tile that
+// casts an ordinary shadow, which is what makes it read as a control sitting on top
+// of the canvas rather than one more thing floating in it.
+const INDIGO = '#4F46E5' // indigo-600 — the previous colour, kept as the revert value
+
+// EXPERIMENT (neutral scheme): the indigo read purple-leaning against the neutral
+// canvas; these are two truer-blue candidates for the primary action. Flip the
+// variant to compare; 'indigo' restores the old colour exactly.
+//   'ios'  — iOS system blue (#007AFF light / #0A84FF dark, per Apple's own pair)
+//   'deep' — a slightly deeper blue (#2563EB, Tailwind blue-600)
+//   'navy' — deeper still (#1D4ED8, Tailwind blue-700)
+//   'navy2' — darker again (#1E40AF, Tailwind blue-800)
+const PLUS_COLOR_VARIANT = 'navy2' // 'ios' | 'deep' | 'navy' | 'navy2' | 'indigo'
 
 export default function CreateButton({
   held,
@@ -41,6 +50,13 @@ export default function CreateButton({
   const { theme } = useTheme()
   const isLight = theme === 'light'
   const [pressed, setPressed] = useState(false)
+
+  const fill = PLUS_COLOR_VARIANT === 'ios'
+    ? (isLight ? '#007AFF' : '#0A84FF')
+    : PLUS_COLOR_VARIANT === 'deep' ? '#2563EB'
+    : PLUS_COLOR_VARIANT === 'navy' ? '#1D4ED8'
+    : PLUS_COLOR_VARIANT === 'navy2' ? '#1E40AF'
+    : INDIGO
 
   // A plain drop shadow — dark, soft, offset downward. Deliberately NOT a glow: glow is
   // the bubbles' signal, and anything indigo bleeding out of these edges would put the
@@ -102,7 +118,7 @@ export default function CreateButton({
           position: 'absolute',
           inset: 0,
           borderRadius: RADIUS,
-          background: INDIGO,
+          background: fill,
           boxShadow: shadow,
           display: 'flex',
           alignItems: 'center',

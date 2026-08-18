@@ -11,6 +11,16 @@ import {
   LONG_PRESS_MENU_MS, DRAG_PICKUP_PAGED_MS, PRESS_MOVE_CANCEL_PX,
 } from '../utils/pressArbitration'
 
+// EXPERIMENT (neutral scheme): selected-row treatment, switchable for comparison.
+//   'tint'   — low-opacity wash of the bubble's own colour as the row background
+//   'accent' — 3px bar of the bubble's full colour on the left, neutral background
+//   'indigo' — the previous treatment (bg-indigo-950 text-indigo-400), i.e. revert
+// In 'tint' and 'accent' the label keeps the theme's normal text colour, so
+// readability never depends on the user-chosen bubble colour — the colour only
+// appears as a translucent wash or a thin bar. A gated (locked) selected row
+// falls back to the neutral hover tone so the tint can't leak the hidden colour.
+const SELECTED_ROW_VARIANT = 'tint'
+
 // Shared drag state for the whole tree. Provided by BubbleTree, consumed by every
 // BubbleNode and RootDropZone so they can start drags and render drop indicators.
 const DragContext = createContext(null)
@@ -202,9 +212,20 @@ function BubbleNode({
               gated ? onRequestUnlock?.(bubble) : onSelectBubble(bubble.id)
             }}
             className={`flex-1 flex items-center gap-2 px-2 py-1.5 rounded-lg text-base transition-colors text-left min-w-0 ${
-              isSelected ? 'bg-indigo-950 text-indigo-400 font-medium' : 'text-gray-300 hover:bg-gray-800'
+              isSelected
+                ? (SELECTED_ROW_VARIANT === 'indigo' ? 'bg-indigo-950 text-indigo-400 font-medium' : 'font-medium')
+                : 'text-gray-300 hover:bg-gray-800'
             }`}
-            style={{ minHeight: 38 }}
+            style={{
+              minHeight: 38,
+              ...(isSelected && SELECTED_ROW_VARIANT !== 'indigo'
+                ? gated
+                  ? { background: 'var(--hover)', color: 'var(--text)' }
+                  : SELECTED_ROW_VARIANT === 'tint'
+                    ? { background: `${bubble.color}26`, color: 'var(--text)' }
+                    : { background: 'var(--hover)', color: 'var(--text)', boxShadow: `inset 3px 0 0 0 ${bubble.color}` }
+                : {}),
+            }}
           >
             <span
               className="w-2.5 h-2.5 rounded-full flex-shrink-0"

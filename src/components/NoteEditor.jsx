@@ -469,7 +469,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         position: 'relative',
         width: '100%',
         maxWidth: 820,
-        background: 'var(--surface)',
+        // EXPERIMENT (neutral scheme): was var(--surface) — the panel matches the
+        // pitch-black ground so the bare header doesn't read as a black band on a
+        // lighter panel (both branches below).
+        background: 'var(--bg)',
         display: 'grid',
         gridTemplateRows: 'auto 1fr',
         gridTemplateColumns: 'minmax(0, 1fr)',
@@ -478,7 +481,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         borderRight: '1px solid var(--border)',
       } : {
         position: 'absolute', top: 0, right: 0, bottom: 0, left: 0,
-        background: 'var(--surface)',
+        background: 'var(--bg)',
         display: 'grid', gridTemplateRows: 'auto 1fr',
         gridTemplateColumns: 'minmax(0, 1fr)', overflow: 'hidden',
         transform: `translateX(${swipeOffset}px)`, transition: swipeTransition,
@@ -490,12 +493,14 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       onTouchEnd={!isDesktop ? handleTouchEnd : undefined}
     >
       {/* ── Header — grid row 1 (auto height, never scrolls) ─────────────────── */}
+      {/* EXPERIMENT (neutral scheme): header had a border-b divider and painted
+          var(--surface); now bare on the panel ground like the canvas header. */}
       <div
         ref={headerRowRef}
-        className="relative flex items-center px-3 border-b border-white/10"
+        className="relative flex items-center px-3"
         style={{
           paddingTop: 'max(12px, env(safe-area-inset-top))', paddingBottom: 10,
-          background: 'var(--surface)',
+          background: 'var(--bg)',
         }}
       >
         <button

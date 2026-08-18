@@ -245,7 +245,10 @@ export default function MainView({
       style={{ background: 'var(--bg)', WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
     >
       {/* Sticky header + filters */}
-      <div className="sticky top-0 z-10 bg-[#1C1C1E]">
+      {/* EXPERIMENT (neutral scheme): was bg-[#1C1C1E] — now the bare ground, same
+          as the canvas header treatment. Still opaque so scrolling cards vanish
+          under it rather than showing through. */}
+      <div className="sticky top-0 z-10" style={{ background: 'var(--bg)' }}>
         <div className="px-4 md:px-6">
           {/* Title row — h-[52px] matches bubble view sub-bar height exactly */}
           <div className="flex items-center justify-between" style={{ height: 52 }}>
