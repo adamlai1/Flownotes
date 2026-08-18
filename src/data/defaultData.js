@@ -174,7 +174,7 @@ export function createDefaultProject() {
   const now = new Date().toISOString()
   return {
     id: defaultProjectId,
-    name: 'Personal Notes',
+    name: 'My Notes',
     created_at: now,
     bubbles: SEED_BUBBLES.map(b => ({ ...b })),
     notes: [

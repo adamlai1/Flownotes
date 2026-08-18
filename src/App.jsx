@@ -183,7 +183,15 @@ const SEED_ROOT_BUBBLES = {
   'To Do': SEED_TODO_ID,
   'Journal': SEED_JOURNAL_ID,
 }
+// Every name the seed project has EVER shipped with. The name gate in
+// migrateSeedIds below (twin-fold residue detection and legacy-id adoption
+// alike) matches against all of them, so renaming the default can never make
+// an older install's seed project stop folding. SAME RULE as SEED_NOTE_TEXTS:
+// when the default project name changes, append the new name here — never
+// remove an entry. Existing users' projects are never renamed; only
+// createDefaultProject uses the current name, and only for new data.
 const SEED_PROJECT_NAME = 'Personal Notes'
+const SEED_PROJECT_NAMES = [SEED_PROJECT_NAME, 'My Notes']
 
 // generateId() output only — never 'seed:*', never the '__root__' sentinel.
 const isLegacyId = id => typeof id === 'string' && /^[0-9a-z]+$/.test(id)
@@ -234,7 +242,7 @@ function migrateSeedIds(projects) {
   // the furniture check — the original adoption rule, unchanged.
   const canonicalExists = projects.some(p => p.id === SEED_PROJECT_ID)
   for (const p of projects) {
-    if (p.id === SEED_PROJECT_ID || p.name !== SEED_PROJECT_NAME || !isLegacyId(p.id)) continue
+    if (p.id === SEED_PROJECT_ID || !SEED_PROJECT_NAMES.includes(p.name) || !isLegacyId(p.id)) continue
     const firstWithoutCanonical = !canonicalExists && projectIdMap.size === 0
     if (firstWithoutCanonical || seedBubbleMap(p.bubbles ?? []).size > 0) {
       projectIdMap.set(p.id, SEED_PROJECT_ID)
@@ -2093,7 +2101,7 @@ export default function App() {
           const backLabel = prevNote
             ? (noteTitle(prevNote) || 'Untitled')
             : viewMode === 'chronological'
-              ? 'Notes'
+              ? 'All Notes'
               : currentBubbleId
                 ? (activeProject.bubbles.find(b => b.id === currentBubbleId)?.name ?? activeProject.name)
                 : activeProject.name
