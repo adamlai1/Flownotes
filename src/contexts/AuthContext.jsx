@@ -29,16 +29,16 @@ export function AuthProvider({ children }) {
     return () => subscription.unsubscribe()
   }, [])
 
-  async function signInWithGoogle() {
+  async function signInWithProvider(provider, queryParams) {
     if (Capacitor.isNativePlatform()) {
       // The session comes back through the appUrlOpen listener in nativeAuth.js,
       // not a page redirect — so ask Supabase for the URL and open it ourselves.
       const { data, error } = await supabase.auth.signInWithOAuth({
-        provider: 'google',
+        provider,
         options: {
           redirectTo: AUTH_CALLBACK_URL,
           skipBrowserRedirect: true,
-          queryParams: { prompt: 'select_account' },
+          ...(queryParams ? { queryParams } : {}),
         },
       })
       if (error) throw error
@@ -46,12 +46,20 @@ export function AuthProvider({ children }) {
       return { data, error }
     }
     return supabase.auth.signInWithOAuth({
-      provider: 'google',
+      provider,
       options: {
         redirectTo: window.location.origin,
-        queryParams: { prompt: 'select_account' },
+        ...(queryParams ? { queryParams } : {}),
       },
     })
+  }
+
+  function signInWithGoogle() {
+    return signInWithProvider('google', { prompt: 'select_account' })
+  }
+
+  function signInWithApple() {
+    return signInWithProvider('apple')
   }
 
   function signOut() {
@@ -64,7 +72,7 @@ export function AuthProvider({ children }) {
   }
 
   return (
-    <AuthContext.Provider value={{ user, loading, guestMode, signInWithGoogle, signOut, continueAsGuest }}>
+    <AuthContext.Provider value={{ user, loading, guestMode, signInWithGoogle, signInWithApple, signOut, continueAsGuest }}>
       {children}
     </AuthContext.Provider>
   )

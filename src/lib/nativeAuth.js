@@ -41,7 +41,7 @@ async function handleAuthCallback(url) {
       throw new Error(providerError || 'Sign-in callback contained no credentials')
     }
   } catch (e) {
-    reportAuthError(`Google sign-in failed: ${e?.message || e}`)
+    reportAuthError(`Sign-in failed: ${e?.message || e}`)
   } finally {
     // Dismiss the in-app browser either way — on failure the error is shown in the
     // app, and leaving the browser sheet up would hide it.
