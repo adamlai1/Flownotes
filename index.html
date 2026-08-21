@@ -15,8 +15,43 @@
          region blends into the nav. Kept in step by ThemeContext.applyTheme. -->
     <meta name="theme-color" content="#000000" />
     <meta name="apple-mobile-web-app-title" content="Nubble" />
-    <meta name="description" content="Nubble" />
+    <meta name="description" content="Your notes, mapped the way you think. Dive into bubbles, connect ideas, and watch your thinking take shape." />
     <title>Nubble</title>
+    <script>
+      // Splash gate. Decides synchronously — before first paint — whether this
+      // visit goes straight into the app (stamping data-nubble-app, which CSS
+      // uses to hide #splash) or sees the public splash at the bottom of <body>.
+      // Runs in <head> so returning users never get a flash of the splash.
+      (function () {
+        try {
+          var isApp =
+            // Capacitor native shell serves this same file over capacitor://
+            // — App Store users must never see the splash (or its badge).
+            !/^https?:$/.test(location.protocol) ||
+            // Installed PWA (start_url "/") — straight to the app.
+            (window.matchMedia && matchMedia('(display-mode: standalone)').matches) ||
+            window.navigator.standalone === true ||
+            // Mid-OAuth: Supabase redirects back to the origin root with the
+            // session in the URL before anything is in localStorage.
+            /access_token=|error_description=/.test(location.hash) ||
+            /[?&]code=/.test(location.search)
+          if (!isApp) {
+            for (var i = 0; i < localStorage.length; i++) {
+              var k = localStorage.key(i)
+              if (
+                k === 'guestMode' ||           // chose "Continue as Guest" before
+                k === 'mindmap-projects' ||    // has data on this device
+                (k.indexOf('sb-') === 0 && k.indexOf('-auth-token') > 0) // Supabase session
+              ) { isApp = true; break }
+            }
+          }
+          if (isApp) document.documentElement.setAttribute('data-nubble-app', '')
+        } catch (e) {
+          // localStorage blocked: fall through to the app, same as today.
+          document.documentElement.setAttribute('data-nubble-app', '')
+        }
+      })()
+    </script>
     <script>
       window.onerror = function(msg, url, line, col, error) {
         document.body.innerHTML = '<div style="color:red;padding:20px;font-size:16px;font-family:monospace;white-space:pre-wrap;">' + msg + '<br>Line: ' + line + '<br>File: ' + url + (error && error.stack ? '<br><br>' + error.stack : '') + '</div>';
@@ -25,6 +60,77 @@
   </head>
   <body>
     <div id="root"></div>
+
+    <!-- Public splash for brand-new anonymous visitors. Static HTML so crawlers
+         (Google's OAuth brand verifier) see the name, description, and links
+         without executing JS. The app mounts into #root underneath regardless,
+         so "Continue in browser" just removes this overlay and lands exactly
+         where the root lands today. Hidden before paint via the head gate. -->
+    <div id="splash">
+      <style>
+        html[data-nubble-app] #splash { display: none; }
+        #splash {
+          position: fixed; inset: 0; z-index: 9999;
+          display: flex; flex-direction: column; align-items: center; justify-content: center;
+          gap: 28px; padding: 32px 24px calc(24px + env(safe-area-inset-bottom));
+          background: #000; color: #fff; text-align: center;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        #splash h1 { font-size: 44px; font-weight: 700; margin: 0; letter-spacing: -0.02em; }
+        #splash .tagline { font-size: 17px; color: #9ca3af; margin: 10px 0 0; max-width: 22em; line-height: 1.5; }
+        #splash .canvas { position: relative; width: min(340px, 82vw); aspect-ratio: 340 / 200; }
+        #splash .bub {
+          position: absolute; aspect-ratio: 2 / 1.33;
+          display: flex; align-items: center; justify-content: center;
+          color: #fff; font-weight: 500;
+          /* Corner radius 22% of the card's height at any scale (14.6% of width = 22% of height at 2:1.33) */
+          border-radius: 14.6% / 22%;
+          border: 1.5px solid rgba(255,255,255,0.28);
+          animation: bub-float 5s ease-in-out infinite;
+        }
+        @keyframes bub-float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-4px); } }
+        @media (prefers-reduced-motion: reduce) { #splash .bub { animation: none; } }
+        #splash .actions { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+        #splash .badge {
+          display: inline-flex; align-items: center; gap: 10px;
+          background: #000; color: #fff; text-decoration: none;
+          border: 1px solid #6b7280; border-radius: 10px; padding: 8px 16px;
+        }
+        #splash .badge svg { width: 24px; height: 24px; }
+        #splash .badge .lines { text-align: left; line-height: 1.15; }
+        #splash .badge .lines small { display: block; font-size: 10px; color: #d1d5db; }
+        #splash .badge .lines span { font-size: 17px; font-weight: 600; }
+        #splash .continue {
+          background: none; border: none; cursor: pointer;
+          color: #9ca3af; font: inherit; font-size: 15px; padding: 6px;
+          text-decoration: underline; text-underline-offset: 3px;
+        }
+        #splash .continue:hover { color: #e5e7eb; }
+        #splash footer { position: absolute; bottom: calc(16px + env(safe-area-inset-bottom)); font-size: 13px; }
+        #splash footer a { color: #6b7280; text-decoration: none; margin: 0 10px; }
+        #splash footer a:hover { color: #9ca3af; }
+      </style>
+      <main>
+        <h1>Nubble</h1>
+        <p class="tagline">Your notes, mapped the way you think. Dive into bubbles, connect ideas, and watch your thinking take shape.</p>
+      </main>
+      <!-- Bubble cards injected at build/serve time from SEED_BUBBLES — see the
+           splashSeedBubbles plugin in vite.config.js. -->
+      <div class="canvas" aria-hidden="true"><!--@splash-seed-bubbles@--></div>
+      <div class="actions">
+        <a class="badge" href="https://apps.apple.com/us/app/nubble-notes/id6797114391" target="_blank" rel="noopener">
+          <svg viewBox="0 0 384 512" fill="currentColor" aria-hidden="true">
+            <path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/>
+          </svg>
+          <span class="lines"><small>Download on the</small><span>App Store</span></span>
+        </a>
+        <button class="continue" onclick="document.getElementById('splash').remove()">Continue in browser</button>
+      </div>
+      <footer>
+        <a href="/privacy.html">Privacy</a><a href="/support.html">Support</a>
+      </footer>
+    </div>
+
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

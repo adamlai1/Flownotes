@@ -103,8 +103,9 @@ export function leastUsedBubbleColor(siblingColors = [], projectColors = []) {
 // what they have.
 // Static templates shared by createDefaultProject and the pristine checks
 // below, so "what the app seeds" and "what counts as untouched" can never
-// drift apart.
-const SEED_BUBBLES = [
+// drift apart. Exported for the splash-page generator in vite.config.js,
+// which draws the public splash's bubbles from the same list.
+export const SEED_BUBBLES = [
   { id: ideasId, name: 'Ideas', parent_id: null, color: '#6366f1' },
   { id: toDoId, name: 'To Do', parent_id: null, color: '#22c55e' },
   { id: journalId, name: 'Journal', parent_id: null, color: '#14b8a6' },
