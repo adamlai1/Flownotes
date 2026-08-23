@@ -62,8 +62,8 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
         // Neutral surface (was navy bg-gray-900 with a gray-800 border). The
         // selection ring keeps the app-wide indigo — it marks a functional state,
         // same as the canvas SelectionOverlay.
-        background: 'var(--surface)',
-        border: `1px solid ${selected ? '#6366f1' : 'var(--border)'}`,
+        background: 'var(--card-surface)',
+        border: `1px solid ${selected ? '#6366f1' : 'var(--card-border)'}`,
         boxShadow: selected ? '0 0 0 1px #6366f1' : undefined,
       }}
     >

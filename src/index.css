@@ -10,6 +10,15 @@
   --bg:          #000000;
   --surface:     #1C1C1E;
   --surface-2:   #2C2C2E;
+  /* Card/object surfaces (canvas bubbles & notes, All Notes cards): must stay
+     between --bg (#000000) and --surface so cards read as objects on the black
+     canvas, not as a grey theme. Nudge this one value to tune card lift. */
+  --card-surface: #121214;
+  /* Card borders, same three surfaces. With --card-surface lifted, the fill
+     carries definition — keep this faint so cards read as solid objects, not
+     outlined boxes. Revert: bubbles/notes were rgba(255,255,255,0.28), All
+     Notes cards used --border (0.1). Drag-highlight borders stay separate. */
+  --card-border: rgba(255,255,255,0.12);
   /* EXPERIMENT (neutral scheme): was #111827 (navy-tinted) — now the same neutral
      dark as the canvas shell. Revert by restoring the old value. */
   --sidebar:     #1C1C1E;
@@ -34,6 +43,8 @@
   --surface-2:   #EEEEE8;
   --sidebar:     #EEEEE8;
   --card:        #FAFAF7;
+  --card-surface: #FAFAF7;
+  --card-border: rgba(0,0,0,0.1);
   --text:        #2C2C2E;
   --text-2:      rgba(44,44,46,0.65);
   --text-muted:  #8E8E93;

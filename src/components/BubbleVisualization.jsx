@@ -1760,14 +1760,16 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating
           width: '100%',
           height: '100%',
           borderRadius: bubbleCornerPx(item.r),
-          background: isLight
-            ? solidBg
-            : `radial-gradient(135deg, rgba(255,255,255,0.24) 0%, rgba(${rgb},0.22) 55%, rgba(${rgb},0.07) 100%)`,
+          // Dark: the previous glass gradient was invalid CSS (an angle in
+          // radial-gradient), so the declaration was dropped and cards were
+          // transparent over the black canvas. --card-surface is the intended
+          // object surface.
+          background: isLight ? solidBg : 'var(--card-surface)',
           backdropFilter: isLight ? 'none' : 'blur(24px)',
           WebkitBackdropFilter: isLight ? 'none' : 'blur(24px)',
           border: isLight
             ? `1.5px solid rgba(${rgb},${isDragging ? '0.7' : '0.5'})`
-            : `1.5px solid ${isDragging ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.28)'}`,
+            : `1.5px solid ${isDragging ? 'rgba(255,255,255,0.55)' : 'var(--card-border)'}`,
           boxShadow: isDragging
             ? `0 20px 60px rgba(${rgb},${isLight ? '0.45' : '0.7'}), 0 6px 20px rgba(0,0,0,${isLight ? '0.12' : '0.5'})`
             : `0 8px 32px rgba(${rgb},${isLight ? '0.35' : '0.42'}), 0 2px 10px rgba(0,0,0,${isLight ? '0.08' : '0.3'})`,
@@ -2016,16 +2018,18 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
           width: '100%',
           height: '100%',
           borderRadius: `${CORNER_RATIO * 100}%`,
+          // Dark 'glass': like the bubble cards, the old gradient here was invalid
+          // CSS and never rendered — cards were transparent over the black canvas.
           background: isLight
             ? solidBg
             : NOTE_CARD_SURFACE === 'flat'
               ? 'var(--surface-2)'
-              : `radial-gradient(135deg, rgba(255,255,255,0.24) 0%, rgba(${rgb},0.22) 55%, rgba(${rgb},0.07) 100%)`,
+              : 'var(--card-surface)',
           backdropFilter: isLight || NOTE_CARD_SURFACE === 'flat' ? 'none' : 'blur(24px)',
           WebkitBackdropFilter: isLight || NOTE_CARD_SURFACE === 'flat' ? 'none' : 'blur(24px)',
           border: isLight
             ? `1.5px solid rgba(${rgb},${isDragging ? '0.7' : '0.5'})`
-            : `1.5px solid ${isDragging ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.28)'}`,
+            : `1.5px solid ${isDragging ? 'rgba(255,255,255,0.55)' : 'var(--card-border)'}`,
           boxShadow: isDragging
             ? `0 16px 40px rgba(0,0,0,${isLight ? '0.16' : '0.5'})`
             : `0 4px 14px rgba(0,0,0,${isLight ? '0.1' : '0.3'}), 0 1px 4px rgba(0,0,0,${isLight ? '0.07' : '0.2'})`,
