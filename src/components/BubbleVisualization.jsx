@@ -3043,15 +3043,22 @@ export default function BubbleVisualization({
       navTimerRef.current = null
     }
     setExpandAnim(null)
-    // Root sentinel — navigate back to the top level
-    if (navigateToBubbleId.startsWith?.('root:')) {
+    // The command is an OBJECT ({ id, nonce }) so every issue is a fresh
+    // reference and this effect fires even when the target repeats — the old
+    // bare-id form was subject to React's same-value bailout, which silently
+    // ate a re-selection of the last-commanded bubble after the canvas had
+    // navigated elsewhere on its own. The legacy string forms are still
+    // accepted so a stray old-style command can't crash navigation.
+    const target = typeof navigateToBubbleId === 'object' ? navigateToBubbleId.id : navigateToBubbleId
+    // Root command — navigate back to the top level
+    if (target === null || target?.startsWith?.('root:')) {
       setNavDir('out')
       setNavStack([])
       return
     }
     // Build path from root down to the target bubble
     const path = []
-    let id = navigateToBubbleId
+    let id = target
     while (id !== null && id !== undefined) {
       const bubble = project.bubbles.find(b => b.id === id)
       if (!bubble) break

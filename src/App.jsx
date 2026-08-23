@@ -2140,7 +2140,7 @@ export default function App() {
           if (viewMode === 'bubble' && currentBubbleId === null) return
           setSelectedBubbleId(null)
           setViewMode('bubble')
-          setNavigateBubbleId('root:' + Date.now())
+          setNavigateBubbleId({ id: null, nonce: Date.now() })
         }}
         atProjectRoot={viewMode === 'bubble' && currentBubbleId === null}
         controlsSlotRef={setHeaderControlsEl}
@@ -2161,7 +2161,12 @@ export default function App() {
           onSelectBubble={(id) => {
             setSelectedBubbleId(id)
             setViewMode('bubble')
-            setNavigateBubbleId(id !== null ? id : 'root:' + Date.now())
+            // Command OBJECT, not the bare id: a fresh object every click, so
+            // re-selecting the same bubble still fires. With the bare id,
+            // React's same-value bailout silently dropped the command after
+            // the canvas had navigated away internally (back swipe/button,
+            // Escape, tapping into a bubble) — the sidebar dead-click bug.
+            setNavigateBubbleId({ id, nonce: Date.now() })
             if (!isDesktop) setSidebarOpen(false)
           }}
           onAddBubble={addBubble}
