@@ -36,6 +36,8 @@
   --input-bg:    rgba(255,255,255,0.07);
   --input-border:rgba(255,255,255,0.1);
   --hover:       rgba(255,255,255,0.08);
+  --scrollbar-thumb:       #2A2A2E;
+  --scrollbar-thumb-hover: #3A3A3E;
 }
 
 [data-theme="light"] {
@@ -60,6 +62,8 @@
   --hover:       rgba(0,0,0,0.05);
   --card-shadow: 0 1px 4px rgba(0,0,0,0.08), 0 0 0 1px rgba(0,0,0,0.07);
   --nav-shadow:  0 1px 0 rgba(0,0,0,0.08), 0 2px 8px rgba(0,0,0,0.06);
+  --scrollbar-thumb:       #C9C9C2;
+  --scrollbar-thumb-hover: #B3B3AC;
 }
 
 /* ── Light-mode Tailwind class overrides ───────────────────────────────────── */
@@ -177,6 +181,36 @@
   [data-theme="light"] #root {
     background-color: #E8E8E2; /* = light gradient outer stop */
   }
+}
+
+/* ── Scrollbars ────────────────────────────────────────────────────────────── */
+/* One app-wide definition: thin overlay-style bars that sit on the theme
+   instead of the OS default (a bright track reads as a hole punched in the
+   pitch-black shell). The thumb colours are theme tokens above, so both modes
+   get an appropriate treatment from the same rules. `scrollbar-color` inherits
+   and `::-webkit-scrollbar` is set on *, so every scroller — sidebar, All
+   Notes, note editor, settings, menus — picks this up with no per-component
+   copies. */
+* {
+  scrollbar-width: thin;                              /* Firefox */
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+*::-webkit-scrollbar {                                /* WebKit / Chromium */
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+*::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* ── Bubble drag-and-drop ──────────────────────────────────────────────────── */
