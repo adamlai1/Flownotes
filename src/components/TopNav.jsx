@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import { useAuth } from '../contexts/AuthContext'
+import { useBodyScrollLock } from '../lib/bodyScrollLock'
 
 export default function TopNav({
   projectList,
@@ -69,6 +70,9 @@ export default function TopNav({
   const [creatingProject, setCreatingProject] = useState(false)
   const [renamingId, setRenamingId] = useState(null)
   const [renameValue, setRenameValue] = useState('')
+  // Project rename / new-project inputs raise the keyboard — hold the app
+  // shell still while one is mounted (see bodyScrollLock).
+  useBodyScrollLock(creatingProject || renamingId !== null)
   const dropdownRef = useRef(null)
   const newNameRef = useRef(null)
 

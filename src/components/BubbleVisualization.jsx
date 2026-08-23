@@ -19,6 +19,7 @@ import {
   LONG_PRESS_MENU_MS, DRAG_PICKUP_MS, DRAG_PICKUP_PAGED_MS, PRESS_MOVE_CANCEL_PX,
 } from '../utils/pressArbitration'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
+import { useBodyScrollLock } from '../lib/bodyScrollLock'
 import ConfirmDialog from './ConfirmDialog'
 import BubbleColorPicker from './BubbleColorPicker'
 import BubbleNameInput from './BubbleNameInput'
@@ -280,9 +281,10 @@ function solidMutedColor(hex) {
 // bound an item. That is not an accident of convenience: the + button is positioned in
 // CSS at `bottom: 1.5rem + env(safe-area-inset-bottom)`, so its centre sits at
 // `height - 52` in content-box coordinates and at `height - 52 - safeBottom` in
-// painted-box ones. Keeping `height` as the content box leaves all six of those `- 52`
+// painted-box ones. Keeping `height` as the content box leaves all seven of those `- 52`
 // sites correct exactly as they are, instead of requiring every one to be found and
-// corrected in step.
+// corrected in step. (computeSortedPages' copy carried a stray `- safeBottom` from the
+// painted-box era until it was aligned with the others.)
 
 // The lowest an item's BOTTOM EDGE may reach at horizontal position `cx`: the painted
 // bottom (`height + safeBottom`) everywhere except the + button column, which keeps a
@@ -1037,10 +1039,11 @@ export function computeSortedPages(items, width, height, noteScale, safeBottom, 
   // inset up from the painted bottom). Cells under its exclusion circle are
   // skipped — the same radius the free-mode physics barrier enforces, so the
   // two modes agree about the button — rather than insetting the grid, which
-  // would sacrifice a whole row for one corner. safeBottom is the measured
-  // device inset (0 on desktop), so the reserved area lands on the real
-  // button position for both device classes.
-  const btn = { cx: width - 52, cy: height - 52 - safeBottom, r: PLUS_BTN_EXCL_R + BTN_ROW_PAD }
+  // would sacrifice a whole row for one corner. `height` is the CONTENT box
+  // (see the bottom-bound comment above bottomEdgeLimit), where the button's
+  // centre is height - 52 on every device class — the extra `- safeBottom`
+  // this carried guarded a spot a whole inset ABOVE the real button.
+  const btn = { cx: width - 52, cy: height - 52, r: PLUS_BTN_EXCL_R + BTN_ROW_PAD }
   const cellUnderButton = (c, r) => {
     const { cx, cy } = cellCenter(c, r)
     const dx = Math.max(Math.abs(cx - btn.cx) - (cellW - NOTE_GAP_X) / 2, 0)
@@ -1222,13 +1225,14 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
       slots.push({ x: mX + (placed % 3) * (f.BOX_W + NOTE_GAP_X), y: mT + spanH / 2, jx: 0 })
       placed++
     }
-    // Cells are built row-major (top-left → bottom-right), but new notes are APPENDED
-    // to the project — in item order the newest note always drew the bottom-right cell,
-    // right beside the + button, so every fresh note "spawned" at the button. Assign
-    // cells in reverse: the newest note takes the top-left cell (newest-first reading
-    // order) and the button-adjacent cell goes to the oldest, stably placed note.
+    // Cells are built row-major (top-left → bottom-right), and new notes are PREPENDED
+    // to the project (App's addNote puts the fresh note first), so item order is already
+    // newest-first: assigning cells IN ORDER gives the newest note the top-left cell and
+    // the button-adjacent bottom-right cell to the oldest, stably placed note. (The
+    // reversed assignment this replaces was written against append ordering — under
+    // prepend it handed every fresh note the bottom-right cell, right beside the button.)
     return items.map((item, i) => {
-      const s = slots[slots.length - 1 - i] ?? slots[slots.length - 1]
+      const s = slots[i] ?? slots[slots.length - 1]
       // Per-item wobble on top of the row's offset. Seeded per page, and the two axes
       // are hashed from different inputs so a card's horizontal and vertical offsets
       // don't move together (sin(i·127.1) and sin(i·311.7) drift into step over a long
@@ -1479,6 +1483,33 @@ const pageVariants = {
     : { opacity: 0, scale: 0.88, transition: { duration: 0.22, ease: 'easeIn' } },
 }
 
+// ── Motion feel (Settings → Bouncy animations) ────────────────────────────────
+// Every spring the canvas settles on, in both feels. 'bouncy' keeps the tuned
+// underdamped values; 'calm' swaps each for its critically damped twin
+// (damping ≈ 2·√stiffness, rounded up so float noise can't sneak an overshoot
+// in): same stiffness, so the response speed barely changes, but the approach
+// is monotonic — no overshoot, no wobble, never an instant snap. The pickup
+// ease likewise trades its overshooting back-ease for a plain ease-out at the
+// same duration. The idle float bob is gated on the same preference — a
+// continuous bounce is exactly what the calm feel promises not to do.
+const ITEM_SPRING = {
+  bouncy: { type: 'spring', stiffness: 260, damping: 22 },
+  calm:   { type: 'spring', stiffness: 260, damping: 33 },
+}
+const PAGE_SPRING = {
+  bouncy: { type: 'spring', stiffness: 320, damping: 34 },
+  calm:   { type: 'spring', stiffness: 320, damping: 36 },
+}
+const NAV_SPRING = {
+  bouncy: { type: 'spring', stiffness: 300, damping: 30, restDelta: 0.001 },
+  calm:   { type: 'spring', stiffness: 300, damping: 35, restDelta: 0.001 },
+}
+const PICKUP_EASE = {
+  bouncy: [0.34, 1.56, 0.64, 1],
+  calm:   [0.25, 0.46, 0.45, 0.94],
+}
+const feelFor = (bouncy) => (bouncy ? 'bouncy' : 'calm')
+
 // Small padlock drawn on a locked bubble / note card, above its (withheld) label.
 function LockGlyph({ size = 14, color = 'rgba(255,255,255,0.8)', style }) {
   return (
@@ -1721,6 +1752,9 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating
   const floatAmt = 2.5 + (index % 3) * 1.5
   const floatDuration = 2.6 + (index % 4) * 0.45
   const floatDelay = (index * 0.22) % 3
+  const { bouncy } = usePreferences()
+  const feel = feelFor(bouncy)
+  const floats = floating && bouncy
 
   return (
     // Outer wrapper: framer only animates opacity here, so style.transform is safe to set
@@ -1784,14 +1818,14 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating
         initial={{ scale: 0 }}
         animate={isDragging
           ? { scale: 1.1, y: 0 }
-          : { scale: 1, y: floating ? [0, -floatAmt, 0] : 0 }}
+          : { scale: 1, y: floats ? [0, -floatAmt, 0] : 0 }}
         transition={isDragging
-          ? { duration: 0.18, ease: [0.34, 1.56, 0.64, 1] }
+          ? { duration: 0.18, ease: PICKUP_EASE[feel] }
           : {
-              scale: { type: 'spring', stiffness: 260, damping: 22, delay: index * 0.07 },
+              scale: { ...ITEM_SPRING[feel], delay: index * 0.07 },
               // Paused: ease back to rest over a beat rather than snapping — a swipe that
               // ends where it started would otherwise show every bubble twitch on release.
-              y: floating
+              y: floats
                 ? { duration: floatDuration, repeat: Infinity, ease: 'easeInOut', delay: floatDelay }
                 : { duration: 0.25, ease: 'easeOut' },
             }
@@ -1937,6 +1971,9 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
   const floatAmt      = 2.5 + (index % 3) * 1.5
   const floatDuration = 2.6 + (index % 4) * 0.45
   const floatDelay    = (index * 0.22) % 3
+  const { bouncy } = usePreferences()
+  const feel = feelFor(bouncy)
+  const floats = floating && bouncy
 
   const label    = gated ? 'Locked' : (noteTitle(item) || 'New note')
   const lines    = (item.content || '').split('\n').filter(l => l.trim())
@@ -2024,7 +2061,7 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
             ? solidBg
             : NOTE_CARD_SURFACE === 'flat'
               ? 'var(--surface-2)'
-              : 'var(--card-surface)',
+              : 'var(--card-surface-note)',
           backdropFilter: isLight || NOTE_CARD_SURFACE === 'flat' ? 'none' : 'blur(24px)',
           WebkitBackdropFilter: isLight || NOTE_CARD_SURFACE === 'flat' ? 'none' : 'blur(24px)',
           border: isLight
@@ -2045,12 +2082,12 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
         initial={{ scale: 0 }}
         animate={isDragging
           ? { scale: 1.1, y: 0 }
-          : { scale: 1, y: floating ? [0, -floatAmt, 0] : 0 }}
+          : { scale: 1, y: floats ? [0, -floatAmt, 0] : 0 }}
         transition={isDragging
-          ? { duration: 0.18, ease: [0.34, 1.56, 0.64, 1] }
+          ? { duration: 0.18, ease: PICKUP_EASE[feel] }
           : {
-              scale: { type: 'spring', stiffness: 260, damping: 22, delay: index * 0.07 },
-              y: floating
+              scale: { ...ITEM_SPRING[feel], delay: index * 0.07 },
+              y: floats
                 ? { duration: floatDuration, repeat: Infinity, ease: 'easeInOut', delay: floatDelay }
                 : { duration: 0.25, ease: 'easeOut' },
             }
@@ -2558,6 +2595,10 @@ export function separateOverlaps(items, width, height, pinBubbles = false, ellip
         p.cx += (dx / d) * pen
         p.cy += (dy / d) * pen
         moved = true
+        // The button is an obstacle like any other, so it must count against the
+        // snapshot score too — unscored, a non-converged run could hand back a "best"
+        // arrangement chosen while ignoring an item parked in the exclusion zone.
+        score += pen
       }
     }
     // Pinned mode: the bubble cluster's ellipse is an obstacle for notes, so the
@@ -2584,7 +2625,23 @@ export function separateOverlaps(items, width, height, pinBubbles = false, ellip
     // strictly better than any scored snapshot, which are all pre-resolution states.
     if (!moved) return pos
   }
-  return best ?? pos
+  // Ran out of iterations. The radial push above and the bounds clamp can cancel
+  // exactly in the corner pocket around the button (push down-right, clamp back
+  // up-left), leaving an item inside the zone on EVERY snapshot — and a freshly
+  // spawned note is the likeliest item to be wedged there. The exclusion is a hard
+  // invariant, so finish with the guaranteed axis ejection the drag clamp uses
+  // (up/left always have room; same constants, no second copy of the geometry).
+  // The ejection can re-create a pair overlap, which is the lesser wrong: a note
+  // slightly on a neighbour is recoverable, a note under a control is not.
+  const out = best ?? pos
+  for (const p of out) {
+    if (circleBoxPen({ cx: btnCx, cy: btnCy, r: PLUS_BTN_EXCL_R }, p, BTN_ROW_PAD - EPS) > 0) {
+      const c = clampDragTarget(p, p.cx, p.cy, width, height, safeBottom)
+      p.cx = c.cx
+      p.cy = c.cy
+    }
+  }
+  return out
 }
 
 // ─── Settle new (unplaced) items away from anchored (saved-position) items ─────
@@ -2737,9 +2794,13 @@ export default function BubbleVisualization({
   // committed through the one onRenameBubble handler.
   const [renameItem, setRenameItem] = useState(null)
   const [renameValue, setRenameValue] = useState('')
+  // Keyboard-bearing overlay: hold the app shell still while it's up (see
+  // bodyScrollLock — iOS lets the page pan once the keyboard shrinks the
+  // visual viewport). Save and cancel both clear renameItem, releasing it.
+  useBodyScrollLock(renameItem !== null)
   const { theme } = useTheme()
   const isLight = theme === 'light'
-  const { noteSize } = usePreferences()
+  const { noteSize, bouncy } = usePreferences()
   const noteScale = NOTE_SIZE_SCALE[noteSize] ?? 1
   // height stays the CONTENT box; safeBottom is the inset the canvas paints through,
   // carried alongside so the bounds can hand the strip back outside the indicator.
@@ -3695,7 +3756,7 @@ export default function BubbleVisualization({
     // the pause the new gesture has just set.
     const token = ++swipeSettleRef.current
     animate(pageX, -clamped * sizeRef.current.width, {
-      type: 'spring', stiffness: 320, damping: 34,
+      ...PAGE_SPRING[feelFor(bouncy)],
       onComplete: () => { if (swipeSettleRef.current === token) setSwiping(false) },
     })
   }
@@ -4591,7 +4652,7 @@ export default function BubbleVisualization({
             initial={expandAnim ? false : 'initial'}
             animate="animate"
             exit={expandAnim ? { opacity: 1, transition: { duration: 0 } } : 'exit'}
-            transition={{ type: 'spring', stiffness: 300, damping: 30, restDelta: 0.001 }}
+            transition={NAV_SPRING[feelFor(bouncy)]}
           >
             <div className="absolute inset-0">
               {/* Subtle level label */}

@@ -6,6 +6,7 @@ import BubbleColorPicker from './BubbleColorPicker'
 import { BUBBLE_COLORS, CUSTOM_TAG_PALETTE } from '../data/defaultData'
 import { generateId } from '../utils/helpers'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
+import { useBodyScrollLock } from '../lib/bodyScrollLock'
 
 export default function Sidebar({
   open,
@@ -36,6 +37,11 @@ export default function Sidebar({
   const [editTagName, setEditTagName] = useState('')
   const [contextTag, setContextTag] = useState(null)
   const [confirmDeleteTag, setConfirmDeleteTag] = useState(null)
+  // The sidebar's inline inputs (add bubble, new tag, tag rename) raise the
+  // keyboard like any modal input does — hold the app shell still while one is
+  // mounted. The sidebar's own tree list is its own overflow box and keeps
+  // scrolling under the lock.
+  useBodyScrollLock(addingBubble || addingTag || editingTag !== null)
 
   const newBubbleInputRef = useRef(null)
   const newTagInputRef = useRef(null)

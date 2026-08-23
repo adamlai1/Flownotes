@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { useEscapeLayer, ESC_LEVEL, KEYBOARD_MEDIA_QUERY } from '../lib/escapeStack'
+import { useBodyScrollLock } from '../lib/bodyScrollLock'
 import { BUBBLE_COLORS } from '../data/defaultData'
 import BubbleNameInput from './BubbleNameInput'
 import BubbleColorPicker from './BubbleColorPicker'
@@ -46,6 +47,12 @@ export default function CreateBubbleSheet({
   const inputRef = useRef(null)
 
   useEscapeLayer(open, onCancel, ESC_LEVEL.modal)
+  // The top-anchoring below stops iOS from auto-panning at focus time; this
+  // stops the user from dragging the whole shell around once the keyboard has
+  // shrunk the visual viewport. Keyed on `open`, so cancel and create both
+  // release it; a dismissed keyboard with the sheet still up keeps the lock,
+  // which is correct — the sheet is still the only interactive surface.
+  useBodyScrollLock(open)
 
   // Fresh every time it opens — a half-typed name from last time is never what's wanted,
   // and the least-used colour is worked out against how things stand now. Deliberately

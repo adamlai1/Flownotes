@@ -10,6 +10,8 @@ import {
   deleteProject as deleteProjectFromStorage,
   loadAllProjects,
   clearAllProjectData,
+  loadLastProjectId,
+  saveLastProjectId,
 } from './utils/storage'
 import {
   loadAllFromCloud,
@@ -531,7 +533,17 @@ function initializeData() {
       .filter((e, i, a) => a.findIndex(x => x.id === e.id) === i) // folded twin
     saveProjectList(projectList)
   }
-  const activeProject = migrateTagColors(loadProject(projectList[0].id))
+  // Open to the last project the user had open on THIS device. A stale id
+  // (project deleted, or a legacy seed id remapped above) falls back to the
+  // list head — the pre-restore default.
+  let lastId = loadLastProjectId()
+  if (seedFix.changed && seedFix.projectIdMap.has(lastId)) {
+    lastId = seedFix.projectIdMap.get(lastId)
+  }
+  const restored = lastId && projectList.some(e => e.id === lastId)
+    ? loadProject(lastId)
+    : null
+  const activeProject = migrateTagColors(restored ?? loadProject(projectList[0].id))
   return { projectList, activeProject }
 }
 
@@ -903,6 +915,14 @@ export default function App() {
     setActiveProject(ap)
   }, [])
 
+  // Whatever project is on screen is the one the next launch restores — this
+  // single watcher covers every way the project can change (manual switch,
+  // create, delete-fallback, merge/import landing) without each site opting in.
+  // Keyed on the id so per-edit object churn doesn't rewrite storage.
+  useEffect(() => {
+    if (activeProject?.id) saveLastProjectId(activeProject.id)
+  }, [activeProject?.id])
+
   // ── True viewport height ──────────────────────────────────────────────────────
   //
   // The app column is sized by --app-h, set here from window.innerHeight — not by a CSS
@@ -1099,7 +1119,11 @@ export default function App() {
       saveProjectList(cloudList)
       for (const p of projects) saveProject(p)
       setProjectList(cloudList)
-      setActiveProject(migrateTagColors(projects[0]))
+      // Honor this device's last-opened project if the account still has it;
+      // otherwise the old default (first cloud project). Covers the case where
+      // the cloud pull replaces what initializeData already restored.
+      const lastId = loadLastProjectId()
+      setActiveProject(migrateTagColors(projects.find(p => p.id === lastId) ?? projects[0]))
       setSelectedBubbleId(null)
       setNoteStack([])
       setCurrentBubbleId(null)

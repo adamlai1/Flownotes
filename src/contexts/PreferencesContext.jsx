@@ -18,6 +18,15 @@ import { loadPreferencesFromCloud, savePreferencesToCloud } from '../lib/syncSer
 const NOTE_SIZES = ['small', 'medium', 'large']
 const STORAGE_KEY = 'mindmap-note-size'
 
+// Bouncy animations: '1' / '0' once the user has touched the toggle; absent =
+// untouched, and the default then follows the system reduced-motion setting
+// live. Deliberately localStorage-only (a device preference, never synced —
+// two devices can want different motion), and deliberately NOT swept by
+// sign-out's clearAllProjectData: like theme and note size, it's a device
+// setting, not user context.
+const BOUNCY_KEY = 'mindmap-bouncy'
+const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)'
+
 // Same breakpoint the layout uses everywhere (isDesktop in App, NoteEditor…).
 const DEVICE_CLASS_QUERY = '(min-width: 768px)'
 
@@ -49,7 +58,10 @@ function parseSizes(raw, legacyClass) {
 // scale the whole card (and its text) proportionally.
 export const NOTE_SIZE_SCALE = { small: 1, medium: 1.3, large: 1.6 }
 
-const PreferencesContext = createContext({ noteSize: 'medium', setNoteSize: () => {} })
+const PreferencesContext = createContext({
+  noteSize: 'medium', setNoteSize: () => {},
+  bouncy: true, setBouncy: () => {},
+})
 
 export function PreferencesProvider({ children }) {
   const { user } = useAuth()
@@ -98,6 +110,28 @@ export function PreferencesProvider({ children }) {
     return () => { cancelled = true }
   }, [user])
 
+  // 'null' = untouched (follow the system), '1' / '0' = explicit choice.
+  const [bouncyPref, setBouncyPref] = useState(() => localStorage.getItem(BOUNCY_KEY))
+  const [reducedMotion, setReducedMotion] = useState(
+    () => window.matchMedia(REDUCED_MOTION_QUERY).matches
+  )
+  // Follow the OS setting live, but only the DEFAULT tracks it — an explicit
+  // toggle choice overrides in either direction and stops listening mattering.
+  useEffect(() => {
+    const mq = window.matchMedia(REDUCED_MOTION_QUERY)
+    const handler = e => setReducedMotion(e.matches)
+    mq.addEventListener('change', handler)
+    return () => mq.removeEventListener('change', handler)
+  }, [])
+
+  function setBouncy(value) {
+    const v = value ? '1' : '0'
+    setBouncyPref(v)
+    localStorage.setItem(BOUNCY_KEY, v)
+  }
+
+  const bouncy = bouncyPref === null ? !reducedMotion : bouncyPref === '1'
+
   function setNoteSize(size) {
     if (!NOTE_SIZES.includes(size)) return
     // Live read, not the deviceClass state — a resize this instant still lands
@@ -116,7 +150,7 @@ export function PreferencesProvider({ children }) {
   const noteSize = sizes[deviceClass] ?? 'medium'
 
   return (
-    <PreferencesContext.Provider value={{ noteSize, setNoteSize }}>
+    <PreferencesContext.Provider value={{ noteSize, setNoteSize, bouncy, setBouncy }}>
       {children}
     </PreferencesContext.Provider>
   )

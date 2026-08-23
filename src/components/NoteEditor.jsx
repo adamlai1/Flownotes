@@ -7,6 +7,7 @@ import { useLock } from '../contexts/LockContext'
 import { useToast } from '../contexts/ToastContext'
 import { copyNoteText } from '../utils/noteShare'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
+import { useBodyScrollLock } from '../lib/bodyScrollLock'
 
 
 function formatNoteDate(isoStr) {
@@ -154,6 +155,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   useEscapeLayer(true, handleClose, zIndex)
   // Its own delete confirm sits above it (matching the modal's zIndex + 10).
   useEscapeLayer(showDeleteConfirm, () => setShowDeleteConfirm(false), zIndex + 10)
+  // The editor is mounted only while open, and its textarea raises the keyboard —
+  // hold the app shell still for its whole lifetime (see bodyScrollLock). The
+  // editor's own body row scrolls internally and is unaffected.
+  useBodyScrollLock(true)
 
   function pushHistory(prevText) {
     setPast(p => [...p.slice(-49), prevText])

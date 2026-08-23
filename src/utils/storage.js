@@ -1,4 +1,7 @@
 const PROJECTS_KEY = 'mindmap-projects'
+// Which project the user last had open, restored at launch. Per-device on
+// purpose — never synced to the cloud; two devices can be in two projects.
+const LAST_PROJECT_KEY = 'mindmap-last-project'
 
 function projectKey(id) {
   return `mindmap-project-${id}`
@@ -38,6 +41,22 @@ export function loadAllProjects(projectList) {
   return projectList.map(meta => loadProject(meta.id)).filter(Boolean)
 }
 
+export function loadLastProjectId() {
+  try {
+    return localStorage.getItem(LAST_PROJECT_KEY)
+  } catch {
+    return null
+  }
+}
+
+export function saveLastProjectId(id) {
+  try {
+    localStorage.setItem(LAST_PROJECT_KEY, id)
+  } catch {
+    // Storage full/unavailable: losing the launch preference is harmless.
+  }
+}
+
 // Per-project layout caches other modules key by project id (bubble positions,
 // page assignments, pinned notes). Swept together with the project blobs.
 const PER_PROJECT_PREFIXES = ['mindmap-project-', 'mindmap-pos-', 'mindmap-pages-', 'mindmap-pins-', 'mindmap-sortmode-']
@@ -49,6 +68,9 @@ const PER_PROJECT_PREFIXES = ['mindmap-project-', 'mindmap-pos-', 'mindmap-pages
 // deliberately untouched.
 export function clearAllProjectData() {
   localStorage.removeItem(PROJECTS_KEY)
+  // Last-opened project is user context, not a device preference — it names a
+  // project this sweep is about to delete, so it goes with the data.
+  localStorage.removeItem(LAST_PROJECT_KEY)
   const doomed = []
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i)
