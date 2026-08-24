@@ -1670,6 +1670,63 @@ function bubbleGlowFor(r, baseAlpha, dragging) {
     : { y: blur * 0.25, blur, alpha }
 }
 
+// EXPERIMENT (depth pass): bubble card fills read slightly flat as pure solids with
+// quiet borders. A very subtle CENTERED lift — a touch lighter at the middle, easing
+// back to the surface token toward the edges — gives them volume. Depth, not lighting:
+// the lift is dead-centre and symmetric, so it cannot read as a specular highlight or
+// the glass sheen removed in the neutral pass (those imply an off-axis light source).
+//
+// Geometry: TWO STACKED LINEAR GRADIENTS (one per axis), not a radial. A radial
+// ellipse mismatched the rounded-rect card — corners darkened too early and the
+// volume read egg-shaped inside a squircle. Stacked axis ramps form a rounded-rect
+// plateau that tracks the box: each edge's falloff is governed by its own axis, and
+// the corners (where both axes fall off) round naturally. Each layer carries HALF the
+// lift so the centre, where they stack, sums to the tuned FILL_LIFT_* value; the one
+// deviation from the old radial is that edge midpoints keep half the lift rather than
+// none, which at these alphas (+2 steps) sits under the 1.5px border anyway.
+//   'lift' — centred lift over the token (current)
+//   'flat' — the previous solid fill, kept for comparison/revert
+const BUBBLE_FILL_VARIANT = 'lift'
+// DECIDED: notes are excluded from the depth pass — they stay flat at their surface
+// token (--card-surface-note). They're too small for the lift to articulate as volume
+// (it read as a uniformly lighter fill), and lifting them narrows the deliberate
+// bubbles-a-step-above-notes surface hierarchy. Flag kept as the gate — and so any
+// future fill experiment on the shared liftedFill path has to opt notes in explicitly.
+const NOTE_FILL_LIFT = false
+// Centre-lift amount: total alpha of the white overlay at dead centre. Dark 0.01 lifts
+// --card-surface (#151517) to ≈#171719 at the middle (+2 steps); light surfaces have
+// far less headroom toward white, so a larger alpha buys the same visual step.
+const FILL_LIFT_DARK = 0.01
+const FILL_LIFT_LIGHT = 0.1
+// How much of each axis the ease occupies at EACH end: the plateau runs from RAMP to
+// (100% − RAMP), token at 0/100%. Smaller = flatter centre, tighter perimeter band.
+const FILL_LIFT_RAMP = '20%'
+
+// Inner edge shadow (core shadow) — the other half of the volume treatment, on
+// BUBBLES only: a very restrained darkening just inside the bottom and bottom-corner
+// edges, so the card reads as a solid object rather than a flat sticker. Form shading
+// on a self-lit object, not lighting — paired with the centred lift above, never with
+// a specular or a cast shadow (the coloured glows stay the only "light" on the canvas).
+// An inset box-shadow rather than a gradient layer: it joins the existing shadow list
+// and follows the corner radius exactly. Dark theme only — the emissive-on-black
+// aesthetic has no light-mode counterpart, and black insets over light pastels read
+// as grime. Strength dial: EDGE_SHADOW_ALPHA; 0 disables it (easy revert).
+const EDGE_SHADOW_ALPHA = 0.28
+const EDGE_SHADOW_Y = 4      // px the darkening hugs up from the bottom edge
+const EDGE_SHADOW_BLUR = 12  // px of feather; wraps the bottom corners
+
+// A card fill with the centre lift layered over it. `base` is any CSS color value —
+// a hex or a var() token — and is returned untouched when the experiment is off or
+// the per-kind flag (NOTE_FILL_LIFT) disables it.
+function liftedFill(base, isLight, enabled = true) {
+  if (BUBBLE_FILL_VARIANT !== 'lift' || !enabled) return base
+  const a = (isLight ? FILL_LIFT_LIGHT : FILL_LIFT_DARK) / 2
+  const axis = (dir) =>
+    `linear-gradient(${dir}, rgba(255,255,255,0) 0%, rgba(255,255,255,${a}) ${FILL_LIFT_RAMP}, ` +
+    `rgba(255,255,255,${a}) calc(100% - ${FILL_LIFT_RAMP}), rgba(255,255,255,0) 100%)`
+  return `${axis('to right')}, ${axis('to bottom')}, ${base}`
+}
+
 function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating = true, selectable = false, selected = false }) {
   const { theme } = useTheme()
   const isLight = theme === 'light'
@@ -1801,6 +1858,12 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating
     isDragging,
   )
   const glowShadow = `0 ${glow.y}px ${glow.blur}px rgba(${rgb},${glow.alpha.toFixed(3)})`
+  // Core shadow inside the bottom edge (see EDGE_SHADOW_* above). Soft and modest so
+  // the inside of the edge never crushes to black against the coloured glow blooming
+  // just outside it — the two meet at the border and must read as one object.
+  const edgeShadow = !isLight && EDGE_SHADOW_ALPHA > 0
+    ? `, inset 0 -${EDGE_SHADOW_Y}px ${EDGE_SHADOW_BLUR}px rgba(0,0,0,${EDGE_SHADOW_ALPHA})`
+    : ''
   const { bouncy } = usePreferences()
   const feel = feelFor(bouncy)
   const floats = floating && bouncy
@@ -1847,15 +1910,17 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating
           // radial-gradient), so the declaration was dropped and cards were
           // transparent over the black canvas. --card-surface is the intended
           // object surface.
-          background: isLight ? solidBg : 'var(--card-surface)',
+          background: liftedFill(isLight ? solidBg : 'var(--card-surface)', isLight),
           backdropFilter: isLight ? 'none' : 'blur(24px)',
           WebkitBackdropFilter: isLight ? 'none' : 'blur(24px)',
+          // Dark rest border: dimmer than the shared --card-border (0.12) — bubbles
+          // only, notes keep the token. Revert: var(--card-border).
           border: isLight
             ? `1.5px solid rgba(${rgb},${isDragging ? '0.7' : '0.5'})`
-            : `1.5px solid ${isDragging ? 'rgba(255,255,255,0.55)' : 'var(--card-border)'}`,
+            : `1.5px solid ${isDragging ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.07)'}`,
           boxShadow: isDragging
-            ? `${glowShadow}, 0 6px 20px rgba(0,0,0,${isLight ? '0.12' : '0.5'})`
-            : `${glowShadow}, 0 2px 10px rgba(0,0,0,${isLight ? '0.08' : '0.3'})`,
+            ? `${glowShadow}, 0 6px 20px rgba(0,0,0,${isLight ? '0.12' : '0.5'})${edgeShadow}`
+            : `${glowShadow}, 0 2px 10px rgba(0,0,0,${isLight ? '0.08' : '0.3'})${edgeShadow}`,
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'center',
@@ -2106,11 +2171,15 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
           borderRadius: `${CORNER_RATIO * 100}%`,
           // Dark 'glass': like the bubble cards, the old gradient here was invalid
           // CSS and never rendered — cards were transparent over the black canvas.
-          background: isLight
-            ? solidBg
-            : NOTE_CARD_SURFACE === 'flat'
-              ? 'var(--surface-2)'
-              : 'var(--card-surface-note)',
+          background: liftedFill(
+            isLight
+              ? solidBg
+              : NOTE_CARD_SURFACE === 'flat'
+                ? 'var(--surface-2)'
+                : 'var(--card-surface-note)',
+            isLight,
+            NOTE_FILL_LIFT,
+          ),
           backdropFilter: isLight || NOTE_CARD_SURFACE === 'flat' ? 'none' : 'blur(24px)',
           WebkitBackdropFilter: isLight || NOTE_CARD_SURFACE === 'flat' ? 'none' : 'blur(24px)',
           border: isLight
