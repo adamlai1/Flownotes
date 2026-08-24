@@ -1715,6 +1715,56 @@ const EDGE_SHADOW_ALPHA = 0.28
 const EDGE_SHADOW_Y = 4      // px the darkening hugs up from the bottom edge
 const EDGE_SHADOW_BLUR = 12  // px of feather; wraps the bottom corners
 
+// Diagonal two-corner rim highlight (dark theme, BUBBLES only): the outline is a
+// hairline gradient ring, brighter at the top-left and bottom-right corners than the
+// other two — iOS beveled-button lighting. Geometry: a 45deg gradient runs bottom-left
+// → top-right, and BOTH the TL and BR corners project to that axis's 50% mark, so a
+// band that is bright across the middle and dim at the ends lights exactly those two
+// corners; a 135deg overlay then biases TL slightly brighter than BR. The rim REPLACES
+// the flat rest border (one stroke, never two); dragging swaps back to the plain white
+// pickup border. Revert: delete the rim child and restore the dark rest border
+// (1.5px solid rgba(255,255,255,0.07)).
+// Config per surface. bright: alpha at TL + BR corners; dim: alpha at TR + BL;
+// spread: percent half-width of the bright band around 50%; bias: extra alpha
+// layered toward one corner (0 disables); biasDeg: which of the two lit corners
+// reads strongest (135 = top-left, 315 = bottom-right); width: ring thickness;
+// color: an "r,g,b" triplet. BUTTON_RIM is deliberately STRONGER than BUBBLE_RIM
+// and near-white: the button is a control on a saturated navy fill, the bubble a
+// container on a near-black fill. They need different rim strengths to read
+// correctly — do not normalize the two configs toward each other.
+export const BUBBLE_RIM = { color: '255,255,255', bright: 0.16, dim: 0.04, spread: 10, bias: 0.05, biasDeg: 135, width: '1px' }
+export const BUTTON_RIM = { color: '235,234,255', bright: 0.34, dim: 0.08, spread: 6, bias: 0.10, biasDeg: 135, width: '1.2px' }
+
+// The rim as a style object for any rounded-rect surface: overlay it as an
+// absolutely-positioned child of a position:relative container and the two masks
+// (content-box XOR border-box) leave only the {width} padding band of the gradients
+// visible. Explicit rgba() triplets, not color-mix() — color-mix support is not
+// reliable across the iOS versions targeted. pointer-events: none is load-bearing:
+// the element covers its whole surface and would eat drags/taps without it.
+export function rimStyle({ color, bright, dim, spread, bias, biasDeg, width }) {
+  // The 45deg layer is what places the highlight on the TL and BR corners (both
+  // project to that axis's 50% mark) — it never changes. biasDeg only decides which
+  // of those two corners reads strongest.
+  return {
+    position: 'absolute',
+    inset: 0,
+    borderRadius: 'inherit',
+    boxSizing: 'border-box',
+    padding: width,
+    pointerEvents: 'none',
+    background:
+      `linear-gradient(${biasDeg}deg, rgba(${color},${bias}) 0%, rgba(${color},0) 55%), ` +
+      `linear-gradient(45deg, rgba(${color},${dim}) 0%, ` +
+      `rgba(${color},${bright}) calc(50% - ${spread}%), ` +
+      `rgba(${color},${bright}) calc(50% + ${spread}%), ` +
+      `rgba(${color},${dim}) 100%)`,
+    WebkitMask: 'linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)',
+    WebkitMaskComposite: 'xor',
+    mask: 'linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0)',
+    maskComposite: 'exclude',
+  }
+}
+
 // A card fill with the centre lift layered over it. `base` is any CSS color value —
 // a hex or a var() token — and is returned untouched when the experiment is off or
 // the per-kind flag (NOTE_FILL_LIFT) disables it.
@@ -1913,11 +1963,11 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating
           background: liftedFill(isLight ? solidBg : 'var(--card-surface)', isLight),
           backdropFilter: isLight ? 'none' : 'blur(24px)',
           WebkitBackdropFilter: isLight ? 'none' : 'blur(24px)',
-          // Dark rest border: dimmer than the shared --card-border (0.12) — bubbles
-          // only, notes keep the token. Revert: var(--card-border).
+          // Dark rest outline is the RIM child below, not a border — one stroke only.
+          // Dragging keeps the plain white pickup border (the rim yields to it).
           border: isLight
             ? `1.5px solid rgba(${rgb},${isDragging ? '0.7' : '0.5'})`
-            : `1.5px solid ${isDragging ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.07)'}`,
+            : isDragging ? '1.5px solid rgba(255,255,255,0.55)' : 'none',
           boxShadow: isDragging
             ? `${glowShadow}, 0 6px 20px rgba(0,0,0,${isLight ? '0.12' : '0.5'})${edgeShadow}`
             : `${glowShadow}, 0 2px 10px rgba(0,0,0,${isLight ? '0.08' : '0.3'})${edgeShadow}`,
@@ -1945,6 +1995,10 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating
             }
         }
       >
+        {/* Rim highlight (see BUBBLE_RIM / rimStyle): a hairline gradient ring in
+            place of the dark rest border. Sits inside the overflow:hidden radius at
+            inset 0, so nothing clips. */}
+        {!isLight && !isDragging && <div aria-hidden style={rimStyle(BUBBLE_RIM)} />}
         {/* Text container: the title is centered (both axes) in the bubble on its own.
             The count is anchored right below the title text (top: 100%) so it hugs it
             without pushing the title off-center, and can wrap onto a second line. */}

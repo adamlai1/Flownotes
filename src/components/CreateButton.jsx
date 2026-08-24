@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useTheme } from '../contexts/ThemeContext'
+import { rimStyle, BUTTON_RIM } from './BubbleVisualization'
 
 // ─── Floating create button ───────────────────────────────────────────────────
 //
@@ -23,21 +24,24 @@ const SIZE = 56
 // button apart (solid tile vs lit glass); the silhouette now does too.
 const RADIUS = Math.round(SIZE * 0.29)
 
-// One flat colour. No ramp, no edge light, no translucency: the button shares the
-// bubbles' silhouette, so MATERIAL is what has to tell them apart. Bubbles are lit
-// glass — gradient, backdrop blur, coloured glow. This is a solid opaque tile that
-// casts an ordinary shadow, which is what makes it read as a control sitting on top
-// of the canvas rather than one more thing floating in it.
-const INDIGO = '#4F46E5' // indigo-600 — the previous colour, kept as the revert value
+// One flat colour with a single moulded edge: the beveled rim (BUTTON_RIM, shared
+// with the bubbles' rim helper) is the button's only edge treatment — a lightened
+// tint of its own fill, not white, so it reads as a moulded bevel rather than a
+// decal. Still no glow and no translucency: bubbles are lit glass, this is a solid
+// opaque tile casting an ordinary shadow, which is what makes it read as a control
+// sitting on top of the canvas rather than one more thing floating in it.
+const INDIGO = '#4F46E5' // indigo-600 — the original colour, kept as a revert value
 
 // EXPERIMENT (neutral scheme): the indigo read purple-leaning against the neutral
-// canvas; these are two truer-blue candidates for the primary action. Flip the
-// variant to compare; 'indigo' restores the old colour exactly.
+// canvas; 'navy2' is the pre-rim decision, restored after an accent-fill (#6366f1)
+// detour read as one more CTA. The BUTTON_RIM bevel is tuned against this fill.
+// Flip the variant to compare; 'indigo' restores the original colour exactly.
+//   'accent' — #6366f1, the app accent (tried; dropped)
 //   'ios'  — iOS system blue (#007AFF light / #0A84FF dark, per Apple's own pair)
 //   'deep' — a slightly deeper blue (#2563EB, Tailwind blue-600)
 //   'navy' — deeper still (#1D4ED8, Tailwind blue-700)
 //   'navy2' — darker again (#1E40AF, Tailwind blue-800)
-const PLUS_COLOR_VARIANT = 'navy2' // 'ios' | 'deep' | 'navy' | 'navy2' | 'indigo'
+const PLUS_COLOR_VARIANT = 'navy2' // 'accent' | 'ios' | 'deep' | 'navy' | 'navy2' | 'indigo'
 
 export default function CreateButton({
   held,
@@ -51,8 +55,8 @@ export default function CreateButton({
   const isLight = theme === 'light'
   const [pressed, setPressed] = useState(false)
 
-  const fill = PLUS_COLOR_VARIANT === 'ios'
-    ? (isLight ? '#007AFF' : '#0A84FF')
+  const fill = PLUS_COLOR_VARIANT === 'accent' ? '#6366f1'
+    : PLUS_COLOR_VARIANT === 'ios' ? (isLight ? '#007AFF' : '#0A84FF')
     : PLUS_COLOR_VARIANT === 'deep' ? '#2563EB'
     : PLUS_COLOR_VARIANT === 'navy' ? '#1D4ED8'
     : PLUS_COLOR_VARIANT === 'navy2' ? '#1E40AF'
@@ -138,6 +142,10 @@ export default function CreateButton({
         >
           <path d="M12 5.5v13M5.5 12h13" />
         </svg>
+        {/* Beveled rim: hairline ring, brighter at TL/BR. Inherits the span's radius
+            and scales with its press dip. pointer-events: none in rimStyle keeps it
+            from swallowing taps. */}
+        <span aria-hidden style={rimStyle(BUTTON_RIM)} />
       </span>
     </button>
   )
