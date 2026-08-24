@@ -1630,6 +1630,46 @@ function BubbleNameFontScope({ children, liveIds = null }) {
 // during a swipe every float competes with the track for the same frames. The item
 // simply rests at its layout position; the layout's vertical gaps are measured from
 // there (the bob only ever travels UP), so a paused item can't overlap a neighbour.
+// Bubble glow — the coloured halo behind a bubble scales with its rendered size, so
+// a small bubble gets a tight, subtle glow and a large one a bigger, slightly stronger
+// one. (A fixed halo read backwards: small bubbles were proportionally MORE glow than
+// bubble, so the quietest items were visually the loudest.)
+//   'scaled' — blur and opacity follow item.r (current)
+//   'fixed'  — the previous fixed 32px halo, kept for comparison/revert
+const BUBBLE_GLOW_VARIANT = 'scaled'
+// The curve: blur = clamp(r * GLOW_BLUR_PER_R, GLOW_BLUR_MIN, GLOW_BLUR_MAX).
+//   GLOW_BLUR_PER_R — px of blur per px of radius. 0.4 makes r=80 the old 32px halo,
+//                     so mid-size bubbles are the anchor and only the ends move.
+//   GLOW_BLUR_MIN   — floor: the smallest bubbles keep a faint but visible halo, never
+//                     zero — the glow is part of the bubble's colour identity.
+//   GLOW_BLUR_MAX   — ceiling: the largest bubbles don't become floodlights.
+const GLOW_BLUR_PER_R = 0.4
+const GLOW_BLUR_MIN = 16
+const GLOW_BLUR_MAX = 52
+// Opacity rides the same curve, as a multiplier on the theme's base alpha: LO where the
+// blur sits at its floor, HI at its ceiling, lerped between. Keep the span gentle — the
+// size story is told by the radius; alpha just keeps big glows from thinning out.
+const GLOW_ALPHA_LO = 0.85
+const GLOW_ALPHA_HI = 1.1
+
+// Geometry of the glow layer for a bubble of radius r. Dragging is the same glow
+// lifted and enlarged (the old drag/idle blur ratio, 60/32). Offsets keep the original
+// blur↕offset proportions (idle 8/32, drag 20/60) so the halo doesn't change character
+// with size, only scale. Alpha is clamped — drag base × HI can't top 1.
+function bubbleGlowFor(r, baseAlpha, dragging) {
+  if (BUBBLE_GLOW_VARIANT === 'fixed') {
+    return dragging
+      ? { y: 20, blur: 60, alpha: baseAlpha }
+      : { y: 8, blur: 32, alpha: baseAlpha }
+  }
+  const blur = Math.min(Math.max(r * GLOW_BLUR_PER_R, GLOW_BLUR_MIN), GLOW_BLUR_MAX)
+  const t = (blur - GLOW_BLUR_MIN) / (GLOW_BLUR_MAX - GLOW_BLUR_MIN)
+  const alpha = Math.min(baseAlpha * (GLOW_ALPHA_LO + (GLOW_ALPHA_HI - GLOW_ALPHA_LO) * t), 1)
+  return dragging
+    ? { y: blur * 1.875 / 3, blur: blur * 1.875, alpha }
+    : { y: blur * 0.25, blur, alpha }
+}
+
 function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating = true, selectable = false, selected = false }) {
   const { theme } = useTheme()
   const isLight = theme === 'light'
@@ -1752,6 +1792,15 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating
   const floatAmt = 2.5 + (index % 3) * 1.5
   const floatDuration = 2.6 + (index % 4) * 0.45
   const floatDelay = (index * 0.22) % 3
+
+  // Coloured halo sized to this bubble (see BUBBLE_GLOW_VARIANT and the GLOW_* dials
+  // above). The neutral black shadow beneath it is depth, not identity, and stays fixed.
+  const glow = bubbleGlowFor(
+    item.r,
+    isDragging ? (isLight ? 0.45 : 0.7) : (isLight ? 0.35 : 0.42),
+    isDragging,
+  )
+  const glowShadow = `0 ${glow.y}px ${glow.blur}px rgba(${rgb},${glow.alpha.toFixed(3)})`
   const { bouncy } = usePreferences()
   const feel = feelFor(bouncy)
   const floats = floating && bouncy
@@ -1805,8 +1854,8 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating
             ? `1.5px solid rgba(${rgb},${isDragging ? '0.7' : '0.5'})`
             : `1.5px solid ${isDragging ? 'rgba(255,255,255,0.55)' : 'var(--card-border)'}`,
           boxShadow: isDragging
-            ? `0 20px 60px rgba(${rgb},${isLight ? '0.45' : '0.7'}), 0 6px 20px rgba(0,0,0,${isLight ? '0.12' : '0.5'})`
-            : `0 8px 32px rgba(${rgb},${isLight ? '0.35' : '0.42'}), 0 2px 10px rgba(0,0,0,${isLight ? '0.08' : '0.3'})`,
+            ? `${glowShadow}, 0 6px 20px rgba(0,0,0,${isLight ? '0.12' : '0.5'})`
+            : `${glowShadow}, 0 2px 10px rgba(0,0,0,${isLight ? '0.08' : '0.3'})`,
           display: 'flex',
           flexDirection: 'column',
           alignItems: 'center',
