@@ -19,12 +19,13 @@ export default function BubblePickerTree({
   indentPerLevel = 16,
   measureAvailable,      // () => px the fully expanded tree may occupy
   observeResize,         // optional: () => Element to re-check on resize
+  maxExpandedRows,       // unbounded container: expand iff full row count ≤ this
   renderRow,             // (bubble) => the row button; rendered flex-1 beside the chevron
 }) {
   const rowCount = countExpandedBubbleRows(bubbles, { hiddenIds })
   const parentIds = collapsibleBubbleIds(bubbles, { hiddenIds })
   const { collapsedIds, isExpanded, toggleExpanded } = useFitCollapse({
-    rowCount, parentIds, rowHeight, extraHeight, measureAvailable, observeResize,
+    rowCount, parentIds, rowHeight, extraHeight, measureAvailable, observeResize, maxExpandedRows,
   })
   const rows = flattenBubbleTree(bubbles, { hiddenIds, collapsedIds })
 

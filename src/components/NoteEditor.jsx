@@ -10,6 +10,12 @@ import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import { useBodyScrollLock } from '../lib/bodyScrollLock'
 import BubblePickerTree from './BubblePickerTree'
 
+// The Bubble section sits partway down the editor's scrolling page, so the
+// expanded tree never collides with a real height ceiling — geometric fit
+// can't be the opening rule here. Instead: open expanded only when the fully
+// expanded tree is at most this many rows.
+const NOTE_VIEW_MAX_EXPANDED_ROWS = 10
+
 
 function formatNoteDate(isoStr) {
   const d = new Date(isoStr)
@@ -707,15 +713,13 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             <div className="my-3" style={{ borderTop: '1px solid var(--border)' }} />
             <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Bubble</p>
             <div>
-              {/* "Fits without scrolling" here means the whole tree can be on
-                  screen at once inside the editor's scroll panel — the list
-                  sits partway down a long page, so the panel's viewport height
-                  is the budget. Uniform 36px rows keep the check arithmetic. */}
+              {/* The list sits partway down a long scrolling page — expanding
+                  it just grows the page, so there is no height it must fit in.
+                  The opening rule is a row budget instead of geometry. */}
               <BubblePickerTree
                 bubbles={project.bubbles}
                 rowHeight={36}
-                measureAvailable={() => scrollAreaRef.current?.clientHeight ?? null}
-                observeResize={() => scrollAreaRef.current}
+                maxExpandedRows={NOTE_VIEW_MAX_EXPANDED_ROWS}
                 renderRow={renderBubblePickerRow}
               />
             </div>

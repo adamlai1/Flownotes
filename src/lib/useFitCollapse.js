@@ -9,6 +9,11 @@ import { useLayoutEffect, useRef, useState, useCallback } from 'react'
 //     back from a rendered tree, so there is no expand-then-collapse flash.
 //     Only the container's own geometry is measured, in a layout effect
 //     before first paint.
+//   - A surface with NO real height ceiling — the tree sits partway down a
+//     page that scrolls, so the expanded tree always "fits" — declares that
+//     with maxExpandedRows instead: expand iff the fully-expanded row count
+//     is within the budget. Same all-or-nothing decision, different input;
+//     geometry (measureAvailable/observeResize) is ignored in this mode.
 //   - The decision re-runs on container resize and when the tree changes
 //     shape (bubble created / deleted / moved) — but the moment the user
 //     touches a chevron, their state owns the session and the rule never
@@ -23,6 +28,7 @@ export function useFitCollapse({
   extraHeight = 0,   // fixed non-row height (separators, padding), px
   measureAvailable,  // () => available px, or null when unknowable (→ expand)
   observeResize,     // optional: () => Element whose resize re-runs the check
+  maxExpandedRows = null, // unbounded-container mode: expand iff rowCount ≤ this
 }) {
   // null = no decision yet. It reads as all-collapsed, and a real decision
   // lands in a layout effect before that render is ever painted.
@@ -32,12 +38,17 @@ export function useFitCollapse({
 
   // Latest inputs, so decide() stays identity-stable for the effects below.
   const latestRef = useRef(null)
-  latestRef.current = { rowCount, parentIds, rowHeight, extraHeight, measureAvailable }
+  latestRef.current = { rowCount, parentIds, rowHeight, extraHeight, measureAvailable, maxExpandedRows }
 
   const decide = useCallback(() => {
-    const { rowCount, parentIds, rowHeight, extraHeight, measureAvailable } = latestRef.current
-    const available = measureAvailable?.() ?? null
-    const fits = available == null || rowCount * rowHeight + extraHeight <= available
+    const { rowCount, parentIds, rowHeight, extraHeight, measureAvailable, maxExpandedRows } = latestRef.current
+    let fits
+    if (maxExpandedRows != null) {
+      fits = rowCount <= maxExpandedRows
+    } else {
+      const available = measureAvailable?.() ?? null
+      fits = available == null || rowCount * rowHeight + extraHeight <= available
+    }
     setCollapsed(fits ? new Set() : new Set(parentIds))
   }, [])
 
