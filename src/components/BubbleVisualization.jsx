@@ -381,11 +381,13 @@ const bubbleCornerPx = (r) => Math.round(r * BUB_HH * 2 * CORNER_RATIO)
 // penetration so their boxes keep gapX/gapY px between edges. Mutates whichever endpoints
 // the move callbacks set. Returns how deep the pair was overlapping (0 if already clear),
 // so callers can both test "did this push?" and score how bad a whole arrangement is.
-function separateBoxPair(dx, dy, halfWa, halfHa, halfWb, halfHb, gapX, gapY, pushX, pushY) {
+// flipAxis pushes along the axis of MOST penetration instead — for a caller that has
+// watched the least-penetration push get cancelled (see separateOverlaps' jam escape).
+function separateBoxPair(dx, dy, halfWa, halfHa, halfWb, halfHb, gapX, gapY, pushX, pushY, flipAxis = false) {
   const ox = halfWa + halfWb + gapX - Math.abs(dx)
   const oy = halfHa + halfHb + gapY - Math.abs(dy)
   if (ox <= 0 || oy <= 0) return 0
-  if (ox < oy) pushX((ox / 2) * (dx < 0 ? -1 : 1))
+  if ((ox < oy) !== flipAxis) pushX((ox / 2) * (dx < 0 ? -1 : 1))
   else pushY((oy / 2) * (dy < 0 ? -1 : 1))
   return Math.min(ox, oy)
 }
@@ -2711,6 +2713,19 @@ export function separateOverlaps(items, width, height, pinBubbles = false, ellip
   // iterations can only ever help.
   let best = null
   let bestScore = Infinity
+  // Jam escape. The axis-of-least-penetration preference wedges when that axis
+  // is blocked by the page bounds: a row of items that grew too wide for the
+  // page (fewer items → bigger boxes → a saved-position row no longer fits)
+  // keeps taking horizontal pushes the clamp cancels, while vertical room sits
+  // free — the iteration cap then expires still overlapped. Two escapes, both
+  // pure control flow (no gap/damping/iteration value changes), and both inert
+  // while the pass is converging normally:
+  //   1. Room-aware axis choice per push: when exactly ONE axis has enough
+  //      combined wall-room for the pair to actually separate, push that axis.
+  //   2. Stall flip: pairDepths holds each overlapping pair's depth from the
+  //      previous iteration; a pair whose depth stopped shrinking while both
+  //      axes have room is caught in a neighbour cycle — push the other axis.
+  const pairDepths = new Map()
   for (let iter = 0; iter < 120; iter++) {
     let moved = false
     // How wrong the arrangement is at the START of this iteration, in px: pair penetration
@@ -2747,12 +2762,43 @@ export function separateOverlaps(items, width, height, pinBubbles = false, ellip
           if (yielder === a) b[axis] -= rest
           else a[axis] -= rest
         }
+        // Jam escape (see pairDepths above): pick the push axis with the wall
+        // room to actually resolve this pair, and break neighbour cycles by
+        // flipping a pair whose depth stopped shrinking.
+        const hwA = halfWidthOf(a), hhA = halfHeightOf(a)
+        const hwB = halfWidthOf(b), hhB = halfHeightOf(b)
+        const gX = pairGapX(a, b, BUFFER) - EPS, gY = pairGapY(a, b, BUFFER) - EPS
+        const oxNow = hwA + hwB + gX - Math.abs(b.cx - a.cx)
+        const oyNow = hhA + hhB + gY - Math.abs(b.cy - a.cy)
+        let flip = false
+        if (oxNow > 0 && oyNow > 0) {
+          // Combined room the pair has along each axis's push directions —
+          // the push spreads them apart, so it's a's room one way plus b's the
+          // other. An axis with room < penetration cannot finish the job.
+          const sx = (b.cx - a.cx) < 0 ? -1 : 1
+          const roomX = sx > 0
+            ? (a.cx - (hwA + EDGE_INSET)) + ((width - hwB - EDGE_INSET) - b.cx)
+            : ((width - hwA - EDGE_INSET) - a.cx) + (b.cx - (hwB + EDGE_INSET))
+          const sy = (b.cy - a.cy) < 0 ? -1 : 1
+          const roomY = sy > 0
+            ? (a.cy - (SUB_BAR_H + hhA + EDGE_INSET)) + (bottomCentreLimit(b, width, height, safeBottom) - b.cy)
+            : (bottomCentreLimit(a, width, height, safeBottom) - a.cy) + (b.cy - (SUB_BAR_H + hhB + EDGE_INSET))
+          const okX = roomX >= oxNow, okY = roomY >= oyNow
+          let useX = oxNow < oyNow
+          if (okX !== okY) useX = okX
+          const pairKey = i * pos.length + j
+          const depthNow = Math.min(oxNow, oyNow)
+          const stuck = (pairDepths.get(pairKey) ?? Infinity) <= depthNow + EPS
+          pairDepths.set(pairKey, depthNow)
+          if (stuck && okX && okY) useX = !(oxNow < oyNow)
+          flip = (oxNow < oyNow) !== useX
+        }
         const depth = separateBoxPair(
           b.cx - a.cx, b.cy - a.cy,
-          halfWidthOf(a), halfHeightOf(a), halfWidthOf(b), halfHeightOf(b),
-          pairGapX(a, b, BUFFER) - EPS, pairGapY(a, b, BUFFER) - EPS,
+          hwA, hhA, hwB, hhB, gX, gY,
           yielder ? pinnedPush('cx') : (p) => { a.cx -= p; b.cx += p },
           yielder ? pinnedPush('cy') : (p) => { a.cy -= p; b.cy += p },
+          flip,
         )
         if (depth) { moved = true; score += depth }
       }
