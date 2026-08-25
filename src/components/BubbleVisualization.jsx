@@ -23,6 +23,7 @@ import { useBodyScrollLock } from '../lib/bodyScrollLock'
 import ConfirmDialog from './ConfirmDialog'
 import BubbleColorPicker from './BubbleColorPicker'
 import BubbleNameInput from './BubbleNameInput'
+import BubblePickerTree from './BubblePickerTree'
 
 // ─── Position persistence ─────────────────────────────────────────────────────
 
@@ -5070,22 +5071,30 @@ export default function BubbleVisualization({
               <div className="px-4 py-3 text-sm font-semibold" style={{ color: 'var(--text)', borderBottom: '1px solid var(--border)' }}>
                 Add {selectedNoteIds.length} note{selectedNoteIds.length === 1 ? '' : 's'} to…
               </div>
+              {/* max-h-72 (288px) minus py-1 (8px) is the room the fully
+                  expanded tree must fit in — fixed by the classes above, so
+                  the fit check is pure arithmetic (40px rows), no measuring. */}
               <div className="max-h-72 overflow-y-auto py-1" style={{ overscrollBehavior: 'contain' }}>
-                {pickerBubbles.map(b => (
-                  <button
-                    key={b.id}
-                    onClick={() => {
-                      onAddNotesToBubble?.(selectedNoteIds, b.id)
-                      showToast(`Added to ${b.name}`)
-                      exitSelect()
-                    }}
-                    className="w-full flex items-center gap-2.5 px-4 py-2.5 text-sm text-left active:opacity-70"
-                    style={{ color: 'var(--text-2)' }}
-                  >
-                    <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: b.color }} />
-                    <span className="truncate">{b.name}</span>
-                  </button>
-                ))}
+                <BubblePickerTree
+                  bubbles={project.bubbles}
+                  hiddenIds={lockIndex.gatedBubbleIds}
+                  rowHeight={40}
+                  measureAvailable={() => 288 - 8}
+                  renderRow={b => (
+                    <button
+                      onClick={() => {
+                        onAddNotesToBubble?.(selectedNoteIds, b.id)
+                        showToast(`Added to ${b.name}`)
+                        exitSelect()
+                      }}
+                      className="flex-1 min-w-0 flex items-center gap-2.5 pr-4 text-sm text-left active:opacity-70"
+                      style={{ color: 'var(--text-2)' }}
+                    >
+                      <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: b.color }} />
+                      <span className="truncate">{b.name}</span>
+                    </button>
+                  )}
+                />
                 {pickerBubbles.length === 0 && (
                   <p className="px-4 py-3 text-sm" style={{ color: 'var(--text-muted)' }}>No bubbles yet</p>
                 )}

@@ -308,6 +308,7 @@ export default function Sidebar({
                 parentId={null}
                 selectedBubbleId={selectedBubbleId}
                 activeBubbleId={activeBubbleId}
+                open={open}
                 onSelectBubble={onSelectBubble}
                 onRenameBubble={onRenameBubble}
                 onDeleteBubble={onDeleteBubble}

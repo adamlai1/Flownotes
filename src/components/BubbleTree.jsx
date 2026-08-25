@@ -5,6 +5,8 @@ import { getNoteCountForBubble } from '../utils/helpers'
 import BubbleNameInput from './BubbleNameInput'
 import BubbleColorPicker from './BubbleColorPicker'
 import { buildLockIndex } from '../utils/locks'
+import { bubbleChildren, countExpandedBubbleRows, collapsibleBubbleIds } from '../utils/bubbleTree'
+import { useFitCollapse } from '../lib/useFitCollapse'
 import { useLock } from '../contexts/LockContext'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import {
@@ -21,6 +23,12 @@ import {
 // falls back to the neutral hover tone so the tint can't leak the hidden colour.
 const SELECTED_ROW_VARIANT = 'tint'
 
+// Uniform row height (the label button's minHeight) and the idle height of a
+// RootDropZone — the two numbers the fit-based auto-collapse computes with.
+// They must match the rendered sizes below, so both render from these too.
+const ROW_H = 38
+const ROOT_ZONE_H = 3
+
 // Shared drag state for the whole tree. Provided by BubbleTree, consumed by every
 // BubbleNode and RootDropZone so they can start drags and render drop indicators.
 const DragContext = createContext(null)
@@ -32,6 +40,8 @@ function BubbleNode({
   depth,
   activeBubbleId,
   forceExpandIds,
+  isExpanded,
+  onToggleExpand,
   onSelectBubble,
   onRenameBubble,
   onDeleteBubble,
@@ -41,7 +51,9 @@ function BubbleNode({
   onRequestUnlock,
   onToggleLock,
 }) {
-  const [expanded, setExpanded] = useState(true)
+  // Expansion lives at the tree level (useFitCollapse) so opening the sidebar
+  // can decide expand-all/collapse-all for every branch at once.
+  const expanded = isExpanded(bubble.id)
   const [menuOpen, setMenuOpen] = useState(false)
   const [renaming, setRenaming] = useState(false)
   const [renameValue, setRenameValue] = useState('')
@@ -169,11 +181,19 @@ function BubbleNode({
           transition: 'background 100ms, outline-color 100ms',
         }}
       >
-        {/* Expand/collapse toggle */}
+        {/* Expand/collapse toggle — its own hit target, separate from the row.
+            The visible icon keeps its 16px column, but padding + negative
+            margins grow the tappable box to 32px × full row height without
+            moving anything, and z-index keeps that overlap above the row. */}
         {children.length > 0 && !gated ? (
           <button
-            onClick={() => setExpanded(e => !e)}
-            className="w-4 h-4 flex items-center justify-center text-gray-600 hover:text-gray-400 flex-shrink-0"
+            onClick={() => onToggleExpand(bubble.id)}
+            className="self-stretch flex items-center justify-center text-gray-600 hover:text-gray-400 flex-shrink-0"
+            style={{
+              width: 16, minHeight: ROW_H, boxSizing: 'content-box',
+              padding: '0 8px', margin: '0 -8px', position: 'relative', zIndex: 1,
+            }}
+            aria-label={expanded ? 'Collapse' : 'Expand'}
           >
             <svg className={`w-3 h-3 transition-transform ${expanded ? 'rotate-90' : ''}`}
               fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -217,7 +237,7 @@ function BubbleNode({
                 : 'text-gray-300 hover:bg-gray-800'
             }`}
             style={{
-              minHeight: 38,
+              minHeight: ROW_H,
               ...(isSelected && SELECTED_ROW_VARIANT !== 'indigo'
                 ? gated
                   ? { background: 'var(--hover)', color: 'var(--text)' }
@@ -313,6 +333,8 @@ function BubbleNode({
               depth={depth + 1}
               activeBubbleId={activeBubbleId}
               forceExpandIds={forceExpandIds}
+              isExpanded={isExpanded}
+              onToggleExpand={onToggleExpand}
               onSelectBubble={onSelectBubble}
               onRenameBubble={onRenameBubble}
               onDeleteBubble={onDeleteBubble}
@@ -422,7 +444,7 @@ function RootDropZone({ zoneId }) {
       data-drop-root={zoneId}
       style={{
         // Idle: a hairline gap. During a drag: a taller, easy-to-hit target.
-        height: active ? 12 : 3,
+        height: active ? 12 : ROOT_ZONE_H,
         display: 'flex',
         alignItems: 'center',
         transition: 'height 120ms',
@@ -457,6 +479,7 @@ export default function BubbleTree({
   parentId,
   selectedBubbleId,
   activeBubbleId,
+  open = true,
   onSelectBubble,
   onRenameBubble,
   onDeleteBubble,
@@ -493,6 +516,44 @@ export default function BubbleTree({
   // Root element of the tree — used to find the enclosing scroll container for
   // edge auto-scroll during a drag.
   const treeRef = useRef(null)
+
+  // ── Fit-based auto-collapse ──────────────────────────────────────────────
+  // Opening the sidebar decides once, arithmetically, whether the fully
+  // expanded tree fits below the tree's own top edge within the sidebar's
+  // scroller: every branch expands if it does, every branch collapses if it
+  // doesn't. Gated rows count themselves but never their (withheld) children.
+  const treeOpts = { rootId: parentId, childrenWithheldIds: lockIndex.gatedBubbleIds }
+  const fullRowCount = countExpandedBubbleRows(bubbles, treeOpts)
+  const chevronIds = collapsibleBubbleIds(bubbles, treeOpts)
+
+  function findScroller() {
+    for (let el = treeRef.current?.parentElement; el; el = el.parentElement) {
+      const oy = getComputedStyle(el).overflowY
+      if (oy === 'auto' || oy === 'scroll') return el
+    }
+    return null
+  }
+
+  const { isExpanded, toggleExpanded } = useFitCollapse({
+    active: open,
+    rowCount: fullRowCount,
+    parentIds: chevronIds,
+    rowHeight: ROW_H,
+    // The hairline RootDropZones between/around root rows are real height too.
+    extraHeight: (bubbleChildren(bubbles, parentId).length + 1) * ROOT_ZONE_H,
+    // Height the tree may occupy without scrolling: from its own top edge to
+    // the bottom of the scroller's viewport. Measures fixed chrome only —
+    // never the tree's rendered content.
+    measureAvailable: () => {
+      const scroller = findScroller()
+      const tree = treeRef.current
+      if (!scroller || !tree) return null
+      const offsetTop = tree.getBoundingClientRect().top
+        - scroller.getBoundingClientRect().top + scroller.scrollTop
+      return scroller.clientHeight - offsetTop
+    },
+    observeResize: findScroller,
+  })
   // Refs so the global pointer listeners always read the latest values without
   // re-subscribing on every pointer move.
   const dragIdRef = useRef(null)
@@ -670,6 +731,8 @@ export default function BubbleTree({
               depth={0}
               activeBubbleId={activeBubbleId}
               forceExpandIds={forceExpandIds}
+              isExpanded={isExpanded}
+              onToggleExpand={toggleExpanded}
               onSelectBubble={onSelectBubble}
               onRenameBubble={onRenameBubble}
               onDeleteBubble={onDeleteBubble}

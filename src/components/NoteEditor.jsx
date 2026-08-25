@@ -8,6 +8,7 @@ import { useToast } from '../contexts/ToastContext'
 import { copyNoteText } from '../utils/noteShare'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import { useBodyScrollLock } from '../lib/bodyScrollLock'
+import BubblePickerTree from './BubblePickerTree'
 
 
 function formatNoteDate(isoStr) {
@@ -332,37 +333,30 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     }
   }
 
-  function renderBubbleChips(parentId = null, depth = 0) {
-    const items = project.bubbles.filter(b => b.parent_id === parentId)
-    if (items.length === 0) return null
-    return items.map(bubble => {
-      const selected = selectedBubbleIds.includes(bubble.id)
-      const color = bubble.color
-      return (
-        <div key={bubble.id}>
-          <button
-            onClick={() => toggleBubble(bubble.id)}
-            className="flex items-center gap-2 py-1 px-2 rounded-lg w-full text-left transition-all"
-            style={{
-              paddingLeft: `${depth * 24 + 8}px`,
-              background: selected ? `${color}22` : 'transparent',
-            }}
-          >
-            <span
-              className="w-2.5 h-2.5 rounded-full flex-shrink-0 transition-all"
-              style={{ backgroundColor: selected ? color : `${color}55` }}
-            />
-            <span
-              className="text-sm transition-colors"
-              style={{ color: selected ? 'var(--text)' : '#6b7280' }}
-            >
-              {bubble.name}
-            </span>
-          </button>
-          {renderBubbleChips(bubble.id, depth + 1)}
-        </div>
-      )
-    })
+  // The bubble rows themselves; tree order, indentation and fit-based
+  // auto-collapse come from BubblePickerTree. Tapping a row still only
+  // toggles membership — the chevron is its own hit target.
+  function renderBubblePickerRow(bubble) {
+    const selected = selectedBubbleIds.includes(bubble.id)
+    const color = bubble.color
+    return (
+      <button
+        onClick={() => toggleBubble(bubble.id)}
+        className="flex-1 min-w-0 flex items-center gap-2 px-2 rounded-lg text-left transition-all"
+        style={{ background: selected ? `${color}22` : 'transparent' }}
+      >
+        <span
+          className="w-2.5 h-2.5 rounded-full flex-shrink-0 transition-all"
+          style={{ backgroundColor: selected ? color : `${color}55` }}
+        />
+        <span
+          className="text-sm transition-colors truncate"
+          style={{ color: selected ? 'var(--text)' : '#6b7280' }}
+        >
+          {bubble.name}
+        </span>
+      </button>
+    )
   }
 
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0
@@ -712,8 +706,18 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             </div>
             <div className="my-3" style={{ borderTop: '1px solid var(--border)' }} />
             <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Bubble</p>
-            <div className="space-y-0.5">
-              {renderBubbleChips()}
+            <div>
+              {/* "Fits without scrolling" here means the whole tree can be on
+                  screen at once inside the editor's scroll panel — the list
+                  sits partway down a long page, so the panel's viewport height
+                  is the budget. Uniform 36px rows keep the check arithmetic. */}
+              <BubblePickerTree
+                bubbles={project.bubbles}
+                rowHeight={36}
+                measureAvailable={() => scrollAreaRef.current?.clientHeight ?? null}
+                observeResize={() => scrollAreaRef.current}
+                renderRow={renderBubblePickerRow}
+              />
             </div>
           </div>
 
