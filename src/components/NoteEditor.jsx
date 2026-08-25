@@ -851,7 +851,8 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           transition={{ duration: 0.15 }}
           className="fixed inset-0 flex items-center justify-center"
           style={{ zIndex: zIndex + 10, background: 'rgba(0,0,0,0.6)' }}
-          onClick={() => setShowDeleteConfirm(false)}
+          // Destructive confirm: no outside-press dismissal — explicit
+          // choice or Escape only.
         >
           <motion.div
             initial={{ opacity: 0, scale: 0.94 }}

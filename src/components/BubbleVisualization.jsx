@@ -19,6 +19,7 @@ import {
   LONG_PRESS_MENU_MS, DRAG_PICKUP_MS, DRAG_PICKUP_PAGED_MS, PRESS_MOVE_CANCEL_PX,
 } from '../utils/pressArbitration'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
+import { useDismissOnOutside } from '../lib/dismiss'
 import { useBodyScrollLock } from '../lib/bodyScrollLock'
 import ConfirmDialog from './ConfirmDialog'
 import BubbleColorPicker from './BubbleColorPicker'
@@ -2401,6 +2402,10 @@ function ZoomExpand({ anim, size, onDone, offset }) {
 // events so the canvas's drag handlers underneath don't pick them up.
 
 function LockMenu({ menu, gated, onLock, onCopy, onShare, onRename, onColor, onDelete, onClose, width, height }) {
+  // Outside-press dismissal via the shared hook (Escape stays with the
+  // parent's existing popup-level registration).
+  const lockMenuPanelRef = useRef(null)
+  useDismissOnOutside(true, onClose, [lockMenuPanelRef], { escLevel: false })
   if (!menu) return null
   const item = menu.item
   // Copy/Share are for notes, and never for a hidden one — the lock exists to keep the
@@ -2426,12 +2431,15 @@ function LockMenu({ menu, gated, onLock, onCopy, onShare, onRename, onColor, onD
 
   return (
     <>
+      {/* Shield only — dismissal is the shared hook below; the parent already
+          registers this menu's Escape layer. */}
       <div
         className="absolute inset-0 z-40"
-        onPointerDown={e => { e.stopPropagation(); onClose() }}
+        onPointerDown={e => e.stopPropagation()}
         onClick={e => e.stopPropagation()}
       />
       <motion.div
+        ref={lockMenuPanelRef}
         initial={{ opacity: 0, scale: 0.92 }}
         animate={{ opacity: 1, scale: 1 }}
         transition={{ duration: 0.13 }}
@@ -3894,7 +3902,18 @@ export default function BubbleVisualization({
   useEscapeLayer(navStack.length > 0, zoomOut, ESC_LEVEL.base)
   // The long-press menu is drawn over the canvas, so it takes the press first.
   useEscapeLayer(!!lockMenu, closeLockMenu, ESC_LEVEL.popup)
-  useEscapeLayer(addToOpen, () => setAddToOpen(false), ESC_LEVEL.modal)
+
+  // Transient overlays: outside-press + Escape dismissal via the shared hook.
+  // Each ref is the overlay's PANEL — its shield/dim backdrop stays rendered
+  // (it keeps the press off the canvas's position-based handlers) but carries
+  // no dismissal of its own any more.
+  const addToPanelRef = useRef(null)
+  useDismissOnOutside(addToOpen, () => setAddToOpen(false), [addToPanelRef], { escLevel: ESC_LEVEL.modal })
+  const renamePanelRef = useRef(null)
+  useDismissOnOutside(!!renameItem, () => setRenameItem(null), [renamePanelRef], { escLevel: ESC_LEVEL.modal })
+  const colorPanelRef = useRef(null)
+  useDismissOnOutside(!!colorPickerItem, () => setColorPickerItem(null), [colorPanelRef], { escLevel: ESC_LEVEL.modal })
+  useDismissOnOutside(layoutMenuOpen, () => setLayoutMenuOpen(false), [layoutMenuRef])
 
   // ── Reorganize the current level ────────────────────────────────────────────
   // Drop the saved manual positions + page assignments for THIS level only, so it
@@ -3936,6 +3955,8 @@ export default function BubbleVisualization({
   // single-line cap is what makes that constant exact.
   const [crumbStage, setCrumbStage] = useState(0)
   const [crumbMenuOpen, setCrumbMenuOpen] = useState(false)
+  const crumbMenuPanelRef = useRef(null)
+  useDismissOnOutside(crumbMenuOpen, () => setCrumbMenuOpen(false), [crumbMenuPanelRef])
   const crumbRowRef = useRef(null)
   // Re-derive the stage from scratch whenever the trail's text or the width
   // changes; the measuring effect below escalates it again as needed.
@@ -4730,11 +4751,10 @@ export default function BubbleVisualization({
               >
                 …
               </button>
-              {crumbMenuOpen && (
-                <div className="fixed inset-0 z-40" onClick={() => setCrumbMenuOpen(false)} />
-              )}
+              {crumbMenuOpen && <div className="fixed inset-0 z-40" />}
               {crumbMenuOpen && (
                 <div
+                  ref={crumbMenuPanelRef}
                   className="absolute left-0 top-full mt-1.5 rounded-xl shadow-2xl overflow-hidden z-50"
                   style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', minWidth: 160, maxWidth: 240 }}
                 >
@@ -4825,9 +4845,7 @@ export default function BubbleVisualization({
               <rect x="13" y="13" width="7" height="7" rx="1.5" strokeWidth={2} />
             </svg>
           </button>
-          {layoutMenuOpen && (
-            <div className="fixed inset-0 z-40" onClick={() => setLayoutMenuOpen(false)} />
-          )}
+          {layoutMenuOpen && <div className="fixed inset-0 z-40" />}
           {layoutMenuOpen && (
             <div
               ref={layoutMenuRef}
@@ -5151,14 +5169,13 @@ export default function BubbleVisualization({
             data-modal
             className="fixed inset-0 z-50 flex items-center justify-center"
             style={{ background: 'rgba(0,0,0,0.6)' }}
-            onClick={() => setAddToOpen(false)}
             onPointerDown={e => e.stopPropagation()}
             onPointerUp={e => e.stopPropagation()}
           >
             <div
+              ref={addToPanelRef}
               className="mx-6 w-full max-w-xs rounded-2xl overflow-hidden"
               style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
-              onClick={e => e.stopPropagation()}
             >
               <div className="px-4 py-3 text-sm font-semibold" style={{ color: 'var(--text)', borderBottom: '1px solid var(--border)' }}>
                 Add {selectedNoteIds.length} note{selectedNoteIds.length === 1 ? '' : 's'} to…
@@ -5209,14 +5226,13 @@ export default function BubbleVisualization({
             data-modal
             className="fixed inset-0 z-50 flex items-center justify-center"
             style={{ background: 'rgba(0,0,0,0.6)' }}
-            onClick={() => setRenameItem(null)}
             onPointerDown={e => e.stopPropagation()}
             onPointerUp={e => e.stopPropagation()}
           >
             <div
+              ref={renamePanelRef}
               className="mx-6 w-full max-w-xs rounded-2xl p-5"
               style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
-              onClick={e => e.stopPropagation()}
             >
               <h2 className="text-white font-semibold text-base text-center mb-4">Rename bubble</h2>
               <BubbleNameInput
@@ -5260,14 +5276,13 @@ export default function BubbleVisualization({
           data-modal
           className="fixed inset-0 z-50 flex items-center justify-center"
           style={{ background: 'rgba(0,0,0,0.6)' }}
-          onClick={() => setColorPickerItem(null)}
           onPointerDown={e => e.stopPropagation()}
           onPointerUp={e => e.stopPropagation()}
         >
           <div
+            ref={colorPanelRef}
             className="mx-6 w-full max-w-xs rounded-2xl p-5"
             style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
-            onClick={e => e.stopPropagation()}
           >
             <h2 className="text-white font-semibold text-base text-center mb-4 truncate">
               {colorPickerItem.name}

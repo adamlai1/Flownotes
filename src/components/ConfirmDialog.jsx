@@ -25,10 +25,13 @@ export default function ConfirmDialog({
           transition={{ duration: 0.15 }}
           className="fixed inset-0 flex items-center justify-center"
           style={{ zIndex: 70, background: 'rgba(0,0,0,0.6)' }}
-          onClick={onCancel}
+          // Deliberately NO outside-press dismissal: this confirms a
+          // destructive action, so it closes only through an explicit choice
+          // (either button) or Escape.
           // The bubble canvas detects taps by pointer position, not DOM target
           // — stopping only clicks lets a tap on this dialog fall through to
           // the item beneath. Contain the pointer events too.
+          onClick={e => e.stopPropagation()}
           onPointerDown={e => e.stopPropagation()}
           onPointerUp={e => e.stopPropagation()}
         >

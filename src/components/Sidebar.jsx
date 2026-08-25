@@ -6,6 +6,7 @@ import BubbleColorPicker from './BubbleColorPicker'
 import { BUBBLE_COLORS, CUSTOM_TAG_PALETTE } from '../data/defaultData'
 import { generateId } from '../utils/helpers'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
+import { useDismissOnOutside } from '../lib/dismiss'
 import { useBodyScrollLock } from '../lib/bodyScrollLock'
 
 export default function Sidebar({
@@ -98,13 +99,10 @@ export default function Sidebar({
     }
   }, [open, isDesktop])
 
-  // Dismiss contextTag on outside click
-  useEffect(() => {
-    if (!contextTag) return
-    function handleClick() { setContextTag(null) }
-    document.addEventListener('click', handleClick)
-    return () => document.removeEventListener('click', handleClick)
-  }, [contextTag])
+  // Dismiss the revealed tag actions on an outside press (shared hook — the
+  // active tag row itself counts as inside, so its Edit/Delete stay tappable).
+  const contextTagRowRef = useRef(null)
+  useDismissOnOutside(contextTag !== null, () => setContextTag(null), [contextTagRowRef])
 
   function handleAddBubble() {
     const name = newBubbleName.trim()
@@ -359,6 +357,7 @@ export default function Sidebar({
                 <button
                   key={tag}
                   type="button"
+                  ref={contextTag === tag ? contextTagRowRef : null}
                   className="w-full flex items-center gap-2 px-2 py-1.5 rounded-lg mt-0.5 text-left"
                   style={{ backgroundColor: contextTag === tag ? '#1f2937' : 'transparent', minHeight: 38 }}
                   onClick={e => { e.stopPropagation(); setContextTag(contextTag === tag ? null : tag) }}
@@ -418,7 +417,8 @@ export default function Sidebar({
             transition={{ duration: 0.15 }}
             className="fixed inset-0 flex items-center justify-center z-50"
             style={{ background: 'rgba(0,0,0,0.6)' }}
-            onClick={() => setConfirmDeleteTag(null)}
+            // Destructive confirm: no outside-press dismissal — explicit
+            // choice or Escape only.
           >
             <motion.div
               initial={{ opacity: 0, scale: 0.94 }}

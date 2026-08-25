@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { useEscapeLayer, ESC_LEVEL, KEYBOARD_MEDIA_QUERY } from '../lib/escapeStack'
+import { ESC_LEVEL, KEYBOARD_MEDIA_QUERY } from '../lib/escapeStack'
+import { useDismissOnOutside } from '../lib/dismiss'
 import { useBodyScrollLock } from '../lib/bodyScrollLock'
 import { BUBBLE_COLORS } from '../data/defaultData'
 import BubbleNameInput from './BubbleNameInput'
@@ -46,7 +47,11 @@ export default function CreateBubbleSheet({
   const [color, setColor] = useState(defaultColor ?? BUBBLE_COLORS[0])
   const inputRef = useRef(null)
 
-  useEscapeLayer(open, onCancel, ESC_LEVEL.modal)
+  // Outside-press + Escape dismissal (shared hook). NOTE: the sheet holds a
+  // half-typed name, and an outside press discards it — that matches its
+  // long-standing dim-tap-to-cancel behaviour, kept as-is.
+  const cardRef = useRef(null)
+  useDismissOnOutside(open, onCancel, [cardRef], { escLevel: ESC_LEVEL.modal })
   // The top-anchoring below stops iOS from auto-panning at focus time; this
   // stops the user from dragging the whole shell around once the keyboard has
   // shrunk the visual viewport. Keyed on `open`, so cancel and create both
@@ -94,7 +99,6 @@ export default function CreateBubbleSheet({
           // the card in the visible area above the keyboard.
           className="fixed inset-0"
           style={{ zIndex: 70, background: 'rgba(0,0,0,0.6)' }}
-          onClick={onCancel}
         >
         <div
           className={`absolute left-0 w-full flex justify-center ${hasHardwareKeyboard ? 'items-center' : 'items-start'}`}
@@ -114,6 +118,7 @@ export default function CreateBubbleSheet({
           }}
         >
           <motion.div
+            ref={cardRef}
             initial={{ opacity: 0, scale: 0.94 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0, scale: 0.94 }}

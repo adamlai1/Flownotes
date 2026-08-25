@@ -1,7 +1,8 @@
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { formatDate, noteTitle, contrastColor, realBubbleIds } from '../utils/helpers'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
+import { useDismissOnOutside } from '../lib/dismiss'
 import { useToast } from '../contexts/ToastContext'
 import { canShareNotes, copyNoteText, shareNoteText } from '../utils/noteShare'
 import { TAG_COLORS } from '../data/defaultData'
@@ -28,6 +29,9 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
   const totalConnectionCount = locked ? 0 : note.connections.length + reverseConnectionCount
 
   useEscapeLayer(showDeleteConfirm, () => setShowDeleteConfirm(false), ESC_LEVEL.modal)
+  // Options menu: outside-press + Escape via the shared hook.
+  const menuPanelRef = useRef(null)
+  useDismissOnOutside(showMenu && !selectMode, () => setShowMenu(false), [menuPanelRef])
 
   const showToast = useToast()
   // Share is only offered where a share sheet exists; read once, since it can't appear
@@ -104,8 +108,9 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
 
       {showMenu && !selectMode && (
         <>
-          <div className="fixed inset-0 z-10" onClick={e => { e.stopPropagation(); setShowMenu(false) }} />
+          <div className="fixed inset-0 z-10" onClick={e => e.stopPropagation()} />
           <div
+            ref={menuPanelRef}
             className="absolute top-8 right-3 rounded-lg shadow-lg z-20 py-1 min-w-[120px]"
             style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
           >
@@ -242,7 +247,10 @@ export default function NoteCard({ note, bubbles, allNotes, onClick, onDelete, o
             transition={{ duration: 0.15 }}
             className="fixed inset-0 flex items-center justify-center z-50"
             style={{ background: 'rgba(0,0,0,0.6)' }}
-            onClick={e => { e.stopPropagation(); setShowDeleteConfirm(false) }}
+            // Destructive confirm: no outside-press dismissal — explicit
+            // choice or Escape only. Clicks still stop here so the card
+            // beneath never hears them.
+            onClick={e => e.stopPropagation()}
           >
             <motion.div
               initial={{ opacity: 0, scale: 0.94 }}

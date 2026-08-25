@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useLayoutEffect } from 'react'
 import { useAuth } from '../contexts/AuthContext'
 import { useBodyScrollLock } from '../lib/bodyScrollLock'
+import { useDismissOnOutside } from '../lib/dismiss'
 
 export default function TopNav({
   projectList,
@@ -22,11 +23,14 @@ export default function TopNav({
   const { user } = useAuth()
   const [userMenuOpen, setUserMenuOpen] = useState(false)
   const userMenuRef = useRef(null)
+  const userMenuPanelRef = useRef(null)
 
-  // Dismissal is a real backdrop (rendered with the menu below), not a
-  // document listener: a document-level outside-close lets the very tap that
-  // dismisses the menu also activate whatever it lands on — e.g. opening a
-  // bubble on the canvas. The backdrop swallows that tap instead.
+  // The invisible backdrops below stay as tap-SHIELDS (they keep an outside
+  // press off the canvas's position-based handlers), but dismissal itself is
+  // the shared useDismissOnOutside hook: pointerdown-driven, so it works on
+  // iOS Safari too, whose click synthesis on plain divs is what let the old
+  // backdrop-onClick close silently fail on the phone — and Escape comes with
+  // it for free.
   const [dropdownOpen, setDropdownOpen] = useState(false)
   // Word-boundary truncation for the pill's project name: when the full name
   // overflows, trailing words are dropped one at a time (with an ellipsis) until
@@ -70,6 +74,14 @@ export default function TopNav({
   const [creatingProject, setCreatingProject] = useState(false)
   const [renamingId, setRenamingId] = useState(null)
   const [renameValue, setRenameValue] = useState('')
+
+  function closeSwitcher() {
+    setDropdownOpen(false)
+    setCreatingProject(false)
+    setRenamingId(null)
+  }
+  useDismissOnOutside(dropdownOpen, closeSwitcher, [projectMenuRef])
+  useDismissOnOutside(userMenuOpen, () => setUserMenuOpen(false), [userMenuPanelRef])
   // Project rename / new-project inputs raise the keyboard — hold the app
   // shell still while one is mounted (see bodyScrollLock).
   useBodyScrollLock(creatingProject || renamingId !== null)
@@ -186,12 +198,7 @@ export default function TopNav({
           </button>
         </div>
 
-        {dropdownOpen && (
-          <div
-            className="fixed inset-0 z-40"
-            onClick={() => { setDropdownOpen(false); setCreatingProject(false); setRenamingId(null) }}
-          />
-        )}
+        {dropdownOpen && <div className="fixed inset-0 z-40" />}
         {dropdownOpen && (
           <div
             ref={projectMenuRef}
@@ -359,11 +366,10 @@ export default function TopNav({
               )}
             </button>
 
-            {userMenuOpen && (
-              <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
-            )}
+            {userMenuOpen && <div className="fixed inset-0 z-40" />}
             {userMenuOpen && (
               <div
+                ref={userMenuPanelRef}
                 className="absolute top-full right-0 mt-1 w-52 rounded-xl shadow-xl z-50 py-1"
                 style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
               >

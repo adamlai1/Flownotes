@@ -7,7 +7,8 @@ import { formatDateGroup, realBubbleIds, getBubbleDescendantIds, noteTitle } fro
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
 import { useToast } from '../contexts/ToastContext'
-import { useEscapeInput, useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
+import { useEscapeInput, ESC_LEVEL } from '../lib/escapeStack'
+import { useDismissOnOutside } from '../lib/dismiss'
 import { TAG_COLORS, SORT_MODES } from '../data/defaultData'
 
 
@@ -78,12 +79,20 @@ export default function MainView({
   const [selectedIds, setSelectedIds] = useState(() => new Set())
   const [confirmDelete, setConfirmDelete] = useState(false)
   // "Add to" bubble picker for the list view's select mode — same picker (and
-  // the same shared tree) as the canvas select-mode header.
+  // the same shared tree) as the canvas select-mode header. Outside-press and
+  // Escape dismissal both come from the shared hook.
   const [addToOpen, setAddToOpen] = useState(false)
+  const addToPanelRef = useRef(null)
   // useToast() returns the showToast function itself (the provider's value is
   // the bare function) — do not destructure it.
   const showToast = useToast()
-  useEscapeLayer(addToOpen, () => setAddToOpen(false), ESC_LEVEL.modal)
+  useDismissOnOutside(addToOpen, () => setAddToOpen(false), [addToPanelRef], { escLevel: ESC_LEVEL.modal })
+  // Sort menu — shared dismissal too (it previously closed only via its
+  // backdrop's click, with no Escape). The ref is the menu PANEL, not the
+  // sortMenuRef wrapper: the full-screen shield renders inside the wrapper,
+  // and counting it as "inside" would make every press look inside.
+  const sortMenuPanelRef = useRef(null)
+  useDismissOnOutside(showSortMenu, () => setShowSortMenu(false), [sortMenuPanelRef])
 
   // Escape in the search box clears the query first; once it's empty it just gives up
   // focus, so a further press can reach the view underneath.
@@ -358,11 +367,10 @@ export default function MainView({
                   </svg>
                   <span className="hidden sm:inline">{currentSortMode.label}</span>
                 </button>
-                {showSortMenu && (
-                  <div className="fixed inset-0 z-20" onClick={() => setShowSortMenu(false)} />
-                )}
+                {showSortMenu && <div className="fixed inset-0 z-20" />}
                 {showSortMenu && (
                   <div
+                    ref={sortMenuPanelRef}
                     className="absolute right-0 top-full mt-1.5 rounded-xl shadow-2xl overflow-hidden z-30"
                     style={{
                       background: 'var(--surface-2)',
@@ -689,12 +697,11 @@ export default function MainView({
           data-modal
           className="fixed inset-0 z-50 flex items-center justify-center"
           style={{ background: 'rgba(0,0,0,0.6)' }}
-          onClick={() => setAddToOpen(false)}
         >
           <div
+            ref={addToPanelRef}
             className="mx-6 w-full max-w-xs rounded-2xl overflow-hidden"
             style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
-            onClick={e => e.stopPropagation()}
           >
             <div className="px-4 py-3 text-sm font-semibold" style={{ color: 'var(--text)', borderBottom: '1px solid var(--border)' }}>
               Add {selectedIds.size} note{selectedIds.size === 1 ? '' : 's'} to…

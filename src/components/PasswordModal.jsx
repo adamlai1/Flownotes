@@ -2,6 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, useAnimationControls } from 'framer-motion'
 import { useEscapeLayer, useEscapeInput, ESC_LEVEL } from '../lib/escapeStack'
+import { useDismissOnOutside } from '../lib/dismiss'
 
 // Multi-step password prompt used for every lock flow (create, verify, change,
 // remove). Each step is one field; `validate` runs when a step is submitted and
@@ -50,6 +51,10 @@ export default function PasswordModal({
   // explicit cancel — the default "blur first" would otherwise swallow the press.
   useEscapeLayer(true, onClose, ESC_LEVEL.password)
   useEscapeInput(inputRef, onClose)
+  // Outside-press dismissal via the shared hook (Escape stays with the
+  // registration above, which pairs with the input-cancel behaviour).
+  const formRef = useRef(null)
+  useDismissOnOutside(true, onClose, [formRef], { escLevel: false })
 
   useEffect(() => {
     // Focus on mount and whenever the step changes.
@@ -91,9 +96,9 @@ export default function PasswordModal({
       transition={{ duration: 0.15 }}
       className="fixed inset-0 flex items-center justify-center px-6"
       style={{ background: 'rgba(0,0,0,0.65)', zIndex: 200 }}
-      onClick={onClose}
     >
       <motion.form
+        ref={formRef}
         initial={{ opacity: 0, scale: 0.94 }}
         animate={{ opacity: 1, scale: 1 }}
         exit={{ opacity: 0, scale: 0.94 }}

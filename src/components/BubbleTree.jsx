@@ -9,6 +9,7 @@ import { bubbleChildren, countExpandedBubbleRows, collapsibleBubbleIds } from '.
 import { useFitCollapse } from '../lib/useFitCollapse'
 import { useLock } from '../contexts/LockContext'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
+import { useDismissOnOutside } from '../lib/dismiss'
 import {
   LONG_PRESS_MENU_MS, DRAG_PICKUP_PAGED_MS, PRESS_MOVE_CANCEL_PX,
 } from '../utils/pressArbitration'
@@ -81,7 +82,13 @@ function BubbleNode({
   const isNestTarget = dropTarget?.kind === 'nest' && dropTarget.id === bubble.id
 
   useEscapeLayer(showDeleteConfirm, () => setShowDeleteConfirm(false), ESC_LEVEL.modal)
-  useEscapeLayer(pickingColor, () => setPickingColor(false), ESC_LEVEL.modal)
+  // Row menu and colour picker: outside-press + Escape via the shared hook.
+  // The delete confirm above keeps Escape only — destructive confirms never
+  // dismiss on an outside press.
+  const menuPanelRef = useRef(null)
+  useDismissOnOutside(menuOpen && !renaming, () => setMenuOpen(false), [menuPanelRef])
+  const colorPanelRef = useRef(null)
+  useDismissOnOutside(pickingColor, () => setPickingColor(false), [colorPanelRef], { escLevel: ESC_LEVEL.modal })
 
   function handleRename() {
     const name = renameValue.trim()
@@ -289,8 +296,9 @@ function BubbleNode({
         {/* Actions dropdown — opened by press-and-hold on the row */}
         {menuOpen && !renaming && (
           <>
-            <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
+            <div className="fixed inset-0 z-10" />
             <div
+              ref={menuPanelRef}
               className="absolute right-0 top-full mt-0.5 flex flex-col rounded-lg shadow-lg z-20 py-1 min-w-[130px]"
               style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
             >
@@ -380,7 +388,8 @@ function BubbleNode({
               transition={{ duration: 0.15 }}
               className="fixed inset-0 flex items-center justify-center z-50"
               style={{ background: 'rgba(0,0,0,0.6)' }}
-              onClick={() => setShowDeleteConfirm(false)}
+              // Destructive confirm: no outside-press dismissal — explicit
+              // choice or Escape only.
             >
               <motion.div
                 initial={{ opacity: 0, scale: 0.94 }}
@@ -427,9 +436,9 @@ function BubbleNode({
               transition={{ duration: 0.15 }}
               className="fixed inset-0 flex items-center justify-center z-50"
               style={{ background: 'rgba(0,0,0,0.6)' }}
-              onClick={() => setPickingColor(false)}
             >
               <motion.div
+                ref={colorPanelRef}
                 initial={{ opacity: 0, scale: 0.94 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.94 }}
