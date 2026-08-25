@@ -10,7 +10,12 @@ import { motion, AnimatePresence } from 'framer-motion'
 // Settings keeps its own local Toast for feedback submission. Left alone deliberately —
 // it predates this and lives inside a full-screen panel that is its own world.
 
-const ToastContext = createContext({ showToast: () => {} })
+// The context value IS the showToast function (see the Provider below) — the
+// default must be the same shape, or a consumer written against the default
+// (`const { showToast } = useToast()`) breaks the moment the provider is
+// present. That exact mismatch produced the list-view "showToast is not a
+// function" bug.
+const ToastContext = createContext(() => {})
 
 const TOAST_MS = 1800
 

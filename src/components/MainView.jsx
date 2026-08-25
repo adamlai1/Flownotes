@@ -80,7 +80,9 @@ export default function MainView({
   // "Add to" bubble picker for the list view's select mode — same picker (and
   // the same shared tree) as the canvas select-mode header.
   const [addToOpen, setAddToOpen] = useState(false)
-  const { showToast } = useToast()
+  // useToast() returns the showToast function itself (the provider's value is
+  // the bare function) — do not destructure it.
+  const showToast = useToast()
   useEscapeLayer(addToOpen, () => setAddToOpen(false), ESC_LEVEL.modal)
 
   // Escape in the search box clears the query first; once it's empty it just gives up
