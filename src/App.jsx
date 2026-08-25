@@ -1797,6 +1797,41 @@ export default function App() {
     })
   }
 
+  // "Remove from this bubble" (select mode): drop each selected item's
+  // membership in the container currently being viewed. Non-destructive by
+  // construction — a note losing its last real membership is re-pinned to the
+  // root canvas, never deleted, and no OTHER membership is ever touched.
+  // Bubbles are single-parented, so for them "remove from here" means
+  // re-parent to root. containerId is a bubble id, or null for the root canvas.
+  function removeItemsFromContainer({ noteIds = [], bubbleIds = [], containerId = null }) {
+    const current = activeProjectRef.current
+    const noteSet = new Set(noteIds)
+    const bubbleSet = new Set(bubbleIds)
+    updateProject({
+      ...current,
+      notes: current.notes.map(n => {
+        if (!noteSet.has(n.id)) return n
+        const ids = n.bubble_ids ?? []
+        if (containerId == null) {
+          // Removing the root pin only makes sense while the note still lives
+          // in a real bubble; a root-only note stays put (no-op, never orphaned).
+          if (realBubbleIds(ids).length === 0 || !ids.includes(ROOT_BUBBLE_ID)) return n
+          return { ...n, bubble_ids: ids.filter(bid => bid !== ROOT_BUBBLE_ID) }
+        }
+        if (!ids.includes(containerId)) return n
+        let updatedIds = ids.filter(bid => bid !== containerId)
+        // Last real membership gone → the note lands on the root canvas.
+        if (realBubbleIds(updatedIds).length === 0 && !updatedIds.includes(ROOT_BUBBLE_ID)) {
+          updatedIds = [...updatedIds, ROOT_BUBBLE_ID]
+        }
+        return { ...n, bubble_ids: updatedIds }
+      }),
+      bubbles: current.bubbles.map(b =>
+        bubbleSet.has(b.id) && (b.parent_id ?? null) !== null ? { ...b, parent_id: null } : b
+      ),
+    })
+  }
+
   function setBubbleLocked(bubbleId, locked) {
     const current = activeProjectRef.current
     updateProject({
@@ -2196,6 +2231,7 @@ export default function App() {
             onSetBubbleLocked={setBubbleLocked}
             onCurrentBubbleChange={setCurrentBubbleId}
             onAddNotesToBubble={addNotesToBubble}
+            onRemoveItemsFromContainer={removeItemsFromContainer}
             headerControlsEl={headerControlsEl}
             navigateBubbleId={navigateBubbleId}
             placeBubbleId={placeBubbleId}

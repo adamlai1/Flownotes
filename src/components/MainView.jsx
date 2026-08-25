@@ -1,11 +1,13 @@
 import { useMemo, useState, useRef, useEffect } from 'react'
 import NoteCard from './NoteCard'
 import BubbleVisualization from './BubbleVisualization'
+import BubblePickerTree from './BubblePickerTree'
 import ConfirmDialog from './ConfirmDialog'
 import { formatDateGroup, realBubbleIds, getBubbleDescendantIds, noteTitle } from '../utils/helpers'
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
-import { useEscapeInput } from '../lib/escapeStack'
+import { useToast } from '../contexts/ToastContext'
+import { useEscapeInput, useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import { TAG_COLORS, SORT_MODES } from '../data/defaultData'
 
 
@@ -21,6 +23,7 @@ export default function MainView({
   onSetBubbleLocked,
   onCurrentBubbleChange,
   onAddNotesToBubble,
+  onRemoveItemsFromContainer,
   headerControlsEl,
   navigateBubbleId,
   placeBubbleId,
@@ -74,6 +77,11 @@ export default function MainView({
   const [selectMode, setSelectMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState(() => new Set())
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // "Add to" bubble picker for the list view's select mode — same picker (and
+  // the same shared tree) as the canvas select-mode header.
+  const [addToOpen, setAddToOpen] = useState(false)
+  const { showToast } = useToast()
+  useEscapeLayer(addToOpen, () => setAddToOpen(false), ESC_LEVEL.modal)
 
   // Escape in the search box clears the query first; once it's empty it just gives up
   // focus, so a further press can reach the view underneath.
@@ -107,6 +115,7 @@ export default function MainView({
     setSelectMode(false)
     setSelectedIds(new Set())
     setConfirmDelete(false)
+    setAddToOpen(false)
   }
   // Selection is only meaningful within the current view + project + filter set.
   useEffect(() => { exitSelect() }, [project.id, viewMode])
@@ -239,6 +248,7 @@ export default function MainView({
           onSetViewMode={onSetViewMode}
           onCurrentBubbleChange={onCurrentBubbleChange}
           onAddNotesToBubble={onAddNotesToBubble}
+          onRemoveItemsFromContainer={onRemoveItemsFromContainer}
           headerControlsEl={headerControlsEl}
           navigateToBubbleId={navigateBubbleId}
           placeBubbleId={placeBubbleId}
@@ -278,6 +288,14 @@ export default function MainView({
                     className="text-sm font-medium text-indigo-400 hover:text-indigo-300 transition-colors"
                   >
                     {filteredNotes.length > 0 && filteredNotes.every(n => selectedIds.has(n.id)) ? 'Deselect all' : 'Select all'}
+                  </button>
+                  {/* Same picker as the canvas select-mode header. */}
+                  <button
+                    onClick={() => setAddToOpen(true)}
+                    disabled={selectedIds.size === 0}
+                    className="text-sm font-semibold text-indigo-400 hover:text-indigo-300 transition-colors disabled:opacity-40"
+                  >
+                    Add to
                   </button>
                   {/* Opens the SAME confirm dialog the old floating pill used —
                       never deletes directly. */}
@@ -661,6 +679,55 @@ export default function MainView({
           exitSelect()
         }}
       />
+
+      {/* ── "Add to" bubble picker (select mode) — same modal and shared tree
+          as the canvas select-mode picker ─────────────────────────────────── */}
+      {addToOpen && (
+        <div
+          data-modal
+          className="fixed inset-0 z-50 flex items-center justify-center"
+          style={{ background: 'rgba(0,0,0,0.6)' }}
+          onClick={() => setAddToOpen(false)}
+        >
+          <div
+            className="mx-6 w-full max-w-xs rounded-2xl overflow-hidden"
+            style={{ background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="px-4 py-3 text-sm font-semibold" style={{ color: 'var(--text)', borderBottom: '1px solid var(--border)' }}>
+              Add {selectedIds.size} note{selectedIds.size === 1 ? '' : 's'} to…
+            </div>
+            {/* max-h-72 (288px) minus py-1 (8px) is the room the fully expanded
+                tree must fit in — fixed by the classes, so the fit check is
+                pure arithmetic (40px rows), same as the canvas picker. */}
+            <div className="max-h-72 overflow-y-auto py-1" style={{ overscrollBehavior: 'contain' }}>
+              <BubblePickerTree
+                bubbles={project.bubbles}
+                hiddenIds={lockIndex.gatedBubbleIds}
+                rowHeight={40}
+                measureAvailable={() => 288 - 8}
+                renderRow={b => (
+                  <button
+                    onClick={() => {
+                      onAddNotesToBubble?.([...selectedIds], b.id)
+                      showToast(`Added to ${b.name}`)
+                      exitSelect()
+                    }}
+                    className="flex-1 min-w-0 flex items-center gap-2.5 pr-4 text-sm text-left active:opacity-70"
+                    style={{ color: 'var(--text-2)' }}
+                  >
+                    <span className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ background: b.color }} />
+                    <span className="truncate">{b.name}</span>
+                  </button>
+                )}
+              />
+              {project.bubbles.filter(b => !lockIndex.gatedBubbleIds.has(b.id)).length === 0 && (
+                <p className="px-4 py-3 text-sm" style={{ color: 'var(--text-muted)' }}>No bubbles yet</p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </main>
       )}
     </div>

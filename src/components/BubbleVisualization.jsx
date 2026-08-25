@@ -2945,6 +2945,7 @@ export default function BubbleVisualization({
   project,
   onSelectNote,
   onDeleteItems,
+  onRemoveItemsFromContainer,
   onSetNoteLocked,
   onSetBubbleLocked,
   viewMode,
@@ -3414,6 +3415,38 @@ export default function BubbleVisualization({
       gated: lockIndex.gatedNoteIds.has(n.id),
     })),
   ]
+
+  // Selected items that "Remove from here" would actually change, per item:
+  // a note leaves the container being viewed (at root that only applies while
+  // it still lives in a real bubble — a root-only note is a no-op, never
+  // orphaned); a bubble is re-parented to root (a no-op if already there).
+  // The header button disables only when EVERY selected item is a no-op.
+  const removableSelection = (() => {
+    const noteIds = []
+    const bubbleIds = []
+    for (const it of layoutItems) {
+      if (!selectedIds.has(it.id)) continue
+      if (it.type === 'note') {
+        const applies = currentId != null
+          ? (it.bubble_ids ?? []).includes(currentId)
+          : realBubbleIds(it).length > 0
+        if (applies) noteIds.push(it.id)
+      } else if ((it.parent_id ?? null) !== null) {
+        bubbleIds.push(it.id)
+      }
+    }
+    return { noteIds, bubbleIds }
+  })()
+
+  // No confirmation, deliberately: Remove is non-destructive (Delete keeps its
+  // dialog). Items the action doesn't apply to are simply left as they are.
+  function removeSelectedFromHere() {
+    const { noteIds, bubbleIds } = removableSelection
+    if (noteIds.length === 0 && bubbleIds.length === 0) return
+    onRemoveItemsFromContainer?.({ noteIds, bubbleIds, containerId: currentId })
+    showToast(currentId ? `Removed from ${currentBubble?.name ?? 'bubble'}` : 'Removed from canvas')
+    exitSelect()
+  }
 
   // Pagination trigger (computed before the single-page layout so it can be skipped
   // when paged). More items than fit one screen at the minimum size → paginate.
@@ -4562,8 +4595,21 @@ export default function BubbleVisualization({
         <div className="px-4 md:px-6 flex items-start justify-between">
         {selectMode ? (
           <>
-            <span className="text-sm font-semibold text-white/90 flex items-center" style={{ paddingTop: 4 }}>
-              {selectedIds.size} selected
+            <span className="flex items-center gap-4 min-w-0" style={{ paddingTop: 4 }}>
+              <span className="text-sm font-semibold text-white/90 flex-shrink-0">
+                {selectedIds.size} selected
+              </span>
+              {/* Non-destructive, so no confirm — and kept on the LEFT, styled
+                  neutral, so it can't read as (or be mis-tapped for) Delete,
+                  which lives across the header in the right cluster. */}
+              <button
+                onClick={removeSelectedFromHere}
+                disabled={removableSelection.noteIds.length === 0 && removableSelection.bubbleIds.length === 0}
+                className="text-sm font-medium text-white/60 hover:text-white/90 transition-colors disabled:opacity-40"
+                aria-label="Remove from this bubble"
+              >
+                Remove
+              </button>
             </span>
             <span className="flex items-center gap-5 flex-shrink-0" style={{ paddingTop: 4 }}>
               {/* Enabled only when the selection contains NOTES — bubbles are
