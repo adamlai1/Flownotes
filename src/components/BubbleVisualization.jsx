@@ -3492,6 +3492,14 @@ export default function BubbleVisualization({
     return { noteIds, bubbleIds }
   })()
 
+  // Non-empty = has any direct contents (a sub-bubble or a note filed here).
+  // Deeper nesting always implies a direct child bubble, so direct is enough.
+  // Decides whether a delete offers the keep-contents / delete-everything
+  // choice; empty bubbles keep the plain confirm.
+  const bubbleHasContents = (id) =>
+    project.bubbles.some(b => b.parent_id === id) ||
+    project.notes.some(n => (n.bubble_ids ?? []).includes(id))
+
   // No confirmation, deliberately: Remove is non-destructive (Delete keeps its
   // dialog). Items the action doesn't apply to are simply left as they are.
   function removeSelectedFromHere() {
@@ -5295,45 +5303,66 @@ export default function BubbleVisualization({
         </div>
       )}
 
-      <ConfirmDialog
-        open={confirmDelete}
-        title={`Delete ${selectedIds.size} item${selectedIds.size === 1 ? '' : 's'}?`}
-        message="Selected bubbles delete their sub-bubbles too. Notes inside move back to the top level. This can't be undone."
-        confirmLabel="Delete"
-        onCancel={() => setConfirmDelete(false)}
-        onConfirm={() => {
-          const noteIds = []
-          const bubbleIds = []
-          for (const it of layoutItems) {
-            if (!selectedIds.has(it.id)) continue
-            if (it.type === 'note') noteIds.push(it.id)
-            else bubbleIds.push(it.id)
-          }
-          onDeleteItems?.({ noteIds, bubbleIds })
+      {/* Select-mode delete. A NON-EMPTY selected bubble turns this into the
+          three-choice prompt (one prompt for the whole selection): Keep
+          contents lifts everything inside the selected bubbles up one level;
+          Delete everything takes the subtree — notes living only there
+          included. Selected notes delete either way (unchanged behaviour).
+          All-empty bubbles (or notes only) keep the plain two-button confirm. */}
+      {(() => {
+        const selNoteIds = []
+        const selBubbleIds = []
+        for (const it of layoutItems) {
+          if (!selectedIds.has(it.id)) continue
+          if (it.type === 'note') selNoteIds.push(it.id)
+          else selBubbleIds.push(it.id)
+        }
+        const anyNonEmpty = selBubbleIds.some(bubbleHasContents)
+        const doDelete = (bubbleMode) => {
+          onDeleteItems?.({ noteIds: selNoteIds, bubbleIds: selBubbleIds, bubbleMode })
           exitSelect()
-        }}
-      />
+        }
+        return (
+          <ConfirmDialog
+            open={confirmDelete}
+            title={`Delete ${selectedIds.size} item${selectedIds.size === 1 ? '' : 's'}?`}
+            message={anyNonEmpty
+              ? `${selNoteIds.length ? 'Selected notes are deleted either way. ' : ''}Keep contents moves everything inside the selected bubbles up one level. Delete everything deletes the contents too — notes that live only there included. This can't be undone.`
+              : "This can't be undone."}
+            confirmLabel={anyNonEmpty ? 'Delete everything' : 'Delete'}
+            onCancel={() => setConfirmDelete(false)}
+            onConfirm={() => doDelete('everything')}
+            {...(anyNonEmpty ? { secondaryLabel: 'Keep contents', onSecondary: () => doDelete('keep') } : {})}
+          />
+        )
+      })()}
 
-      <ConfirmDialog
-        open={!!confirmDeleteItem}
-        title={confirmDeleteItem?.type === 'note' ? 'Delete note?' : 'Delete bubble?'}
-        // Accurate to what deleteItems actually does: sub-bubbles are removed with the
-        // parent, but its notes are only detached — they reappear at the top level.
-        message={confirmDeleteItem?.type === 'note'
-          ? "This can't be undone."
-          : "Sub-bubbles are deleted too. Notes inside move back to the top level. This can't be undone."}
-        confirmLabel="Delete"
-        onCancel={() => setConfirmDeleteItem(null)}
-        onConfirm={() => {
-          const it = confirmDeleteItem
-          if (it) {
-            onDeleteItems?.(it.type === 'note'
-              ? { noteIds: [it.id], bubbleIds: [] }
-              : { noteIds: [], bubbleIds: [it.id] })
-          }
+      {/* Single-item delete (long-press menu). Same fork: a non-empty bubble
+          gets the three-choice prompt, an empty bubble or a note keeps the
+          plain confirm. */}
+      {(() => {
+        const it = confirmDeleteItem
+        const nonEmptyBubble = it && it.type !== 'note' && bubbleHasContents(it.id)
+        const doDelete = (bubbleMode) => {
+          onDeleteItems?.(it.type === 'note'
+            ? { noteIds: [it.id], bubbleIds: [] }
+            : { noteIds: [], bubbleIds: [it.id], bubbleMode })
           setConfirmDeleteItem(null)
-        }}
-      />
+        }
+        return (
+          <ConfirmDialog
+            open={!!confirmDeleteItem}
+            title={it?.type === 'note' ? 'Delete note?' : 'Delete bubble?'}
+            message={nonEmptyBubble
+              ? 'Keep contents moves everything inside up one level. Delete everything deletes the contents too — notes that live only here included. This can\'t be undone.'
+              : "This can't be undone."}
+            confirmLabel={nonEmptyBubble ? 'Delete everything' : 'Delete'}
+            onCancel={() => setConfirmDeleteItem(null)}
+            onConfirm={() => doDelete('everything')}
+            {...(nonEmptyBubble ? { secondaryLabel: 'Keep contents', onSecondary: () => doDelete('keep') } : {})}
+          />
+        )
+      })()}
 
       <ConfirmDialog
         open={confirmReorganize}

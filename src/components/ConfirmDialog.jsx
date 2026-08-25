@@ -3,6 +3,12 @@ import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 
 // Small centered confirm modal. Rendered at the top of the tree by whoever needs it;
 // `open` drives the enter/exit animation. onConfirm/onCancel are always provided.
+//
+// With `secondaryLabel`/`onSecondary` the dialog becomes a three-choice prompt
+// (deleting a non-empty bubble: keep contents vs delete everything). The
+// secondary is the SAFE option: it renders first and solid, the destructive
+// confirm sits below it in red, and cancel closes without doing either — the
+// destructive choice is never the default or the visually dominant one.
 export default function ConfirmDialog({
   open,
   title = 'Are you sure?',
@@ -10,6 +16,8 @@ export default function ConfirmDialog({
   confirmLabel = 'Delete',
   onConfirm,
   onCancel,
+  secondaryLabel,
+  onSecondary,
 }) {
   // Escape cancels the dialog and nothing else — it outranks the view underneath.
   useEscapeLayer(open, onCancel, ESC_LEVEL.modal)
@@ -46,6 +54,29 @@ export default function ConfirmDialog({
           >
             <h2 className="text-white font-semibold text-lg text-center mb-1">{title}</h2>
             {message && <p className="text-gray-400 text-sm text-center mb-5">{message}</p>}
+            {secondaryLabel ? (
+              <div className="flex flex-col gap-2">
+                <button
+                  onClick={onSecondary}
+                  className="w-full py-2.5 rounded-xl text-sm font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+                >
+                  {secondaryLabel}
+                </button>
+                <button
+                  onClick={onConfirm}
+                  className="w-full py-2.5 rounded-xl text-sm font-medium bg-red-600 hover:bg-red-500 text-white transition-colors"
+                >
+                  {confirmLabel}
+                </button>
+                <button
+                  onClick={onCancel}
+                  className="w-full py-2.5 rounded-xl text-sm font-medium transition-colors"
+                  style={{ background: 'var(--hover)', color: 'var(--text-2)' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            ) : (
             <div className="flex gap-3">
               <button
                 onClick={onCancel}
@@ -61,6 +92,7 @@ export default function ConfirmDialog({
                 {confirmLabel}
               </button>
             </div>
+            )}
           </motion.div>
         </motion.div>
       )}

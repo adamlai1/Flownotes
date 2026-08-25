@@ -70,6 +70,9 @@ function BubbleNode({
   const pressRef = useRef(null)
   const suppressClickRef = useRef(false)
   const children = bubbles.filter(b => b.parent_id === bubble.id)
+  // Any direct contents (sub-bubble or note filed here) — decides whether the
+  // delete confirm offers the keep-contents / delete-everything choice.
+  const hasContents = children.length > 0 || notes.some(n => (n.bubble_ids ?? []).includes(bubble.id))
   // A locked bubble is hidden here too, or the sidebar would be a way around the
   // lock: its name, its note count and (by selecting it) its whole contents.
   const gated = !!lockIndex?.gatedBubbleIds.has(bubble.id)
@@ -401,22 +404,57 @@ function BubbleNode({
                 onClick={e => e.stopPropagation()}
               >
                 <h2 className="text-white font-semibold text-lg text-center mb-1">Delete Bubble?</h2>
-                <p className="text-gray-400 text-sm text-center mb-5">This cannot be undone.</p>
-                <div className="flex gap-3">
-                  <button
-                    onClick={() => setShowDeleteConfirm(false)}
-                    className="flex-1 py-2.5 rounded-xl text-sm font-medium transition-colors"
-                    style={{ background: 'var(--hover)', color: 'var(--text-2)' }}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    onClick={() => { setShowDeleteConfirm(false); onDeleteBubble(bubble.id) }}
-                    className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-red-600 hover:bg-red-500 text-white transition-colors"
-                  >
-                    Delete
-                  </button>
-                </div>
+                {/* Non-empty bubble → three-choice prompt: Keep contents (the
+                    safe, visually dominant option) lifts what's inside up one
+                    level; Delete everything takes the subtree — notes living
+                    only there included. Empty bubble → plain confirm. */}
+                {hasContents ? (
+                  <>
+                    <p className="text-gray-400 text-sm text-center mb-5">
+                      Keep contents moves everything inside up one level. Delete everything deletes the contents too — notes that live only here included. This cannot be undone.
+                    </p>
+                    <div className="flex flex-col gap-2">
+                      <button
+                        onClick={() => { setShowDeleteConfirm(false); onDeleteBubble(bubble.id, 'keep') }}
+                        className="w-full py-2.5 rounded-xl text-sm font-medium bg-indigo-600 hover:bg-indigo-500 text-white transition-colors"
+                      >
+                        Keep contents
+                      </button>
+                      <button
+                        onClick={() => { setShowDeleteConfirm(false); onDeleteBubble(bubble.id, 'everything') }}
+                        className="w-full py-2.5 rounded-xl text-sm font-medium bg-red-600 hover:bg-red-500 text-white transition-colors"
+                      >
+                        Delete everything
+                      </button>
+                      <button
+                        onClick={() => setShowDeleteConfirm(false)}
+                        className="w-full py-2.5 rounded-xl text-sm font-medium transition-colors"
+                        style={{ background: 'var(--hover)', color: 'var(--text-2)' }}
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-gray-400 text-sm text-center mb-5">This cannot be undone.</p>
+                    <div className="flex gap-3">
+                      <button
+                        onClick={() => setShowDeleteConfirm(false)}
+                        className="flex-1 py-2.5 rounded-xl text-sm font-medium transition-colors"
+                        style={{ background: 'var(--hover)', color: 'var(--text-2)' }}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => { setShowDeleteConfirm(false); onDeleteBubble(bubble.id, 'everything') }}
+                        className="flex-1 py-2.5 rounded-xl text-sm font-medium bg-red-600 hover:bg-red-500 text-white transition-colors"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </>
+                )}
               </motion.div>
             </motion.div>
           )}

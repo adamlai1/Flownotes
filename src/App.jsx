@@ -1659,31 +1659,10 @@ export default function App() {
     updateProject(updated)
   }
 
-  function deleteBubble(bubbleId) {
-    const toRemove = new Set()
-    function collectIds(id) {
-      toRemove.add(id)
-      activeProject.bubbles.filter(b => b.parent_id === id).forEach(b => collectIds(b.id))
-    }
-    collectIds(bubbleId)
-
-    const updated = {
-      ...activeProject,
-      bubbles: activeProject.bubbles.filter(b => !toRemove.has(b.id)),
-      notes: activeProject.notes.map(n => {
-        const bubble_ids = n.bubble_ids.filter(bid => !toRemove.has(bid))
-        // Losing its last real bubble re-pins the note to the project canvas —
-        // a note is never left with no location.
-        if (realBubbleIds(bubble_ids).length === 0 && !bubble_ids.includes(ROOT_BUBBLE_ID)) {
-          bubble_ids.push(ROOT_BUBBLE_ID)
-        }
-        return { ...n, bubble_ids }
-      }),
-    }
-    if (selectedBubbleId && toRemove.has(selectedBubbleId)) {
-      setSelectedBubbleId(null)
-    }
-    commitDelete(updated, { kind: 'bubbles', bubbleIds: [...toRemove] })
+  // Single-bubble delete (sidebar row menu). `bubbleMode` chooses what happens
+  // to the contents — see deleteItems, which owns the logic for both paths.
+  function deleteBubble(bubbleId, bubbleMode = 'everything') {
+    deleteItems({ bubbleIds: [bubbleId], bubbleMode })
   }
 
   // Move a bubble to a new parent (drag-and-drop reparenting). newParentId === null
@@ -1883,39 +1862,94 @@ export default function App() {
     setNoteStack(prev => prev.filter(id => id !== noteId))
   }
 
-  // Bulk delete for multi-select: removes any number of notes AND bubbles in one commit.
-  // Bubbles expand to include their descendants (same as deleteBubble); notes and bubble
-  // references on surviving notes are cleaned up together, and both tombstone kinds go
-  // out in a single flush.
-  function deleteItems({ noteIds = [], bubbleIds = [] }) {
+  // Bulk delete for multi-select AND every bubble-delete path. Notes in
+  // `noteIds` were selected explicitly and hard-delete exactly as before.
+  // Bubbles follow `bubbleMode`:
+  //
+  //   'everything' — the whole subtree goes: every descendant bubble, and any
+  //     note whose EVERY membership lies inside that subtree. Survival is
+  //     decided against the note's full membership array project-wide, never
+  //     just the part visible in the subtree: one real bubble id outside the
+  //     deleted closure, or an explicit root-canvas pin, and the note lives on
+  //     (only its in-subtree memberships are stripped) — deleting here must
+  //     never remove content from somewhere the user isn't looking.
+  //
+  //   'keep' — only the named bubbles are deleted; their DIRECT children move
+  //     up one level (sub-bubbles intact with their own contents). Notes gain
+  //     membership in the deleted bubble's parent level — the parent bubble,
+  //     or the root canvas pin at top level — and keep all other memberships.
+  function deleteItems({ noteIds = [], bubbleIds = [], bubbleMode = 'everything' }) {
     const current = activeProjectRef.current
+    const byId = new Map(current.bubbles.map(b => [b.id, b]))
+    const named = new Set(bubbleIds.filter(id => byId.has(id)))
+
     const bubblesToRemove = new Set()
-    function collect(id) {
-      bubblesToRemove.add(id)
-      current.bubbles.filter(b => b.parent_id === id).forEach(b => collect(b.id))
+    if (bubbleMode === 'keep') {
+      for (const id of named) bubblesToRemove.add(id)
+    } else {
+      const collect = (id) => {
+        bubblesToRemove.add(id)
+        current.bubbles.filter(b => b.parent_id === id).forEach(b => collect(b.id))
+      }
+      named.forEach(collect)
     }
-    bubbleIds.forEach(collect)
+
     const notesToRemove = new Set(noteIds)
     if (notesToRemove.size === 0 && bubblesToRemove.size === 0) return
 
-    const updated = {
-      ...current,
-      bubbles: current.bubbles.filter(b => !bubblesToRemove.has(b.id)),
-      notes: current.notes
-        .filter(n => !notesToRemove.has(n.id))
-        .map(n => {
-          const bubble_ids = n.bubble_ids.filter(bid => !bubblesToRemove.has(bid))
-          // Same re-pin rule as deleteBubble: no real bubbles left → canvas.
-          if (realBubbleIds(bubble_ids).length === 0 && !bubble_ids.includes(ROOT_BUBBLE_ID)) {
-            bubble_ids.push(ROOT_BUBBLE_ID)
-          }
-          return {
-            ...n,
-            bubble_ids,
-            connections: n.connections.filter(c => !notesToRemove.has(c.note_id)),
-          }
-        }),
+    // The nearest surviving ancestor of a deleted bubble — where its contents
+    // land under 'keep'. Selections are same-level siblings so the chain is
+    // normally one step, but walking up keeps a parent+child selection sane.
+    const liftedParent = (id) => {
+      let p = byId.get(id)?.parent_id ?? null
+      while (p != null && bubblesToRemove.has(p)) p = byId.get(p)?.parent_id ?? null
+      return p
     }
+
+    let bubbles
+    if (bubbleMode === 'keep') {
+      bubbles = current.bubbles
+        .filter(b => !bubblesToRemove.has(b.id))
+        .map(b => bubblesToRemove.has(b.parent_id)
+          ? { ...b, parent_id: liftedParent(b.parent_id) }
+          : b)
+    } else {
+      bubbles = current.bubbles.filter(b => !bubblesToRemove.has(b.id))
+      // Cascade: a note whose memberships ALL sit inside the deleted closure
+      // (and that has no root-canvas pin) has nowhere else it exists.
+      for (const n of current.notes) {
+        if (notesToRemove.has(n.id)) continue
+        const ids = n.bubble_ids ?? []
+        const real = realBubbleIds(ids)
+        if (real.length > 0 && !ids.includes(ROOT_BUBBLE_ID) && real.every(bid => bubblesToRemove.has(bid))) {
+          notesToRemove.add(n.id)
+        }
+      }
+    }
+
+    const notes = current.notes
+      .filter(n => !notesToRemove.has(n.id))
+      .map(n => {
+        let bubble_ids = (n.bubble_ids ?? []).filter(bid => !bubblesToRemove.has(bid))
+        if (bubbleMode === 'keep') {
+          for (const bid of n.bubble_ids ?? []) {
+            if (!bubblesToRemove.has(bid)) continue
+            const parent = liftedParent(bid) ?? ROOT_BUBBLE_ID
+            if (!bubble_ids.includes(parent)) bubble_ids = [...bubble_ids, parent]
+          }
+        }
+        // Safety net, same as ever: a note is never left with no location.
+        if (realBubbleIds(bubble_ids).length === 0 && !bubble_ids.includes(ROOT_BUBBLE_ID)) {
+          bubble_ids.push(ROOT_BUBBLE_ID)
+        }
+        return {
+          ...n,
+          bubble_ids,
+          connections: n.connections.filter(c => !notesToRemove.has(c.note_id)),
+        }
+      })
+
+    const updated = { ...current, bubbles, notes }
     if (selectedBubbleId && bubblesToRemove.has(selectedBubbleId)) setSelectedBubbleId(null)
     setNoteStack(prev => prev.filter(id => !notesToRemove.has(id)))
 
