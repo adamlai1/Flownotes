@@ -39,7 +39,7 @@ function BubbleNode({
   notes,
   depth,
   activeBubbleId,
-  forceExpandIds,
+  pinnedIds,
   isExpanded,
   onToggleExpand,
   onSelectBubble,
@@ -52,7 +52,11 @@ function BubbleNode({
   onToggleLock,
 }) {
   // Expansion lives at the tree level (useFitCollapse) so opening the sidebar
-  // can decide expand-all/collapse-all for every branch at once.
+  // can decide expand-all/collapse-all for every branch at once. Ancestors of
+  // the current location are PINNED open (isExpanded already reports them as
+  // expanded): the sidebar's job is orientation, so the path to "you are here"
+  // can't be hidden — and its chevron must not look tappable (below).
+  const pinned = pinnedIds.has(bubble.id)
   const expanded = isExpanded(bubble.id)
   const [menuOpen, setMenuOpen] = useState(false)
   const [renaming, setRenaming] = useState(false)
@@ -72,7 +76,7 @@ function BubbleNode({
   const isSelected = activeBubbleId === bubble.id
   // Children of a locked bubble aren't listed at all — even as "Locked" rows they'd
   // give away how much is nested inside.
-  const showChildren = (expanded || forceExpandIds.has(bubble.id)) && !gated
+  const showChildren = expanded && !gated
   const isDragging = draggingId === bubble.id
   const isNestTarget = dropTarget?.kind === 'nest' && dropTarget.id === bubble.id
 
@@ -184,8 +188,23 @@ function BubbleNode({
         {/* Expand/collapse toggle — its own hit target, separate from the row.
             The visible icon keeps its 16px column, but padding + negative
             margins grow the tappable box to 32px × full row height without
-            moving anything, and z-index keeps that overlap above the row. */}
+            moving anything, and z-index keeps that overlap above the row.
+            On a PINNED ancestor (the chain to the current location) the chevron
+            is not a control at all: a faded, non-interactive marker — not a
+            tappable-but-inert button — because the chain can't be collapsed
+            while you're inside it. */}
         {children.length > 0 && !gated ? (
+          pinned ? (
+            <span
+              className="self-stretch flex items-center justify-center text-gray-600 flex-shrink-0"
+              style={{ width: 16, minHeight: ROW_H, opacity: 0.35, pointerEvents: 'none' }}
+              aria-hidden="true"
+            >
+              <svg className="w-3 h-3 rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+              </svg>
+            </span>
+          ) : (
           <button
             onClick={() => onToggleExpand(bubble.id)}
             className="self-stretch flex items-center justify-center text-gray-600 hover:text-gray-400 flex-shrink-0"
@@ -200,6 +219,7 @@ function BubbleNode({
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
             </svg>
           </button>
+          )
         ) : (
           <span className="w-4 flex-shrink-0" />
         )}
@@ -332,7 +352,7 @@ function BubbleNode({
               notes={notes}
               depth={depth + 1}
               activeBubbleId={activeBubbleId}
-              forceExpandIds={forceExpandIds}
+              pinnedIds={pinnedIds}
               isExpanded={isExpanded}
               onToggleExpand={onToggleExpand}
               onSelectBubble={onSelectBubble}
@@ -489,7 +509,11 @@ export default function BubbleTree({
   onSetBubbleLocked,
 }) {
   const rootBubbles = bubbles.filter(b => b.parent_id === parentId)
-  const forceExpandIds = getAncestorIds(bubbles, activeBubbleId)
+  // The path from root to the current location. These rows are PINNED: always
+  // expanded and not collapsible — the sidebar is orientation, and hiding
+  // where you are is never useful. Strict ancestors only; the current bubble
+  // itself and every sibling branch stay fully collapsible.
+  const pinnedIds = getAncestorIds(bubbles, activeBubbleId)
   const { unlockedIds, requestUnlock, ensurePassword, relockIds } = useLock()
   const lockIndex = useMemo(
     () => buildLockIndex(bubbles, notes, unlockedIds),
@@ -554,6 +578,15 @@ export default function BubbleTree({
     },
     observeResize: findScroller,
   })
+  // Pinning layered over the fit state, not applied after it as an override:
+  // pinned ancestors read as expanded in BOTH candidate states the fit rule
+  // chooses between — the expand-all row count above already includes them, so
+  // the arithmetic is unchanged, and the collapse-all state is defined as
+  // "every collapsible branch closed + the pinned chain visible" rather than
+  // a render-time exception fighting the stored state. Toggles on pinned rows
+  // are refused here too, so they can never mark the session as user-touched.
+  const isExpandedShown = (id) => pinnedIds.has(id) || isExpanded(id)
+  const toggleUnpinned = (id) => { if (!pinnedIds.has(id)) toggleExpanded(id) }
   // Refs so the global pointer listeners always read the latest values without
   // re-subscribing on every pointer move.
   const dragIdRef = useRef(null)
@@ -730,9 +763,9 @@ export default function BubbleTree({
               notes={notes}
               depth={0}
               activeBubbleId={activeBubbleId}
-              forceExpandIds={forceExpandIds}
-              isExpanded={isExpanded}
-              onToggleExpand={toggleExpanded}
+              pinnedIds={pinnedIds}
+              isExpanded={isExpandedShown}
+              onToggleExpand={toggleUnpinned}
               onSelectBubble={onSelectBubble}
               onRenameBubble={onRenameBubble}
               onDeleteBubble={onDeleteBubble}
