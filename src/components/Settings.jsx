@@ -573,6 +573,22 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes,
               /support 404). */}
           <div>
             <Card>
+              {/* Official Apple badge asset, used verbatim. Hidden inside the
+                  Capacitor shell — same reason as the login-screen badge: Apple
+                  rejects apps that link out to the App Store from within
+                  themselves (and the row would be pointless there anyway). */}
+              {!Capacitor.isNativePlatform() && (
+                <>
+                  <button
+                    onClick={() => openExternal('https://nubblenotes.com/ios')}
+                    className="w-full flex items-center justify-between gap-3 px-4 py-3.5 active:opacity-70 transition-opacity"
+                  >
+                    <span className="text-sm font-medium" style={{ color: 'var(--text)' }}>Get the iOS app</span>
+                    <img src="/app-store-badge.svg" alt="Download on the App Store" style={{ height: 36 }} />
+                  </button>
+                  <Divider />
+                </>
+              )}
               <button
                 onClick={() => openExternal('https://nubblenotes.com/privacy.html')}
                 className="w-full flex items-center px-4 py-3.5 active:opacity-70 transition-opacity"

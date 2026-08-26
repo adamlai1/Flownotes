@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
+import { Capacitor } from '@capacitor/core'
 import { AnimatePresence } from 'framer-motion'
 import { createDefaultProject, leastUsedBubbleColor, isPristineSeedBubble, isPristineSeedNote } from './data/defaultData'
 import { generateId, realBubbleIds, ROOT_BUBBLE_ID } from './utils/helpers'
@@ -658,6 +659,20 @@ function LoginScreen() {
         <p className="text-gray-600 text-xs text-center -mt-1">
           Your notes will only be saved on this device
         </p>
+
+        {/* Official Apple badge asset, used verbatim (public/app-store-badge.svg).
+            Never rendered inside the Capacitor shell: Apple rejects apps that
+            link out to the App Store from within themselves. */}
+        {!Capacitor.isNativePlatform() && (
+          <a
+            href="https://nubblenotes.com/ios"
+            target="_blank"
+            rel="noopener"
+            className="mt-4 active:opacity-70 transition-opacity"
+          >
+            <img src="/app-store-badge.svg" alt="Download on the App Store" style={{ height: 40 }} />
+          </a>
+        )}
       </div>
     </div>
   )
