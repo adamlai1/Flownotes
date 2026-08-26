@@ -175,6 +175,31 @@ export function isPristineSeedNote(note) {
     (note.connections ?? []).length === 0
 }
 
+// The note ids createDefaultProject seeds today. SEED_NOTE_TEXTS' keys can't
+// serve as this list — they accumulate retired seeds' history forever, while
+// this is the exact set a fresh install starts with.
+const SEED_NOTE_IDS = [SEED_INTRO_NOTE_ID, SEED_HOLD_NOTE_ID, SEED_TAGS_NOTE_ID]
+
+// A whole project the user has not made their own: the seed project holding
+// exactly the seed set, every item pristine by the checks above. The id-set
+// comparison (not just per-item pristineness) is what catches deletions — a
+// remaining-items scan can't see the seed note that is gone. Used by the
+// splash gate's user-content stamp (markUserContent in utils/storage.js):
+// anything short of this is real user work. Old installs seeded under a prior
+// shape ("Self", fewer notes) fail this check and count as user work — the
+// safe direction: a long-standing device skips the public splash.
+export function isPristineSeedProject(project) {
+  const notes = project.notes ?? []
+  const bubbles = project.bubbles ?? []
+  return project.id === SEED_PROJECT_ID &&
+    notes.length === SEED_NOTE_IDS.length &&
+    SEED_NOTE_IDS.every(id => notes.some(n => n.id === id)) &&
+    notes.every(isPristineSeedNote) &&
+    bubbles.length === SEED_BUBBLES.length &&
+    SEED_BUBBLES.every(t => bubbles.some(b => b.id === t.id)) &&
+    bubbles.every(isPristineSeedBubble)
+}
+
 export function createDefaultProject() {
   const now = new Date().toISOString()
   return {

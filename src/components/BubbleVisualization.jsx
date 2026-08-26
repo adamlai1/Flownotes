@@ -3,6 +3,7 @@ import { flushSync } from 'react-dom'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence, useMotionValue, animate } from 'framer-motion'
 import { getNoteCountForBubble, getBubbleDescendantIds, noteTitle, contrastColor, realBubbleIds } from '../utils/helpers'
+import { markUserContent } from '../utils/storage'
 import { buildLockIndex } from '../utils/locks'
 import {
   fitNameFont, nameBoxHeight,
@@ -50,8 +51,12 @@ function loadSavedPositions(projectId) {
   catch { return {} }
 }
 
+// Positions and page assignments reach storage only downstream of a user
+// gesture (drag drops, page placement on create, the note-size re-flow of a
+// hand-arranged level), so a write here doubles as the splash gate's "moved
+// something on the canvas" stamp.
 function saveSavedPositions(projectId, positions) {
-  try { localStorage.setItem(`mindmap-pos-${projectId}`, JSON.stringify(positions)) }
+  try { localStorage.setItem(`mindmap-pos-${projectId}`, JSON.stringify(positions)); markUserContent() }
   catch {}
 }
 
@@ -66,7 +71,7 @@ function loadSavedPages(projectId) {
 }
 
 function saveSavedPagesMap(projectId, map) {
-  try { localStorage.setItem(`mindmap-pages-${projectId}`, JSON.stringify(map)) }
+  try { localStorage.setItem(`mindmap-pages-${projectId}`, JSON.stringify(map)); markUserContent() }
   catch {}
 }
 

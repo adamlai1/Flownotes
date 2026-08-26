@@ -12,6 +12,7 @@ import {
   clearAllProjectData,
   loadLastProjectId,
   saveLastProjectId,
+  backfillUserContentStamp,
 } from './utils/storage'
 import {
   loadAllFromCloud,
@@ -533,6 +534,10 @@ function initializeData() {
       .filter((e, i, a) => a.findIndex(x => x.id === e.id) === i) // folded twin
     saveProjectList(projectList)
   }
+  // Data already on the device may predate the splash-gate stamp — derive it
+  // here so pre-stamp guests with real work stop seeing the splash. After the
+  // seedFix saves above, so it reads the migrated shapes.
+  backfillUserContentStamp()
   // Open to the last project the user had open on THIS device. A stale id
   // (project deleted, or a legacy seed id remapped above) falls back to the
   // list head — the pre-restore default.

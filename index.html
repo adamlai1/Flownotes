@@ -22,6 +22,13 @@
       // visit goes straight into the app (stamping data-nubble-app, which CSS
       // uses to hide #splash) or sees the public splash at the bottom of <body>.
       // Runs in <head> so returning users never get a flash of the splash.
+      //
+      // The splash shows on EVERY web load except for demonstrated returning
+      // users: a signed-in visitor, or a guest whose device carries real user
+      // work (the mindmap-user-content stamp — see markUserContent in
+      // src/utils/storage.js; pristine seed content never sets it). A guest
+      // who only looked around sees it again next visit; "Continue in
+      // browser" below dismisses it for the current load only, on purpose.
       (function () {
         try {
           var isApp =
@@ -39,8 +46,7 @@
             for (var i = 0; i < localStorage.length; i++) {
               var k = localStorage.key(i)
               if (
-                k === 'guestMode' ||           // chose "Continue as Guest" before
-                k === 'mindmap-projects' ||    // has data on this device
+                k === 'mindmap-user-content' || // guest with real changes (not pristine seeds)
                 (k.indexOf('sb-') === 0 && k.indexOf('-auth-token') > 0) // Supabase session
               ) { isApp = true; break }
             }
