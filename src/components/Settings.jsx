@@ -118,7 +118,7 @@ function openExternal(url) {
   else window.open(url, '_blank', 'noopener')
 }
 
-export default function Settings({ onClose, zIndex = 50, project, onImportNotes, onSignOut, onDeleteAccount }) {
+export default function Settings({ onClose, zIndex = 50, project, onImportNotes, onSignOut, onDeleteAccount, shareImport, onShareImportDone }) {
   const { theme, toggleTheme } = useTheme()
   const { noteSize, setNoteSize, bouncy, setBouncy } = usePreferences()
   const { user, guestMode, signInWithGoogle, signInWithApple } = useAuth()
@@ -131,7 +131,11 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes,
   } = useLock()
   const isLight = theme === 'light'
   const [toast, setToast] = useState('')
-  const [importOpen, setImportOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(() => Boolean(shareImport))
+  // A share arriving while Settings is already mounted still opens the importer.
+  useEffect(() => {
+    if (shareImport) setImportOpen(true)
+  }, [shareImport])
   const [feedback, setFeedback] = useState('')
   const [sendingFeedback, setSendingFeedback] = useState(false)
   const toastTimer = useState(null)
@@ -629,8 +633,10 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes,
             key="import"
             project={project}
             onImportNotes={onImportNotes}
-            onClose={() => setImportOpen(false)}
+            onClose={() => { setImportOpen(false); onShareImportDone?.() }}
             showToast={showToast}
+            initialText={shareImport?.text}
+            initialTextKey={shareImport?.id}
           />
         )}
       </AnimatePresence>

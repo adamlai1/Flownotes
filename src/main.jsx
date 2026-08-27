@@ -4,10 +4,16 @@ import './index.css'
 import App from './App.jsx'
 import { AuthProvider } from './contexts/AuthContext.jsx'
 import { initNativeAuth, AUTH_ERROR_EVENT } from './lib/nativeAuth.js'
+import { initShareImport } from './lib/shareImport.js'
 
 // Register the OAuth callback listener before React mounts — iOS can deliver the
 // appUrlOpen event before any component's effects run.
 initNativeAuth()
+
+// Same timing constraint for the Share Extension hand-off: the trigger URL can
+// arrive before any component mounts, and shareImport.js buffers it until
+// App.jsx subscribes.
+initShareImport()
 
 // ── Global error overlay ──────────────────────────────────────────────────────
 

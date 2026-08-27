@@ -80,6 +80,7 @@ import { ToastProvider, useToast } from './contexts/ToastContext'
 import { LockProvider } from './contexts/LockContext'
 import { useAuth } from './contexts/AuthContext'
 import { useEscapeShortcut, useKeyShortcuts } from './lib/escapeStack'
+import { onShareImport } from './lib/shareImport'
 
 // EXPERIMENT (neutral scheme): the bubble-colour vignette, drawn at the app shell
 // so the band spans the FULL screen — safe-area top to bottom — instead of clipping
@@ -905,6 +906,18 @@ export default function App() {
   // Stack of note IDs open in the editor (last = topmost/active)
   const [noteStack, setNoteStack] = useState([])
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // Text handed over by the iOS Share Extension. The id makes each share a
+  // distinct command even when the same text is shared twice, without any UUID
+  // machinery — it only needs to be unique within this app run.
+  const [shareImport, setShareImport] = useState(null) // { text, id } | null
+  const shareImportSeq = useRef(0)
+  useEffect(() => onShareImport(text => {
+    shareImportSeq.current += 1
+    setShareImport({ text, id: shareImportSeq.current })
+    // Import lives inside Settings, so the share always lands there — Settings
+    // opens (or stays open) and mounts ImportNotes prefilled.
+    setSettingsOpen(true)
+  }), [])
   const [showOnboarding, setShowOnboarding] = useState(() =>
     !localStorage.getItem('hasSeenOnboarding')
   )
@@ -2330,7 +2343,7 @@ export default function App() {
       {/* Settings panel */}
       <AnimatePresence>
         {settingsOpen && (
-          <Settings key="settings" onClose={() => setSettingsOpen(false)} zIndex={45} project={activeProject} onImportNotes={importNotes} onSignOut={handleSignOut} onDeleteAccount={() => setDeleteAccountPrompt(true)} />
+          <Settings key="settings" onClose={() => { setSettingsOpen(false); setShareImport(null) }} zIndex={45} project={activeProject} onImportNotes={importNotes} onSignOut={handleSignOut} onDeleteAccount={() => setDeleteAccountPrompt(true)} shareImport={shareImport} onShareImportDone={() => setShareImport(null)} />
         )}
       </AnimatePresence>
 

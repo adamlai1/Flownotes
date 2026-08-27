@@ -98,9 +98,14 @@ function BubblePill({ value, custom, color, label, rootLabel, options, onChange 
   )
 }
 
-export default function ImportNotes({ project, onImportNotes, onClose, showToast }) {
-  const [stage, setStage] = useState('menu') // 'menu' | 'paste' | 'preview'
-  const [rawText, setRawText] = useState('')
+// `initialText` (optional) seeds the importer straight into the preview stage —
+// used by the iOS Share Extension hand-off. `initialTextKey` distinguishes one
+// share from the next so a new share replaces the working text even when the
+// importer is already mounted. Without these props nothing changes: the
+// menu/paste/file flow is exactly as before.
+export default function ImportNotes({ project, onImportNotes, onClose, showToast, initialText, initialTextKey }) {
+  const [stage, setStage] = useState(() => (initialText ? 'preview' : 'menu')) // 'menu' | 'paste' | 'preview'
+  const [rawText, setRawText] = useState(() => initialText || '')
   const [pasteValue, setPasteValue] = useState('')
   const [splitMode, setSplitMode] = useState('one') // 'one' | 'blank' | 'custom'
   const [customSep, setCustomSep] = useState('---')
@@ -131,6 +136,17 @@ export default function ImportNotes({ project, onImportNotes, onClose, showToast
     return m
   }, [bubbleOptions])
   const rootLabel = project.name || 'Root level'
+
+  // A share arriving while the importer is already open (app was backgrounded on
+  // this screen) replaces the working text — never silently discard shared text.
+  // Keyed on initialTextKey, not initialText, so the same note shared twice
+  // still re-lands here; on first mount it just re-applies the initializers.
+  useEffect(() => {
+    if (initialText && initialTextKey != null) {
+      setRawText(initialText)
+      setStage('preview')
+    }
+  }, [initialTextKey]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Overrides are keyed by position, so any change that re-splits the text invalidates
   // them (chunk N is no longer the same note). Drop them along with the selection.
