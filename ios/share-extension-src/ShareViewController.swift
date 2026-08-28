@@ -1,30 +1,39 @@
 import UIKit
 import UniformTypeIdentifiers
+import os.log
 
 /// Nubble's share sheet entry. Deliberately minimal: extensions run under
 /// tight memory limits, so this does nothing with the text beyond handing it
-/// off — write it to App Group UserDefaults, ping the main app with a bare
-/// trigger URL (the text never rides in the URL; long notes would risk
-/// truncation), and complete the request. All preview / split / destination
-/// UI lives in the app's existing Import screen.
+/// off — write it to App Group UserDefaults, show a brief "saved" confirmation,
+/// and complete the request. The user then foregrounds Nubble themselves and
+/// the app collects the payload (src/lib/shareImport.js).
+///
+/// There is deliberately NO attempt to open the containing app from here.
+/// Apple provides no supported way to do that from a share extension, and
+/// since iOS 18 UIKit force-fails the old responder-chain openURL: hack
+/// ("Force returning false (NO)"). Save-and-switch is the sanctioned flow.
 ///
 /// Accepts plain text and URLs only — the activation rule in Info.plist keeps
 /// Nubble out of the share sheet for anything else, so images and files are
 /// declined by never matching rather than half-handled here.
 class ShareViewController: UIViewController {
 
-    // Must match SharedImportPlugin.swift in the App target.
+    // Must match SharedImportPlugin in App/App/SceneDelegate.swift.
     private static let appGroupId = "group.com.adamlai.flownotes"
     private static let textKey = "shareText"
     private static let tsKey = "shareTs"
 
-    private static let triggerURL = "com.adamlai.flownotes://share-import"
+    // Filter Console.app on this subsystem to watch the hand-off. Content is
+    // never logged, only lengths.
+    private static let log = Logger(subsystem: "com.adamlai.flownotes.ShareExtension", category: "share")
+
+    // Long enough to read "Saved", short enough to not feel like a modal.
+    private static let confirmationSeconds: TimeInterval = 1.5
 
     private var didHandle = false
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        // No UI of our own — the sheet appears and dismisses immediately.
         view.backgroundColor = .clear
         view.isOpaque = false
     }
@@ -62,41 +71,88 @@ class ShareViewController: UIViewController {
 
     private func finish(with text: String?) {
         DispatchQueue.main.async {
-            guard let text = text, !text.isEmpty,
-                  let defaults = UserDefaults(suiteName: Self.appGroupId) else {
+            guard let text = text, !text.isEmpty else {
+                Self.log.error("share produced no text; completing without write")
                 self.complete()
                 return
             }
+            guard let defaults = UserDefaults(suiteName: Self.appGroupId) else {
+                Self.log.error("App Group unavailable — capability missing on the extension target?")
+                self.complete()
+                return
+            }
+
             defaults.set(text, forKey: Self.textKey)
             // Milliseconds, to compare directly against Date.now() in JS. The
-            // app treats old payloads as abandoned and clears them unused.
+            // app treats payloads older than its window as abandoned.
             defaults.set(Date().timeIntervalSince1970 * 1000, forKey: Self.tsKey)
 
-            self.openMainApp()
-            // Give the openURL call a beat to land in the host before this
-            // process is torn down; completing immediately can drop it.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            // Read-back verification, visible in Console.app (filter on the
+            // subsystem above). Proves the write landed before we claim "Saved".
+            let readback = defaults.string(forKey: Self.textKey)
+            if readback == text {
+                Self.log.info("App Group write verified: \(text.count, privacy: .public) chars")
+            } else {
+                Self.log.error("App Group write FAILED readback: wrote \(text.count, privacy: .public) chars, read \(readback?.count ?? -1, privacy: .public)")
+            }
+
+            self.showConfirmation()
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.confirmationSeconds) {
                 self.complete()
             }
         }
     }
 
-    /// Share extensions can't call UIApplication.shared.open directly, so walk
-    /// the responder chain up to the UIApplication and invoke openURL: on it —
-    /// the long-standing pattern for opening the containing app from a share
-    /// extension. Falls back to extensionContext.open for good measure.
-    private func openMainApp() {
-        guard let url = URL(string: Self.triggerURL) else { return }
-        let selector = sel_registerName("openURL:")
-        var responder: UIResponder? = self
-        while let r = responder {
-            if r.responds(to: selector), !(r is UIViewController) {
-                r.perform(selector, with: url)
-                return
-            }
-            responder = r.next
+    /// Small centered card: the hand-off already succeeded, the user just has
+    /// to switch to Nubble. Copy is deliberately "saved", not an instruction
+    /// that could read as an error.
+    private func showConfirmation() {
+        let card = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+        card.layer.cornerRadius = 16
+        card.clipsToBounds = true
+        card.translatesAutoresizingMaskIntoConstraints = false
+
+        let icon = UIImageView(image: UIImage(systemName: "checkmark.circle.fill"))
+        icon.tintColor = .systemGreen
+        icon.contentMode = .scaleAspectFit
+        icon.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = UILabel()
+        label.text = "Saved — open Nubble to import"
+        label.font = .systemFont(ofSize: 15, weight: .semibold)
+        label.textColor = .label
+        label.numberOfLines = 1
+        label.adjustsFontSizeToFitWidth = true
+        label.minimumScaleFactor = 0.8
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        card.contentView.addSubview(icon)
+        card.contentView.addSubview(label)
+        view.addSubview(card)
+
+        NSLayoutConstraint.activate([
+            card.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            card.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            card.leadingAnchor.constraint(greaterThanOrEqualTo: view.leadingAnchor, constant: 24),
+            card.trailingAnchor.constraint(lessThanOrEqualTo: view.trailingAnchor, constant: -24),
+
+            icon.leadingAnchor.constraint(equalTo: card.contentView.leadingAnchor, constant: 16),
+            icon.centerYAnchor.constraint(equalTo: card.contentView.centerYAnchor),
+            icon.widthAnchor.constraint(equalToConstant: 24),
+            icon.heightAnchor.constraint(equalToConstant: 24),
+
+            label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 10),
+            label.trailingAnchor.constraint(equalTo: card.contentView.trailingAnchor, constant: -16),
+            label.topAnchor.constraint(equalTo: card.contentView.topAnchor, constant: 14),
+            label.bottomAnchor.constraint(equalTo: card.contentView.bottomAnchor, constant: -14),
+        ])
+
+        card.alpha = 0
+        card.transform = CGAffineTransform(scaleX: 0.92, y: 0.92)
+        UIView.animate(withDuration: 0.18) {
+            card.alpha = 1
+            card.transform = .identity
         }
-        extensionContext?.open(url, completionHandler: nil)
     }
 
     private func complete() {

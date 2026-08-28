@@ -76,24 +76,50 @@ on iOS 15+. Run `npm run build && npx cap sync ios` first.
 
 ## Part C — Verify on device
 
-- **Apple Notes:** open a long note → Share → **Nubble** appears → tapping it
-  opens the app on Import, preview stage, full text present. Split pills
+The flow is **save-and-switch**: sharing shows a brief "Saved — open Nubble to
+import" card and dismisses; the user then foregrounds Nubble (app switcher or
+icon) and lands on Import prefilled. The app is never opened automatically —
+see Troubleshooting for why that is expected, not a failure.
+
+0. **App Group write verification — do this first.** Connect the device, open
+   **Console.app** on the Mac, select the device, and set the search filter to
+   subsystem `com.adamlai.flownotes.ShareExtension` (or filter on process
+   `ShareExtension`). Start streaming, then share a note from Apple Notes.
+   Expected within a second of the "Saved" card appearing:
+
+   ```
+   App Group write verified: <N> chars
+   ```
+
+   with N matching the note's length. If instead you see
+   `App Group write FAILED readback` or `App Group unavailable`, **stop here**
+   — the App Group capability is missing or mismatched on one target (Part A
+   step 2 / Part B step 6) and none of the tests below can pass. Only lengths
+   are logged, never content.
+
+- **Apple Notes:** open a long note → Share → **Nubble** → the "Saved — open
+  Nubble to import" card shows briefly and the sheet dismisses. Switch to
+  Nubble → it opens on Import, preview stage, full text present. Split pills
   ("Blank Lines", "Custom Separator") and destination pickers work exactly as
   they do for pasted text.
-- **Safari:** share a page → arrives as the page URL in the import preview.
+- **Safari:** share a page → same card → open Nubble → the page URL is in the
+  import preview.
 - **Messages:** long-press a message → share → same flow.
-- **App already open:** open Nubble, background it, share from Notes → Nubble
-  foregrounds straight onto Import with the text.
-- **Force-quit:** force-quit Nubble, share from Notes → cold start lands on
-  Import with the text (delivered via `getLaunchUrl`).
-- **Stale payload is cleared, not imported:** share from Notes; when Import
-  opens, back out without importing; force-quit; relaunch from the home-screen
-  icon → Import must NOT reappear with the old text. (Any payload the app
-  wasn't opened *by* is discarded on the next launch, and payloads older than
-  5 minutes are discarded even on the trigger path.)
+- **App already open in the background:** open Nubble, background it, share
+  from Notes, then return to Nubble via the app switcher → Import opens with
+  the text (the foreground transition triggers the mailbox check).
+- **Force-quit:** force-quit Nubble, share from Notes, then launch Nubble from
+  the home-screen icon → cold start lands on Import with the text. Any launch
+  route works — icon, switcher, notification — there is no special URL
+  involved.
+- **Stale payload is cleared, not imported:** share from Notes, then do NOT
+  open Nubble for over 10 minutes → open it → Import must not appear; the
+  payload was discarded as abandoned. Also: share, open Nubble, back out of
+  Import without importing, force-quit, relaunch → the old text must not
+  resurface (the mailbox read already cleared it).
 - **Very long note** (several thousand words): scroll the preview to the end —
-  nothing truncated. The text travels via App Group storage, never the URL, so
-  there is no length ceiling in play.
+  nothing truncated. The text travels via App Group storage, so there is no
+  length ceiling in play.
 - **Non-text share** (a photo in Photos): Nubble does not appear in the share
   sheet at all — that's the activation rule declining it.
 
@@ -108,7 +134,11 @@ on iOS 15+. Run `npm run build && npx cap sync ios` first.
 - **Signing error mentioning application-groups:** both targets must use the
   same team with automatic signing, and the account must be a paid developer
   account.
-- **Extension runs but the app never opens:** some host apps block the
-  responder-chain `openURL:`. The payload is then discarded on the next
-  manual launch by design — text is never imported without the user having
-  been brought to the Import screen for it.
+- **The app does not open automatically after sharing:** expected behavior on
+  iOS 18+, not a failure. Apple provides no supported way for a share
+  extension to open its containing app, and UIKit force-fails the old
+  responder-chain `openURL:` hack (Console shows "BUG IN CLIENT OF UIKIT …
+  Force returning false (NO)"). The extension therefore doesn't try: it saves,
+  confirms with the "Saved" card, and the app collects the payload on its next
+  foreground. If the text doesn't show up when you *do* open the app, that's a
+  real bug — start with the Part C step 0 readback check.

@@ -10,9 +10,9 @@ import { initShareImport } from './lib/shareImport.js'
 // appUrlOpen event before any component's effects run.
 initNativeAuth()
 
-// Same timing constraint for the Share Extension hand-off: the trigger URL can
-// arrive before any component mounts, and shareImport.js buffers it until
-// App.jsx subscribes.
+// Same timing constraint for the Share Extension hand-off: the cold-start
+// mailbox check runs before any component mounts, and shareImport.js buffers
+// the payload until App.jsx subscribes.
 initShareImport()
 
 // ── Global error overlay ──────────────────────────────────────────────────────

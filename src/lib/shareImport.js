@@ -3,23 +3,29 @@ import { App } from '@capacitor/app'
 
 // iOS Share Extension → Import screen hand-off.
 //
-// The extension (ios/App/ShareExtension) writes the shared text into App Group
-// UserDefaults and opens the app with this trigger URL. The text itself never
-// rides in the URL — multi-thousand-word notes would risk truncation — so the
-// URL is only a "go look in the mailbox" signal. SharedImportPlugin (native,
-// registered in MainViewController) is the mailbox: its take() reads the
-// payload AND clears it in the same call, so a payload can never be read twice.
+// The extension (ios/share-extension-src) writes the shared text into App
+// Group UserDefaults and shows a brief "Saved — open Nubble to import" card;
+// the user then foregrounds the app themselves. Share extensions cannot open
+// their containing app on modern iOS — since iOS 18 UIKit force-fails the old
+// responder-chain openURL: hack, and Apple provides no supported alternative —
+// so the mailbox is checked on every cold start and every return to the
+// foreground rather than on a trigger URL.
+//
+// SharedImportPlugin (native, registered in SceneDelegate.swift) is the
+// mailbox: its take() reads the payload AND clears it in the same call, so a
+// payload can never be read twice, and checking from several triggers is safe.
 export const SHARE_IMPORT_URL = 'com.adamlai.flownotes://share-import'
 
-// A payload older than this is abandoned: the share happened but the app was
-// never opened by it (openURL from an extension can fail silently on some
-// hosts). Stale text must not leak into a later, unrelated import.
-const MAX_PAYLOAD_AGE_MS = 5 * 60 * 1000
+// Staleness is purely time-based: a payload this old is an abandoned share
+// (the user never came back to the app), and is cleared unused rather than
+// surfacing days later in an unrelated session. Ten minutes comfortably covers
+// "share, get briefly distracted, switch to Nubble".
+const MAX_PAYLOAD_AGE_MS = 10 * 60 * 1000
 
 const SharedImport = registerPlugin('SharedImport')
 
-// The share can arrive before App.jsx has mounted (cold start), so deliveries
-// are buffered until a listener subscribes.
+// The payload can arrive before App.jsx has mounted (cold start), so
+// deliveries are buffered until a listener subscribes.
 let listener = null
 let pending = null
 
@@ -57,25 +63,24 @@ async function consume() {
 }
 
 // Called once at module-load time from main.jsx (same pattern as
-// initNativeAuth) so the listener exists no matter when iOS delivers the URL.
+// initNativeAuth) so no delivery route can fire before we're listening.
 export function initShareImport() {
   if (!Capacitor.isNativePlatform()) return
 
-  // Warm path: app already running (foreground or background) when the share
-  // fires — iOS delivers the trigger URL as an event.
+  // Cold start, by any route — a fresh payload means "the user just shared
+  // and is coming back for it"; a stale one is cleared by the same take().
+  consume()
+
+  // Warm path: app was backgrounded when the share happened; the user
+  // switching back is the signal.
+  App.addListener('appStateChange', ({ isActive }) => {
+    if (isActive) consume()
+  })
+
+  // Future-proofing only: no code sends this URL today, but if Apple ever
+  // ships a sanctioned way for extensions to open their app, this is the
+  // contract the extension would use.
   App.addListener('appUrlOpen', ({ url }) => {
     if (typeof url === 'string' && url.startsWith(SHARE_IMPORT_URL)) consume()
   })
-
-  // Cold path: launched by the trigger URL → consume the payload. Launched any
-  // other way (icon tap, notification, auth callback…) → any payload sitting
-  // in the App Group is an orphan from a share that never opened the app;
-  // take() it and drop the result so it's cleared rather than left to leak
-  // into a future import.
-  App.getLaunchUrl()
-    .then(result => {
-      if (result?.url && result.url.startsWith(SHARE_IMPORT_URL)) return consume()
-      return SharedImport.take().then(() => {}, () => {})
-    })
-    .catch(() => {})
 }
