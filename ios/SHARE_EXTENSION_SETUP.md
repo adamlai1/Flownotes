@@ -139,14 +139,21 @@ the launch.
    launch-worked / launch-failed signal. When the launch fails, the `launch:`
    line right before it says **why**, and the distinction matters:
 
-   - `launch: open() completed with success=false` — a real UIApplication was
+   - `launch: open() completed with success=false` — the application was
      reached and **iOS refused** the launch (the workaround is kill-switched
      on this iOS version).
    - `launch: open() never called back within 1s` — the call was swallowed
      without the completion ever firing.
-   - `launch: UIApplication never reached — no responder answers …` — the
-     responder-chain walk found nothing to call; the extension's chain doesn't
-     reach a UIApplication at all.
+   - `launch: UIApplication never reached — no responder in the chain is a
+     UIApplication` — the responder-chain walk found no application instance
+     to call.
+
+   The walk matches by **class identity** (`isKind(of:
+   NSClassFromString("UIApplication"))`), not by whether a responder answers
+   the selector: the chain contains impostors (on device,
+   `_UIHostedWindowScene` responds to `openURL:options:completionHandler:`
+   and silently swallows it). The `launch: invoking open() on <ClassName>`
+   line shows what was actually called — it should say `UIApplication`.
 
    In the failure case the tail is `complete() deferred <M>ms for card
    display` then `completing request` ~1.5 s after the card appeared — if the

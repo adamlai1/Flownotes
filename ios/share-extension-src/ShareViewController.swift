@@ -153,8 +153,14 @@ class ShareViewController: UIViewController {
     /// restructuring into a separate library. So: same call, same real result,
     /// invoked through its IMP under its ObjC selector
     /// `openURL:options:completionHandler:` (the non-deprecated three-argument
-    /// method — NOT the iOS 18-kill-switched `openURL:`). Only UIApplication
-    /// in the chain responds to that selector.
+    /// method — NOT the iOS 18-kill-switched `openURL:`).
+    ///
+    /// The target is matched by CLASS (`NSClassFromString("UIApplication")` +
+    /// `isKind(of:)`), never by `responds(to:)` alone: the chain contains
+    /// impostors — on device, `_UIHostedWindowScene` sits between this view
+    /// controller and the application, responds to the selector, and swallows
+    /// the call without ever invoking the completion. The walk skips anything
+    /// that isn't actually the application instance.
     ///
     /// The completion always fires exactly once, on the main queue.
     private func launchHostApp(completion: @escaping (Bool) -> Void) {
@@ -184,15 +190,23 @@ class ShareViewController: UIViewController {
         }
         Self.log.notice("launch: responder chain: \(chain.joined(separator: " -> "), privacy: .public)")
 
+        // Class-identity match — see the doc comment: responds(to:) alone
+        // stops on _UIHostedWindowScene, which swallows the call.
+        guard let applicationClass = NSClassFromString("UIApplication") else {
+            Self.log.error("launch: NSClassFromString(\"UIApplication\") returned nil")
+            finish(false)
+            return
+        }
+
         var responder: UIResponder? = self
         while let r = responder {
-            if r.responds(to: sel) {
+            if r.isKind(of: applicationClass), r.responds(to: sel) {
                 // Diagnostics: the three lines below distinguish the failure
-                // modes. "completed with success=false" = a real UIApplication
-                // was reached and iOS refused the launch. "never called back"
-                // = the call was swallowed without ever invoking the
-                // completion. "never reached" (after the loop) = the chain
-                // holds no object with this selector at all.
+                // modes. "completed with success=false" = the application was
+                // reached and iOS refused the launch. "never called back" =
+                // the call was swallowed without ever invoking the completion.
+                // "never reached" (after the loop) = the chain holds no
+                // UIApplication at all.
                 Self.log.notice("launch: invoking open() on \(String(describing: type(of: r)), privacy: .public)")
                 // If iOS no-ops the call without ever invoking the completion
                 // block, fail over instead of hanging the sheet.
@@ -217,7 +231,7 @@ class ShareViewController: UIViewController {
         }
 
         // No UIApplication in the chain — the workaround's other failure mode.
-        Self.log.notice("launch: UIApplication never reached — no responder answers openURL:options:completionHandler:")
+        Self.log.notice("launch: UIApplication never reached — no responder in the chain is a UIApplication")
         finish(false)
     }
 
