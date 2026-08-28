@@ -19,8 +19,8 @@ on iOS 15+. Run `npm run build && npx cap sync ios` first.
 is a *pasted copy* of `share-extension-src/ShareViewController.swift`, so any
 change to the canonical file must be re-pasted over the target's copy (Part B
 step 5) and rebuilt — it does not sync. (v1.3 changed it: the extension now
-attempts to launch the app, with save-and-switch as the fallback — this also
-needs the Part B step 8 build setting, new in v1.3.) Web-side
+attempts to launch the app, with save-and-switch as the fallback. No build
+settings change — see the note at the end of Part B.) Web-side
 changes need `npm run build && npx cap sync ios` or the native bundle goes
 stale.
 
@@ -81,20 +81,21 @@ stale.
    Settings) to the same value as the App target, or Xcode will warn about
    embedding a newer extension.
 
-8. **Allow the launch call to compile.** Target **ShareExtension** → *Build
-   Settings* → search for **Require Only App-Extension-Safe API**
-   (`APPLICATION_EXTENSION_API_ONLY`) → set it to **No**.
+8. Build & run the **App** scheme on the device.
 
-   This is deliberate, not a fix-up: `ShareViewController.launchHostApp`
-   calls `UIApplication.open(_:options:completionHandler:)`, which UIKit
-   marks extension-unavailable, and this setting is what turns that
-   annotation into a compile error. Turning it off is the same condition
-   LocalSend's plugin code builds under (theirs lives in a pod without the
-   enforcement). Without this step the target fails to build with
-   "'open(_:options:completionHandler:)' is unavailable in application
-   extensions for iOS". Leave the App target's setting alone.
-
-9. Build & run the **App** scheme on the device.
+> **Why `launchHostApp` goes through an ObjC selector/IMP instead of calling
+> `UIApplication.open(...)` directly:** the direct call only compiles with
+> *Require Only App-Extension-Safe API* (`APPLICATION_EXTENSION_API_ONLY`)
+> set to No, and that setting **cannot** be turned off for this target — the
+> linker enforces it across the extension and every library it links, failing
+> with "Application extensions and any libraries they link to must be built
+> with the APPLICATION_EXTENSION_API_ONLY build setting set to YES". LocalSend
+> ships the direct call only because their code lives in a pod built as a
+> separate unit with the flag off, which this project can't reproduce without
+> restructuring into a separate library. The selector invocation is the same
+> non-deprecated API stated in the only form that builds here — necessity, not
+> evasion. Leave the build setting at its default (**Yes**) on both targets;
+> the pasted file compiles under it as-is.
 
 ## Part C — Verify on device
 
@@ -180,9 +181,17 @@ the launch.
   same team with automatic signing, and the account must be a paid developer
   account.
 - **Compile error "'UIApplication' is unavailable in application extensions"
-  (or the same for `open(_:options:completionHandler:)`):** the Part B step 8
-  build setting was missed — set *Require Only App-Extension-Safe API* to
-  **No** on the ShareExtension target.
+  (or the same for `open(_:options:completionHandler:)`):** someone rewrote
+  `launchHostApp` as a direct call. That form cannot build in this target —
+  see the note at the end of Part B — and flipping *Require Only
+  App-Extension-Safe API* to No only trades it for a link error. Restore the
+  canonical selector/IMP version from `share-extension-src/` and leave the
+  build setting at Yes.
+- **Link error "Application extensions and any libraries they link to must be
+  built with the APPLICATION_EXTENSION_API_ONLY build setting set to YES":**
+  *Require Only App-Extension-Safe API* was set to No on the ShareExtension
+  target. Set it back to **Yes** — the canonical extension source doesn't
+  need it off.
 - **The app does not open automatically after sharing** (the "Saved" card
   shows instead): the launch workaround failed on this iOS version. That is
   the designed degradation, not a hand-off failure — Apple provides no

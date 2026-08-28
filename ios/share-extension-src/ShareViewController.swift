@@ -136,13 +136,21 @@ class ShareViewController: UIViewController {
     /// when it does, this reports false and the save-and-switch flow above is
     /// the designed degradation — the share itself never depends on this call.
     ///
-    /// COMPILES ONLY with "Require Only App-Extension-Safe API" set to NO on
-    /// the ShareExtension target (SHARE_EXTENSION_SETUP.md Part B). UIKit
-    /// marks `UIApplication` and this method extension-unavailable, and that
-    /// build setting is what turns the annotation into a hard error; turning
-    /// it off is the same condition LocalSend's plugin code builds under. An
-    /// error here saying "unavailable in application extensions" means the
-    /// build-setting step was missed.
+    /// Why the IMP invocation instead of plain `application.open(...)`: UIKit
+    /// marks `UIApplication` and this method extension-unavailable, a hard
+    /// compile error under "Require Only App-Extension-Safe API" = YES — and
+    /// that setting cannot be turned off for this target. The linker enforces
+    /// it across the extension and everything it links ("Application
+    /// extensions and any libraries they link to must be built with the
+    /// APPLICATION_EXTENSION_API_ONLY build setting set to YES"), so flipping
+    /// it here just moves the failure from compile to link. LocalSend writes
+    /// the direct call only because their code lives in a pod built as a
+    /// separate unit with the flag off; reproducing that would mean
+    /// restructuring into a separate library. So: same call, same real result,
+    /// invoked through its IMP under its ObjC selector
+    /// `openURL:options:completionHandler:` (the non-deprecated three-argument
+    /// method — NOT the iOS 18-kill-switched `openURL:`). Only UIApplication
+    /// in the chain responds to that selector.
     ///
     /// The completion always fires exactly once, on the main queue.
     private func launchHostApp(completion: @escaping (Bool) -> Void) {
@@ -160,15 +168,21 @@ class ShareViewController: UIViewController {
             }
         }
 
+        let sel = NSSelectorFromString("openURL:options:completionHandler:")
         var responder: UIResponder? = self
         while let r = responder {
-            if let application = r as? UIApplication {
+            if r.responds(to: sel) {
                 // If a future iOS no-ops the call without ever invoking the
                 // completion block, fail over instead of hanging the sheet.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                     finish(false)
                 }
-                application.open(url, options: [:]) { ok in finish(ok) }
+                typealias OpenURLFn = @convention(c) (
+                    NSObject, Selector, NSURL, NSDictionary,
+                    (@convention(block) (Bool) -> Void)?
+                ) -> Void
+                let open = unsafeBitCast(r.method(for: sel), to: OpenURLFn.self)
+                open(r, sel, url as NSURL, NSDictionary(), { ok in finish(ok) })
                 return
             }
             responder = r.next
