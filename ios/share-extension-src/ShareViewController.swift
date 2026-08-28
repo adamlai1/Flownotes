@@ -38,6 +38,10 @@ class ShareViewController: UIViewController {
     private static let confirmationSeconds: TimeInterval = 1.5
 
     private var didHandle = false
+    private var didComplete = false
+    // Stamped when the fallback card actually appears on screen. complete()
+    // reads it to guarantee the card its full display time (see complete()).
+    private var cardShownAt: Date?
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -117,9 +121,9 @@ class ShareViewController: UIViewController {
                 } else {
                     Self.log.notice("host app launch failed — falling back to save-and-switch")
                     self.showConfirmation()
-                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.confirmationSeconds) {
-                        self.complete()
-                    }
+                    // complete() defers itself until the card has had its full
+                    // display time — no separate timer to race against.
+                    self.complete()
                 }
             }
         }
@@ -169,12 +173,33 @@ class ShareViewController: UIViewController {
         }
 
         let sel = NSSelectorFromString("openURL:options:completionHandler:")
+
+        // Diagnostic: the whole chain, so Console shows exactly what this
+        // process's responder hierarchy looks like and which link we invoke.
+        var chain: [String] = []
+        var probe: UIResponder? = self
+        while let p = probe {
+            chain.append(String(describing: type(of: p)))
+            probe = p.next
+        }
+        Self.log.notice("launch: responder chain: \(chain.joined(separator: " -> "), privacy: .public)")
+
         var responder: UIResponder? = self
         while let r = responder {
             if r.responds(to: sel) {
-                // If a future iOS no-ops the call without ever invoking the
-                // completion block, fail over instead of hanging the sheet.
+                // Diagnostics: the three lines below distinguish the failure
+                // modes. "completed with success=false" = a real UIApplication
+                // was reached and iOS refused the launch. "never called back"
+                // = the call was swallowed without ever invoking the
+                // completion. "never reached" (after the loop) = the chain
+                // holds no object with this selector at all.
+                Self.log.notice("launch: invoking open() on \(String(describing: type(of: r)), privacy: .public)")
+                // If iOS no-ops the call without ever invoking the completion
+                // block, fail over instead of hanging the sheet.
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    if !finished {
+                        Self.log.notice("launch: open() never called back within 1s")
+                    }
                     finish(false)
                 }
                 typealias OpenURLFn = @convention(c) (
@@ -182,13 +207,17 @@ class ShareViewController: UIViewController {
                     (@convention(block) (Bool) -> Void)?
                 ) -> Void
                 let open = unsafeBitCast(r.method(for: sel), to: OpenURLFn.self)
-                open(r, sel, url as NSURL, NSDictionary(), { ok in finish(ok) })
+                open(r, sel, url as NSURL, NSDictionary(), { ok in
+                    Self.log.notice("launch: open() completed with success=\(ok ? "true" : "false", privacy: .public)")
+                    finish(ok)
+                })
                 return
             }
             responder = r.next
         }
 
         // No UIApplication in the chain — the workaround's other failure mode.
+        Self.log.notice("launch: UIApplication never reached — no responder answers openURL:options:completionHandler:")
         finish(false)
     }
 
@@ -243,9 +272,34 @@ class ShareViewController: UIViewController {
             card.alpha = 1
             card.transform = .identity
         }
+
+        // The display clock starts now, when the card is actually on screen —
+        // not when whichever code path decided to show it started running.
+        cardShownAt = Date()
     }
 
+    /// Completes the request exactly once, on the main thread. If the fallback
+    /// card is on screen, completion is deferred until the card has been
+    /// visible for its full confirmationSeconds — enforced HERE, at the single
+    /// point of teardown, so no caller (the launch failover timer, a late
+    /// open() callback, any future path) can cut the card short by completing
+    /// early. Callers just call complete(); the card math is not their problem.
     private func complete() {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { self.complete() }
+            return
+        }
+        guard !didComplete else { return }
+        if let shownAt = cardShownAt {
+            let remaining = Self.confirmationSeconds - Date().timeIntervalSince(shownAt)
+            if remaining > 0.01 {
+                Self.log.notice("complete() deferred \(Int(remaining * 1000), privacy: .public)ms for card display")
+                DispatchQueue.main.asyncAfter(deadline: .now() + remaining) { self.complete() }
+                return
+            }
+        }
+        didComplete = true
+        Self.log.notice("completing request")
         extensionContext?.completeRequest(returningItems: nil, completionHandler: nil)
     }
 }

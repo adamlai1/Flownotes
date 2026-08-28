@@ -128,11 +128,30 @@ the launch.
 
    ```
    App Group write verified: <N> chars
-   host app launch succeeded        ← or: host app launch failed — falling back to save-and-switch
+   launch: invoking open() on UIApplication
+   launch: open() completed with success=true
+   host app launch succeeded
+   completing request
    ```
 
-   with N matching the note's length. The second line is the authoritative
-   launch-worked / launch-failed signal. If instead you see
+   with N matching the note's length. `host app launch succeeded` / `host app
+   launch failed — falling back to save-and-switch` is the authoritative
+   launch-worked / launch-failed signal. When the launch fails, the `launch:`
+   line right before it says **why**, and the distinction matters:
+
+   - `launch: open() completed with success=false` — a real UIApplication was
+     reached and **iOS refused** the launch (the workaround is kill-switched
+     on this iOS version).
+   - `launch: open() never called back within 1s` — the call was swallowed
+     without the completion ever firing.
+   - `launch: UIApplication never reached — no responder answers …` — the
+     responder-chain walk found nothing to call; the extension's chain doesn't
+     reach a UIApplication at all.
+
+   In the failure case the tail is `complete() deferred <M>ms for card
+   display` then `completing request` ~1.5 s after the card appeared — if the
+   sheet ever dismisses early again, the timestamps on these lines show
+   exactly what tore it down. If instead you see
    `App Group write FAILED readback` or `App Group unavailable`, **stop here**
    — the App Group capability is missing or mismatched on one target (Part A
    step 2 / Part B step 6) and none of the tests below can pass. Only lengths
@@ -200,7 +219,8 @@ the launch.
   `open(_:options:completionHandler:)`, which Apple has broken once before
   (iOS 18 kill-switched the deprecated `openURL:` selector) and may break
   again. Console shows `host app launch failed — falling back to
-  save-and-switch`. The save-and-switch flow must still work: the card
+  save-and-switch`, preceded by a `launch:` line saying which failure mode it
+  was (see Part C step 0). The save-and-switch flow must still work: the card
   confirms the save, and the app collects the payload on its next foreground.
   If the text doesn't show up when you *do* open the app, that's a real bug —
   start with the Part C step 0 readback check.
