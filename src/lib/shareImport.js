@@ -4,12 +4,15 @@ import { App } from '@capacitor/app'
 // iOS Share Extension → Import screen hand-off.
 //
 // The extension (ios/share-extension-src) writes the shared text into App
-// Group UserDefaults and shows a brief "Saved — open Nubble to import" card;
-// the user then foregrounds the app themselves. Share extensions cannot open
-// their containing app on modern iOS — since iOS 18 UIKit force-fails the old
-// responder-chain openURL: hack, and Apple provides no supported alternative —
-// so the mailbox is checked on every cold start and every return to the
-// foreground rather than on a trigger URL.
+// Group UserDefaults, then tries to foreground the app on SHARE_IMPORT_URL so
+// Import opens immediately. That launch uses an UNSUPPORTED workaround (the
+// LocalSend-style responder-chain call to UIApplication's modern open method);
+// Apple has broken this pattern once already (iOS 18 kill-switched the old
+// openURL: selector) and may break it again. So the launch is additive, never
+// load-bearing: when it fails, the extension shows a "Saved — open Nubble to
+// import" card and the app collects the payload on its next foreground, by
+// any route. That fallback is why the mailbox is checked from every trigger
+// below — URL open, launch URL, foregrounding, cold start — not just the URL.
 //
 // SharedImportPlugin (native, registered in SceneDelegate.swift) is the
 // mailbox: its take() reads the payload AND clears it in the same call, so a
@@ -77,10 +80,19 @@ export function initShareImport() {
     if (isActive) consume()
   })
 
-  // Future-proofing only: no code sends this URL today, but if Apple ever
-  // ships a sanctioned way for extensions to open their app, this is the
-  // contract the extension would use.
+  // Launch-succeeded path, app already running: the extension's open call
+  // arrives here as a URL open.
   App.addListener('appUrlOpen', ({ url }) => {
     if (typeof url === 'string' && url.startsWith(SHARE_IMPORT_URL)) consume()
   })
+
+  // Launch-succeeded path, cold start: iOS may deliver the URL only as the
+  // launch URL, not as an appUrlOpen event (same caveat as initNativeAuth).
+  // Redundant with the unconditional consume() above, and safely so — take()
+  // is read-and-clear, so a second check finds an empty mailbox.
+  App.getLaunchUrl()
+    .then(result => {
+      if (result?.url?.startsWith(SHARE_IMPORT_URL)) consume()
+    })
+    .catch(() => {})
 }

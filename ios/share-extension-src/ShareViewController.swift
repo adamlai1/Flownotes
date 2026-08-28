@@ -4,14 +4,17 @@ import os.log
 
 /// Nubble's share sheet entry. Deliberately minimal: extensions run under
 /// tight memory limits, so this does nothing with the text beyond handing it
-/// off — write it to App Group UserDefaults, show a brief "saved" confirmation,
-/// and complete the request. The user then foregrounds Nubble themselves and
-/// the app collects the payload (src/lib/shareImport.js).
+/// off — write it to App Group UserDefaults, then try to foreground Nubble so
+/// the payload is collected immediately (src/lib/shareImport.js).
 ///
-/// There is deliberately NO attempt to open the containing app from here.
-/// Apple provides no supported way to do that from a share extension, and
-/// since iOS 18 UIKit force-fails the old responder-chain openURL: hack
-/// ("Force returning false (NO)"). Save-and-switch is the sanctioned flow.
+/// The launch attempt is ADDITIVE, never load-bearing. Apple provides no
+/// supported way for a share extension to open its containing app; the
+/// responder-chain walk below is the same unsupported pattern LocalSend and
+/// others ship, and Apple has broken it once already (iOS 18 kill-switched the
+/// deprecated `openURL:` selector — "Force returning false (NO)") and may
+/// break it again. When it fails, the designed degradation is the original
+/// save-and-switch flow: a "Saved" card, and the app collects the payload
+/// from the App Group mailbox on its next foreground, by any route.
 ///
 /// Accepts plain text and URLs only — the activation rule in Info.plist keeps
 /// Nubble out of the share sheet for anything else, so images and files are
@@ -22,6 +25,10 @@ class ShareViewController: UIViewController {
     private static let appGroupId = "group.com.adamlai.flownotes"
     private static let textKey = "shareText"
     private static let tsKey = "shareTs"
+
+    // Must match SHARE_IMPORT_URL in src/lib/shareImport.js. The scheme is
+    // registered in the App target's Info.plist (CFBundleURLTypes).
+    private static let hostAppURL = "com.adamlai.flownotes://share-import"
 
     // Filter Console.app on this subsystem to watch the hand-off. Content is
     // never logged, only lengths.
@@ -98,16 +105,83 @@ class ShareViewController: UIViewController {
                 Self.log.error("App Group write FAILED readback: wrote \(text.count, privacy: .public) chars, read \(readback?.count ?? -1, privacy: .public)")
             }
 
-            self.showConfirmation()
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.confirmationSeconds) {
-                self.complete()
+            // The payload is safely in the mailbox either way; now try to
+            // foreground Nubble on top of it. Success: the app opens onto
+            // Import and this sheet just dismisses — no card, nothing to read.
+            // Failure: fall back to save-and-switch, where the card tells the
+            // user the save landed and switching is on them.
+            self.launchHostApp { launched in
+                if launched {
+                    Self.log.notice("host app launch succeeded")
+                    self.complete()
+                } else {
+                    Self.log.notice("host app launch failed — falling back to save-and-switch")
+                    self.showConfirmation()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + Self.confirmationSeconds) {
+                        self.complete()
+                    }
+                }
             }
         }
     }
 
-    /// Small centered card: the hand-off already succeeded, the user just has
-    /// to switch to Nubble. Copy is deliberately "saved", not an instruction
-    /// that could read as an error.
+    /// Try to foreground the containing app, reporting real success/failure.
+    ///
+    /// UNSUPPORTED PATTERN — walk the responder chain up to the host process's
+    /// UIApplication and call the non-deprecated
+    /// `open(_:options:completionHandler:)` on it (the LocalSend approach).
+    /// Apple has broken this family of workaround once already: iOS 18
+    /// force-fails the deprecated `openURL:` selector, which is why this calls
+    /// the modern three-argument method instead. Apple may break that one too;
+    /// when it does, this reports false and the save-and-switch flow above is
+    /// the designed degradation — the share itself never depends on this call.
+    ///
+    /// COMPILES ONLY with "Require Only App-Extension-Safe API" set to NO on
+    /// the ShareExtension target (SHARE_EXTENSION_SETUP.md Part B). UIKit
+    /// marks `UIApplication` and this method extension-unavailable, and that
+    /// build setting is what turns the annotation into a hard error; turning
+    /// it off is the same condition LocalSend's plugin code builds under. An
+    /// error here saying "unavailable in application extensions" means the
+    /// build-setting step was missed.
+    ///
+    /// The completion always fires exactly once, on the main queue.
+    private func launchHostApp(completion: @escaping (Bool) -> Void) {
+        guard let url = URL(string: Self.hostAppURL) else {
+            completion(false)
+            return
+        }
+
+        var finished = false
+        let finish: (Bool) -> Void = { ok in
+            DispatchQueue.main.async {
+                guard !finished else { return }
+                finished = true
+                completion(ok)
+            }
+        }
+
+        var responder: UIResponder? = self
+        while let r = responder {
+            if let application = r as? UIApplication {
+                // If a future iOS no-ops the call without ever invoking the
+                // completion block, fail over instead of hanging the sheet.
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    finish(false)
+                }
+                application.open(url, options: [:]) { ok in finish(ok) }
+                return
+            }
+            responder = r.next
+        }
+
+        // No UIApplication in the chain — the workaround's other failure mode.
+        finish(false)
+    }
+
+    /// Fallback-only card, shown when the launch attempt failed: the hand-off
+    /// already succeeded, the user just has to switch to Nubble themselves.
+    /// Copy must not imply the app is opening (it isn't, in this path) —
+    /// "Saved — open Nubble to import" states what happened and what's left.
     private func showConfirmation() {
         let card = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
         card.layer.cornerRadius = 16
