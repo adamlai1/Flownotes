@@ -8,6 +8,7 @@ import { useToast } from '../contexts/ToastContext'
 import { copyNoteText } from '../utils/noteShare'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import { useBodyScrollLock } from '../lib/bodyScrollLock'
+import { linkSegments } from '../lib/linkify'
 import BubblePickerTree from './BubblePickerTree'
 
 // The Bubble section sits partway down the editor's scrolling page, so the
@@ -16,6 +17,51 @@ import BubblePickerTree from './BubblePickerTree'
 // expanded tree is at most this many rows.
 const NOTE_VIEW_MAX_EXPANDED_ROWS = 10
 
+
+// Map a screen point to a character offset in the read-mode body. Works
+// because read-mode markup preserves the raw text character-for-character
+// (linkify only wraps ranges — see linkify.js), so summing the text nodes
+// before the hit point IS the string offset. Returns null when the point
+// can't be resolved; the caller treats that as "append at the end", which is
+// exactly what a tap into the empty space below the last line should do.
+function caretOffsetFromPoint(x, y, container) {
+  if (!container) return null
+  let node, nodeOffset
+  if (document.caretRangeFromPoint) {
+    const r = document.caretRangeFromPoint(x, y)
+    if (!r) return null
+    node = r.startContainer
+    nodeOffset = r.startOffset
+  } else if (document.caretPositionFromPoint) {
+    const p = document.caretPositionFromPoint(x, y)
+    if (!p) return null
+    node = p.offsetNode
+    nodeOffset = p.offset
+  } else {
+    return null
+  }
+  if (!container.contains(node)) return null
+  if (node.nodeType === Node.TEXT_NODE) {
+    let total = 0
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
+    let n
+    while ((n = walker.nextNode())) {
+      if (n === node) return total + nodeOffset
+      total += n.nodeValue.length
+    }
+    return null
+  }
+  // Element hit (empty space inside the container): offset is a child index.
+  if (node === container) {
+    let total = 0
+    const kids = node.childNodes
+    for (let i = 0; i < Math.min(nodeOffset, kids.length); i++) {
+      total += (kids[i].textContent || '').length
+    }
+    return total
+  }
+  return null
+}
 
 function formatNoteDate(isoStr) {
   const d = new Date(isoStr)
@@ -38,6 +84,18 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // DERIVED from the first non-empty line, so the first line stays in the text and
   // is never pulled out / hidden.
   const [text, setText] = useState(note.content || '')
+  // Two-stage body: existing notes open READING (rendered text, tappable
+  // links); a tap on the body drops into the textarea with the cursor at the
+  // tapped character. Blur (keyboard dismissed, Esc, tap outside) returns to
+  // read mode. Brand-new empty notes open straight into edit — capture flow
+  // is unchanged. This is the seam the v1.2 markdown/checklist renderer
+  // slots into: renderReadBody below is the only place that decides how raw
+  // text becomes rendered nodes.
+  const [bodyMode, setBodyMode] = useState(() => (note.content ? 'read' : 'edit'))
+  const readRef = useRef(null)
+  // Caret position + scroll offset carried across the read → edit swap.
+  const pendingCaretRef = useRef(null)
+  const pendingScrollRef = useRef(0)
   // '' = no manual title: the header derives from the first body line and
   // follows it live. Non-empty = the user set it by hand; it stays fixed
   // until they clear it, which reverts to deriving (stored as null).
@@ -196,6 +254,64 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     setText(val)
     scheduleSave(val, selectedBubbleIds, tags, connections)
   }
+
+  // ── Read mode ──────────────────────────────────────────────────────────
+
+  // The render seam: raw text → rendered nodes. Today linkify-only; the v1.2
+  // markdown/checklist renderer replaces the body of this function and
+  // nothing around it. Links open externally: on native iOS, Capacitor's
+  // WKWebView delegation routes any external URL to UIApplication.open (the
+  // system Safari, not the in-app sheet); on web this is a normal new tab.
+  function renderReadBody(content) {
+    return linkSegments(content).map((seg, i) =>
+      seg.type === 'link' ? (
+        <a
+          key={i}
+          href={seg.href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline underline-offset-2"
+          style={{ color: '#6366f1' }}
+          // A link tap is a link tap — never an "edit here" tap.
+          onClick={e => e.stopPropagation()}
+        >
+          {seg.text}
+        </a>
+      ) : (
+        seg.text
+      )
+    )
+  }
+
+  function handleReadTap(e) {
+    // Preserve text selection: dragging out a selection ends in a click on
+    // this container; entering edit there would destroy the selection.
+    const sel = window.getSelection?.()
+    if (sel && !sel.isCollapsed) return
+    const container = readRef.current
+    // Append is the default: a tap that resolves to nothing (the empty space
+    // past the last line) edits at the END of the note, never nowhere.
+    const resolved = caretOffsetFromPoint(e.clientX, e.clientY, container)
+    pendingCaretRef.current = resolved != null ? resolved : text.length
+    pendingScrollRef.current = container ? container.scrollTop : 0
+    setBodyMode('edit')
+  }
+
+  // After the read → edit swap: focus, place the caret at the tapped
+  // character, and keep the scroll position (both boxes share exact metrics,
+  // so the same scrollTop shows the same lines).
+  useLayoutEffect(() => {
+    if (bodyMode !== 'edit') return
+    const off = pendingCaretRef.current
+    if (off == null) return
+    pendingCaretRef.current = null
+    const el = bodyRef.current
+    if (!el) return
+    el.focus({ preventScroll: true })
+    const pos = Math.max(0, Math.min(off, el.value.length))
+    try { el.setSelectionRange(pos, pos) } catch { /* not all inputs support it */ }
+    el.scrollTop = pendingScrollRef.current
+  }, [bodyMode])
 
   // Membership invariants: a note always has at least one selection. The
   // project-canvas sentinel deselects itself when the FIRST real bubble is
@@ -590,19 +706,38 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
 
         {/* Text content */}
         <div className="px-5 md:px-10 pt-4 md:pt-8 pb-3 border-b border-white/10">
-          <textarea
-            ref={bodyRef}
-            value={text}
-            onChange={handleTextChange}
-            onWheel={handleBodyWheel}
-            placeholder="Start writing…"
-            autoComplete="off"
-            autoCorrect="on"
-            autoCapitalize="sentences"
-            spellCheck={true}
-            className="w-full text-[16px] md:text-[17px] text-gray-200 placeholder-gray-700 outline-none resize-none bg-transparent leading-relaxed"
-            style={{ height: '60dvh', overflowY: 'auto', overscrollBehavior: 'contain', userSelect: 'text', WebkitUserSelect: 'text' }}
-          />
+          {bodyMode === 'edit' ? (
+            <textarea
+              ref={bodyRef}
+              value={text}
+              onChange={handleTextChange}
+              onWheel={handleBodyWheel}
+              onBlur={() => setBodyMode('read')}
+              placeholder="Start writing…"
+              autoComplete="off"
+              autoCorrect="on"
+              autoCapitalize="sentences"
+              spellCheck={true}
+              className="w-full text-[16px] md:text-[17px] text-gray-200 placeholder-gray-700 outline-none resize-none bg-transparent leading-relaxed"
+              style={{ height: '60dvh', overflowY: 'auto', overscrollBehavior: 'contain', userSelect: 'text', WebkitUserSelect: 'text' }}
+            />
+          ) : (
+            /* Read mode. Same classes, same box, same wheel chaining as the
+               textarea — the two must stay metric-identical or the caret
+               mapping and scroll carry-over drift. whitespace-pre-wrap +
+               break-words match textarea wrapping. A click (never a scroll
+               gesture — those don't produce clicks) drops into edit at the
+               tapped character; empty space below the text appends. */
+            <div
+              ref={readRef}
+              onClick={handleReadTap}
+              onWheel={handleBodyWheel}
+              className="w-full text-[16px] md:text-[17px] text-gray-200 outline-none bg-transparent leading-relaxed whitespace-pre-wrap break-words"
+              style={{ height: '60dvh', overflowY: 'auto', overscrollBehavior: 'contain', userSelect: 'text', WebkitUserSelect: 'text', cursor: 'text' }}
+            >
+              {text ? renderReadBody(text) : <span className="text-gray-700">Start writing…</span>}
+            </div>
+          )}
           <div className="flex items-end justify-between pt-2">
             {/* Undo / Redo — moved down from the header */}
             <div className="flex items-center gap-1 -ml-1.5">
