@@ -91,7 +91,9 @@ class ShareViewController: UIViewController {
             // subsystem above). Proves the write landed before we claim "Saved".
             let readback = defaults.string(forKey: Self.textKey)
             if readback == text {
-                Self.log.info("App Group write verified: \(text.count, privacy: .public) chars")
+                // .notice, not .info: info-level is memory-only and dies with this
+                // short-lived process before Console ever sees it.
+                Self.log.notice("App Group write verified: \(text.count, privacy: .public) chars")
             } else {
                 Self.log.error("App Group write FAILED readback: wrote \(text.count, privacy: .public) chars, read \(readback?.count ?? -1, privacy: .public)")
             }
