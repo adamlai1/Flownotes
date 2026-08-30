@@ -17,6 +17,9 @@ import {
 } from './utils/storage'
 import {
   loadAllFromCloud,
+  loadNoteTombstones,
+  isNoteTombstoned,
+  parseTs,
   syncAllToCloud,
   syncProjectToCloud,
   saveNotesToCloud,
@@ -1149,6 +1152,48 @@ export default function App() {
         if (res.changed) await syncAllToCloud(user.id, projects)
         localStorage.setItem(NEWLINE_FLAG, '1')
       }
+      // ── Pull guard ────────────────────────────────────────────────────────
+      // The cloud snapshot is only as new as the last push that reached it — a
+      // note edited here whose push hasn't landed (debounce pending, flush
+      // raced, or another device reverted the row) is NEWER than its cloud
+      // copy, and replacing local state wholesale would destroy the edit. Keep
+      // the local copy of any id-matched note whose updated_at is strictly
+      // newer than the cloud's, and mark its project dirty so the kept copy is
+      // pushed back up (through the guarded upsert) instead of lingering
+      // local-only. Ties take the cloud copy, matching the push guard's rule.
+      //
+      // Skipped when local storage is stamped for a DIFFERENT account: seed
+      // ids (seed:project, …) are identical on every install, so an id match
+      // there could graft the previous user's seed-note edits into this
+      // account. mergeGuestAndCloud applies the same newer-wins rule on the
+      // explicit-merge path, so this covers only the plain load paths.
+      const owner = localStorage.getItem(DATA_OWNER_KEY)
+      let preservedAny = false
+      if (!owner || owner === user.id) {
+        const preservedProjects = []
+        projects = projects.map(p => {
+          const local = loadProject(p.id)
+          if (!local?.notes?.length) return p
+          const localById = new Map(local.notes.map(n => [n.id, n]))
+          let kept = 0
+          const notes = (p.notes ?? []).map(cloudNote => {
+            const localNote = localById.get(cloudNote.id)
+            if (localNote && parseTs(localNote.updated_at) > parseTs(cloudNote.updated_at)) {
+              kept++
+              return localNote
+            }
+            return cloudNote
+          })
+          if (!kept) return p
+          preservedProjects.push(p.id)
+          return { ...p, notes }
+        })
+        if (preservedProjects.length) {
+          console.log('[sync] pull guard: kept newer local note copies in project(s)', preservedProjects)
+          for (const id of preservedProjects) markProjectDirty(user.id, id)
+          preservedAny = true
+        }
+      }
       saveProjectList(cloudList)
       for (const p of projects) saveProject(p)
       setProjectList(cloudList)
@@ -1162,6 +1207,15 @@ export default function App() {
       setCurrentBubbleId(null)
       localStorage.setItem(DATA_OWNER_KEY, user.id)
       clearImportProgress()
+      // Push the kept copies back up now that they're in local storage (the
+      // flush reads from there). Non-fatal: the dirty flags are durable, so a
+      // failure here just leaves the re-push to the normal retry triggers —
+      // it must not fail an initial sync whose pull already succeeded.
+      if (preservedAny) {
+        try { await flushOutbox(user.id) } catch (e) {
+          console.warn('[sync] pull guard re-push failed — outbox will retry:', e)
+        }
+      }
     }
 
     // First-time sync — migrate then upload all local data
@@ -1244,6 +1298,22 @@ export default function App() {
           const peek = peekRaw
             ? { ...peekRaw, projects: migrateSeedIds(peekRaw.projects).projects }
             : null
+          // A local copy whose cloud tombstone is newer than its updated_at is
+          // a deletion this device missed — NOT local-only work. It must not
+          // raise the dialog, must not join a merge union, and must not be
+          // re-imported under a fresh id by "Keep separate" (fresh ids would
+          // slip it past its tombstone for good). Pruned in memory; local
+          // storage catches up when the chosen path's write lands. Notes
+          // edited AFTER their deletion survive the prune by the same rule
+          // the rest of sync uses (isNoteTombstoned).
+          const noteTombstones = peek ? await loadNoteTombstones(user.id) : new Map()
+          const pruneTombstoned = projects => noteTombstones.size
+            ? projects.map(p => ({
+                ...p,
+                notes: (p.notes ?? []).filter(n => !isNoteTombstoned(noteTombstones, n)),
+              }))
+            : projects
+          const localLive = pruneTombstoned(localProjects)
           // Only items the cloud doesn't have can be lost. After a normal
           // sign-out the local store is just the last cloud snapshot, so every
           // id matches and the dialog would be pure noise — ask only when
@@ -1268,7 +1338,7 @@ export default function App() {
             // An EDITED seed item is real user data and counts like any
             // other. When genuine local-only items raise the dialog, pristine
             // seed items simply ride along with whichever choice is made.
-            for (const p of localProjects) {
+            for (const p of localLive) {
               for (const n of p.notes ?? []) {
                 if (!cloudNoteIds.has(n.id) && !isPristineSeedNote(n)) localOnlyCount++
               }
@@ -1335,7 +1405,7 @@ export default function App() {
               // are in cloudData (and cloudList) already, so re-importing
               // would duplicate them under the next name suffix.
               const alreadyImported = readImportProgress(user.id)
-              const sources = loadAllProjects(loadProjectList() ?? [])
+              const sources = pruneTombstoned(loadAllProjects(loadProjectList() ?? []))
                 .filter(p => !alreadyImported.has(p.id))
               let imported = buildSeparateImport(sources, cloudProjects, cloudList)
               // The newline fix is applied to what this path writes (the
@@ -1384,7 +1454,7 @@ export default function App() {
               const adoption = attachUnassignedNotes(cloudData)
               const seedFix = migrateSeedIds(adoption.projects)
               let merged = mergeGuestAndCloud(
-                loadAllProjects(loadProjectList() ?? []),
+                pruneTombstoned(loadAllProjects(loadProjectList() ?? [])),
                 seedFix.projects,
               )
               if (needNewlineFix) merged = migrateProjectsNewline(merged).projects

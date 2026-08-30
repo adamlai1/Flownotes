@@ -74,11 +74,14 @@ export function pendingCount(userId) {
 }
 
 async function applyOp(userId, op) {
+  // op.at (when the user actually deleted) rides through as the tombstone's
+  // deleted_at, so an offline delete replayed hours later doesn't outrank
+  // edits made on another device in between.
   switch (op.kind) {
-    case 'notes':   return deleteNotesFromCloud(userId, op.noteIds ?? [])
+    case 'notes':   return deleteNotesFromCloud(userId, op.noteIds ?? [], op.at)
     case 'bubbles': return deleteBubblesFromCloud(userId, op.bubbleIds ?? [])
     case 'tag':     return deleteCustomTagFromCloud(userId, op.tagName)
-    case 'project': return deleteProjectFromCloud(userId, op.projectId, op.noteIds ?? [])
+    case 'project': return deleteProjectFromCloud(userId, op.projectId, op.noteIds ?? [], op.at)
     default:        return undefined // unknown kind (older build) — drop it
   }
 }
