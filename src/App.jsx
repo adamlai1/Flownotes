@@ -928,6 +928,7 @@ export default function App() {
   const [createBubbleOpen, setCreateBubbleOpen] = useState(false)
   const [sheetFocusNonce, setSheetFocusNonce] = useState(0)
   const [plusHeld, setPlusHeld] = useState(false)
+  const [plusExpanded, setPlusExpanded] = useState(false)
   const holdTimerRef = useRef(null)
   const heldFiredRef = useRef(false)
   // Id of a bubble just created here, handed to the bubble view to place on the page
@@ -2176,13 +2177,17 @@ export default function App() {
     setNoteStack([note.id])
   }
 
-  // ── + button: tap creates a note, hold creates a bubble ──────────────────────
+  // ── + button: tap expands it into Note/Bubble tiles, hold creates a bubble ───
   //
-  // The two are mutually exclusive by way of heldFiredRef: once the hold has opened
-  // the sheet, the release that follows — and the click the browser synthesises from
-  // it — is swallowed, so a hold never also leaves a stray empty note behind. The
-  // ref resets on the next press. Keyboard activation reaches onClick with no pointer
-  // sequence at all, which is why the note path lives there and not in onPointerUp.
+  // The tap expands the + into two icon tiles (Note in the +'s own spot, Bubble
+  // above it — see CreateButton) so bubble creation is discoverable; the hold
+  // remains a direct fast path to the bubble sheet for anyone who knows it. The
+  // two are mutually exclusive by way of heldFiredRef: once the hold has opened
+  // the sheet, the release that follows — and the click the browser synthesises
+  // from it — is swallowed, so a hold never also expands the tiles over the
+  // sheet. The ref resets on the next press. Keyboard activation reaches onClick
+  // with no pointer sequence at all, which is why the expansion path lives there
+  // and not in onPointerUp.
   function beginPlusHold() {
     heldFiredRef.current = false
     setPlusHeld(true)
@@ -2209,7 +2214,7 @@ export default function App() {
 
   function handlePlusClick() {
     if (heldFiredRef.current) { heldFiredRef.current = false; return }
-    handleCreateNote()
+    setPlusExpanded(true)
   }
 
   // ── Keyboard shortcuts (desktop) ─────────────────────────────────────────────
@@ -2383,7 +2388,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* Floating Create Button — tap for a note, hold for a bubble */}
+      {/* Floating Create Button — tap expands into Note/Bubble tiles, hold for a bubble */}
       <CreateButton
         held={plusHeld}
         holdMs={LONG_PRESS_MS}
@@ -2391,6 +2396,10 @@ export default function App() {
         onPointerDown={beginPlusHold}
         onPointerUp={endPlusHold}
         onPointerCancel={cancelPlusHold}
+        expanded={plusExpanded}
+        onCreateNote={() => { setPlusExpanded(false); handleCreateNote() }}
+        onCreateBubble={() => { setPlusExpanded(false); setCreateBubbleOpen(true) }}
+        onCollapse={() => setPlusExpanded(false)}
       />
 
       <CreateBubbleSheet
