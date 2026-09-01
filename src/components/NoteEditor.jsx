@@ -9,6 +9,7 @@ import { copyNoteText } from '../utils/noteShare'
 import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
 import { useBodyScrollLock } from '../lib/bodyScrollLock'
 import { linkSegments } from '../lib/linkify'
+import { inlineSegments } from '../lib/mdFormat'
 import BubblePickerTree from './BubblePickerTree'
 
 // The Bubble section sits partway down the editor's scrolling page, so the
@@ -18,12 +19,16 @@ import BubblePickerTree from './BubblePickerTree'
 const NOTE_VIEW_MAX_EXPANDED_ROWS = 10
 
 
-// Map a screen point to a character offset in the read-mode body. Works
-// because read-mode markup preserves the raw text character-for-character
-// (linkify only wraps ranges — see linkify.js), so summing the text nodes
-// before the hit point IS the string offset. Returns null when the point
-// can't be resolved; the caller treats that as "append at the end", which is
-// exactly what a tap into the empty space below the last line should do.
+// Map a screen point to a character offset in the raw note text. Read mode
+// renders one block element per raw line (see renderReadBody), each stamped
+// with data-line-start — its line's offset in the raw string — and, when the
+// line hides a marker behind a widget (checklists), data-prefix-len. Within a
+// line the rendered text is character-identical to the raw text after the
+// hidden prefix (linkify only wraps ranges — see linkify.js), so the offset
+// is lineStart + prefix + the text-node sum inside that line. Exact on every
+// line, checklist lines included. Returns null when the point can't be
+// resolved; the caller treats that as "append at the end", which is exactly
+// what a tap into the empty space below the last line should do.
 function caretOffsetFromPoint(x, y, container) {
   if (!container) return null
   let node, nodeOffset
@@ -41,24 +46,117 @@ function caretOffsetFromPoint(x, y, container) {
     return null
   }
   if (!container.contains(node)) return null
+  // Hit on the container itself (space between lines): offset is a child
+  // index into the line blocks. At/past the last line → null → append.
+  if (node === container) {
+    const kids = node.childNodes
+    if (nodeOffset >= kids.length) return null
+    const start = kids[nodeOffset]?.dataset?.lineStart
+    return start != null ? +start : null
+  }
+  const base = node.nodeType === Node.TEXT_NODE ? node.parentElement : node
+  const lineEl = base?.closest?.('[data-line-start]')
+  if (!lineEl || !container.contains(lineEl)) return null
+  const lineStart = +lineEl.dataset.lineStart
+  const prefix = +(lineEl.dataset.prefixLen || 0)
   if (node.nodeType === Node.TEXT_NODE) {
-    let total = 0
-    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
+    return rawTextOffset(lineEl, lineStart, prefix, node, nodeOffset)
+  }
+  // Element hit inside a line (its <br>, a widget, or space past its text):
+  // resolve to the end of the last rendered text before the hit point, else
+  // the line's content start.
+  let lastText = null
+  const kids = node.childNodes
+  for (let i = 0; i < Math.min(nodeOffset, kids.length); i++) {
+    const k = kids[i]
+    if (k.nodeType === Node.TEXT_NODE) {
+      lastText = k
+      continue
+    }
+    const w = document.createTreeWalker(k, NodeFilter.SHOW_TEXT)
     let n
-    while ((n = walker.nextNode())) {
-      if (n === node) return total + nodeOffset
-      total += n.nodeValue.length
+    while ((n = w.nextNode())) lastText = n
+  }
+  if (!lastText) return lineStart + prefix
+  return rawTextOffset(lineEl, lineStart, prefix, lastText, lastText.nodeValue.length)
+}
+
+// Raw offset of a (textNode, offsetInNode) position within a rendered line.
+// A line with inline formatting stamps every rendered run with data-raw-start
+// (the absolute raw offset of the run's first rendered character — hidden
+// **/* markers make one number per line insufficient); the walk then happens
+// within that run. Unformatted lines map via line start + hidden prefix + the
+// in-line text-node sum, exactly as before. Exact either way: the only raw
+// positions no tap can produce are the hidden marker characters themselves,
+// where the caret lands at the marker's boundary instead.
+function rawTextOffset(lineEl, lineStart, prefix, textNode, offsetInNode) {
+  const seg = textNode.parentElement?.closest?.('[data-raw-start]')
+  const scoped = seg && lineEl.contains(seg)
+  const scope = scoped ? seg : lineEl
+  const baseOffset = scoped ? +seg.dataset.rawStart : lineStart + prefix
+  let total = 0
+  const walker = document.createTreeWalker(scope, NodeFilter.SHOW_TEXT)
+  let n
+  while ((n = walker.nextNode())) {
+    if (n === textNode) return baseOffset + total + offsetInNode
+    total += n.nodeValue.length
+  }
+  return baseOffset
+}
+
+// A bullet line: "- text" (but never a checklist's "- ["). LookAHEAD only —
+// iOS 15 Safari can't parse lookbehind.
+const BULLET_RE = /^- (?!\[[ xX]\] )/
+const BULLET_PREFIX_LEN = 2
+const HEADER_RE = /^(#{1,3}) /
+const HEADER_STYLES = {
+  1: { fontSize: '1.5em', fontWeight: 700 },
+  2: { fontSize: '1.25em', fontWeight: 700 },
+  3: { fontSize: '1.1em', fontWeight: 600 },
+}
+
+// A checklist line: "- [ ] text" / "- [x] text" (GFM task syntax; capital X
+// accepted). The marker is exactly 6 characters — what read mode hides behind
+// the rendered checkbox and what the caret math re-adds via data-prefix-len.
+const CHECKLIST_RE = /^- \[([ xX])\] /
+const CHECKLIST_PREFIX_LEN = 6
+
+// Checklist editing sugar, applied in handleTextChange to the value the
+// keyboard already produced — never via keydown/preventDefault, so it cannot
+// fight iOS autocorrect or the software keyboard's own return handling. Only
+// an exact single-character insertion is transformed:
+//   - a space completing "[] " / "-[] " / "- [] " at a line start normalizes
+//     the line into a real "- [ ] " marker;
+//   - Enter after a non-empty checklist line continues the list with a fresh
+//     unchecked marker;
+//   - Enter on an EMPTY checklist item exits the list — the marker and the
+//     just-typed newline are both removed, leaving a plain empty line, never
+//     an endless run of empty boxes.
+// Returns { text, caret } or null to accept the input untouched.
+function checklistInputTransform(prevText, val, caret) {
+  if (caret == null || caret < 1) return null
+  if (val.length !== prevText.length + 1) return null
+  const ch = val[caret - 1]
+  if (ch === ' ') {
+    const lineStart = val.lastIndexOf('\n', caret - 2) + 1
+    const before = val.slice(lineStart, caret)
+    if (before === '[] ' || before === '-[] ' || before === '- [] ') {
+      return {
+        text: val.slice(0, lineStart) + '- [ ] ' + val.slice(caret),
+        caret: lineStart + CHECKLIST_PREFIX_LEN,
+      }
     }
     return null
   }
-  // Element hit (empty space inside the container): offset is a child index.
-  if (node === container) {
-    let total = 0
-    const kids = node.childNodes
-    for (let i = 0; i < Math.min(nodeOffset, kids.length); i++) {
-      total += (kids[i].textContent || '').length
+  if (ch === '\n') {
+    const prevLineStart = val.lastIndexOf('\n', caret - 2) + 1
+    const prevLine = val.slice(prevLineStart, caret - 1)
+    if (!CHECKLIST_RE.test(prevLine)) return null
+    if (prevLine.length === CHECKLIST_PREFIX_LEN) {
+      // Empty item + Enter = leave the list.
+      return { text: val.slice(0, prevLineStart) + val.slice(caret), caret: prevLineStart }
     }
-    return total
+    return { text: val.slice(0, caret) + '- [ ] ' + val.slice(caret), caret: caret + CHECKLIST_PREFIX_LEN }
   }
   return null
 }
@@ -85,12 +183,12 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // is never pulled out / hidden.
   const [text, setText] = useState(note.content || '')
   // Two-stage body: existing notes open READING (rendered text, tappable
-  // links); a tap on the body drops into the textarea with the cursor at the
-  // tapped character. Blur (keyboard dismissed, Esc, tap outside) returns to
-  // read mode. Brand-new empty notes open straight into edit — capture flow
-  // is unchanged. This is the seam the v1.2 markdown/checklist renderer
-  // slots into: renderReadBody below is the only place that decides how raw
-  // text becomes rendered nodes.
+  // links, tappable checkboxes); a tap on the body drops into the textarea
+  // with the cursor at the tapped character. Blur (keyboard dismissed, Esc,
+  // tap outside) returns to read mode. Brand-new empty notes open straight
+  // into edit — capture flow is unchanged. renderReadBody below is the only
+  // place that decides how raw text becomes rendered nodes; checklists live
+  // there now, further markdown slots in the same per-line seam.
   const [bodyMode, setBodyMode] = useState(() => (note.content ? 'read' : 'edit'))
   const readRef = useRef(null)
   // Caret position + scroll offset carried across the read → edit swap.
@@ -248,21 +346,58 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     scheduleSave(next, selectedBubbleIds, tags, connections)
   }
 
+  // Caret/selection restore after a programmatic transform (a bare number
+  // for a caret, or { start, end } for a selection): the controlled textarea
+  // re-renders with the transformed value, then this places the selection
+  // where the transform said it belongs. Inert (ref stays null) on normal
+  // typing. Today only the checklist typing sugar uses it.
+  const transformCaretRef = useRef(null)
+  useLayoutEffect(() => {
+    if (transformCaretRef.current == null) return
+    const sel = transformCaretRef.current
+    transformCaretRef.current = null
+    const el = bodyRef.current
+    if (el) {
+      const start = typeof sel === 'number' ? sel : sel.start
+      const end = typeof sel === 'number' ? sel : sel.end
+      try { el.setSelectionRange(start, end) } catch { /* not all inputs support it */ }
+    }
+  }, [text])
+
   function handleTextChange(e) {
     const val = e.target.value
+    const t = checklistInputTransform(text, val, e.target.selectionStart)
     pushHistory(text)
-    setText(val)
-    scheduleSave(val, selectedBubbleIds, tags, connections)
+    if (t) {
+      transformCaretRef.current = t.caret
+      setText(t.text)
+      scheduleSave(t.text, selectedBubbleIds, tags, connections)
+    } else {
+      setText(val)
+      scheduleSave(val, selectedBubbleIds, tags, connections)
+    }
+  }
+
+  // Ticking a box is a text edit: same history push, same debounced save as
+  // typing, so undo/redo, autosave, close-flush and sync need nothing new —
+  // checked state lives in the note text ("- [ ]" ↔ "- [x]").
+  function toggleChecklistAt(lineStart) {
+    if (!CHECKLIST_RE.test(text.slice(lineStart, lineStart + CHECKLIST_PREFIX_LEN))) return
+    const boxPos = lineStart + 3
+    const next = text.slice(0, boxPos) + (text[boxPos] === ' ' ? 'x' : ' ') + text.slice(boxPos + 1)
+    pushHistory(text)
+    setText(next)
+    scheduleSave(next, selectedBubbleIds, tags, connections)
   }
 
   // ── Read mode ──────────────────────────────────────────────────────────
 
-  // The render seam: raw text → rendered nodes. Today linkify-only; the v1.2
-  // markdown/checklist renderer replaces the body of this function and
-  // nothing around it. Links open externally: on native iOS, Capacitor's
+  // Inline rendering within one line: linkify only — the segments' text
+  // concatenates to the line text exactly (see linkify.js), which the caret
+  // math relies on. Links open externally: on native iOS, Capacitor's
   // WKWebView delegation routes any external URL to UIApplication.open (the
   // system Safari, not the in-app sheet); on web this is a normal new tab.
-  function renderReadBody(content) {
+  function renderInline(content) {
     return linkSegments(content).map((seg, i) =>
       seg.type === 'link' ? (
         <a
@@ -281,6 +416,121 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         seg.text
       )
     )
+  }
+
+  // Inline rendering with bold/italic support. Cheap path: a line with no
+  // inline markers renders exactly as renderInline does, and the caret math's
+  // line-walk stays valid. Formatted path: EVERY rendered run — formatted or
+  // plain — is wrapped in a span stamped with data-raw-start (the absolute
+  // raw offset of its first rendered character), because once any marker in
+  // the line is hidden, a single per-line number can no longer describe the
+  // mapping; the caret math then resolves within the run (see rawTextOffset).
+  function renderInlineFormatted(str, rawBase) {
+    const segs = inlineSegments(str)
+    if (!segs.some(s => s.bold || s.italic)) return renderInline(str)
+    return segs.map((seg, i) => (
+      <span
+        key={i}
+        data-raw-start={rawBase + seg.rawStart}
+        style={seg.bold || seg.italic ? {
+          fontWeight: seg.bold ? 600 : undefined,
+          fontStyle: seg.italic ? 'italic' : undefined,
+        } : undefined}
+      >
+        {renderInline(seg.text)}
+      </span>
+    ))
+  }
+
+  // The render seam: raw text → rendered nodes, one block element per raw
+  // line. Every line carries data-line-start (its offset in the raw string)
+  // and, when it hides a marker behind a widget or styling, data-prefix-len —
+  // what caretOffsetFromPoint needs to keep tap-to-edit exact. Line markers:
+  // checklist ("- [ ] " → tappable checkbox), bullet ("- " → dot widget,
+  // never substituted characters), headers ("#"–"###" → sized text). Inline:
+  // bold/italic via renderInlineFormatted. The text after any hidden marker
+  // stays character-identical to the raw line.
+  function renderReadBody(content) {
+    const lines = content.split('\n')
+    let offset = 0
+    return lines.map(line => {
+      const start = offset
+      offset += line.length + 1
+      const m = line.match(CHECKLIST_RE)
+      if (!m) {
+        const bm = line.match(BULLET_RE)
+        if (bm) {
+          return (
+            <div key={start} data-line-start={start} data-prefix-len={BULLET_PREFIX_LEN}>
+              {/* Bullet widget: no text nodes (the caret math walks text
+                  nodes; the marker's 2 chars live in data-prefix-len). */}
+              <span
+                aria-hidden="true"
+                className="inline-flex items-center justify-center align-middle"
+                style={{ width: 18, height: 18, marginRight: '0.35em' }}
+              >
+                <svg width="6" height="6" viewBox="0 0 6 6">
+                  <circle cx="3" cy="3" r="3" fill="currentColor" />
+                </svg>
+              </span>
+              {renderInlineFormatted(line.slice(BULLET_PREFIX_LEN), start + BULLET_PREFIX_LEN)}
+            </div>
+          )
+        }
+        const hm = line.match(HEADER_RE)
+        if (hm) {
+          const level = hm[1].length
+          return (
+            <div key={start} data-line-start={start} data-prefix-len={level + 1} style={HEADER_STYLES[level]}>
+              {renderInlineFormatted(line.slice(level + 1), start + level + 1)}
+            </div>
+          )
+        }
+        return (
+          <div key={start} data-line-start={start}>
+            {line ? renderInlineFormatted(line, start) : <br />}
+          </div>
+        )
+      }
+      const checked = m[1] !== ' '
+      const rest = line.slice(CHECKLIST_PREFIX_LEN)
+      return (
+        <div key={start} data-line-start={start} data-prefix-len={CHECKLIST_PREFIX_LEN}>
+          <button
+            type="button"
+            role="checkbox"
+            aria-checked={checked}
+            aria-label={checked ? 'Uncheck item' : 'Check item'}
+            // A checkbox tap is a toggle — never an "edit here" tap.
+            onClick={e => { e.stopPropagation(); toggleChecklistAt(start) }}
+            className="inline-flex items-center justify-center align-middle"
+            // 34×30 touch target; the negative margins keep the layout box at
+            // 18×18 so line height doesn't grow. No text content — the caret
+            // math walks text nodes, and the marker's 6 chars are accounted
+            // for by data-prefix-len, not the DOM.
+            style={{ width: 34, height: 30, margin: '-6px -8px', marginRight: 'calc(0.45em - 8px)', touchAction: 'manipulation' }}
+          >
+            <span
+              className="inline-flex items-center justify-center flex-shrink-0"
+              style={{
+                width: 18, height: 18, borderRadius: 5,
+                border: checked ? 'none' : '1.5px solid #6b7280',
+                background: checked ? '#6366f1' : 'transparent',
+              }}
+            >
+              {checked && (
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="3">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                </svg>
+              )}
+            </span>
+          </button>
+          <span style={checked ? { color: '#6b7280' } : undefined}>
+            {rest ? renderInlineFormatted(rest, start + CHECKLIST_PREFIX_LEN) : null}
+          </span>
+        </div>
+      )
+    })
   }
 
   function handleReadTap(e) {
@@ -417,12 +667,27 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     onNavigateToNote(targetNote)
   }
 
-  // Edge-swipe back gesture. Tracking is 1:1 with the finger (no lag): swipeOffset
-  // is local state so only this panel re-renders. onSwipeProgress lets the parent
+  // Tap-away → read mode. iOS Safari/WKWebView never moves focus — and so
+  // never fires blur — when a tap lands on non-focusable content (and iOS
+  // buttons don't take focus on tap either), so the textarea's onBlur →
+  // read-mode swap only ever ran via the keyboard's Done button or Esc.
+  // Detect completed taps ourselves: ≤10px of movement counts as a tap (a
+  // scroll drag never dismisses the keyboard mid-gesture), and a tap outside
+  // the textarea while editing blurs it explicitly, flowing through the same
+  // onBlur as every other route. Touch events never fire from a mouse, so
+  // desktop — where a click on the page blurs natively — is untouched.
+  const tapAwayRef = useRef({ startX: 0, startY: 0, moved: true })
+
+  // Touch handling on the panel root does double duty: tap-away detection
+  // (all touch devices — gated on touch itself, not viewport width, so iPad
+  // widths behave) and the edge-swipe back gesture (mobile layout only).
+  // Swipe tracking is 1:1 with the finger (no lag): swipeOffset is local
+  // state so only this panel re-renders. onSwipeProgress lets the parent
   // drive a parallax on the view beneath (revealed as the panel slides away).
   function handleTouchStart(e) {
     const touch = e.touches[0]
-    if (touch.clientX < 28) {
+    tapAwayRef.current = { startX: touch.clientX, startY: touch.clientY, moved: false }
+    if (!isDesktop && touch.clientX < 28) {
       swipeRef.current = { active: true, startX: touch.clientX, currentX: touch.clientX }
       // Move the layer beneath to its parallax start position while it's still fully
       // hidden behind this panel, so there's no visible jump when the reveal begins.
@@ -431,6 +696,11 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   }
 
   function handleTouchMove(e) {
+    const touch = e.touches[0]
+    const tap = tapAwayRef.current
+    if (Math.abs(touch.clientX - tap.startX) > 10 || Math.abs(touch.clientY - tap.startY) > 10) {
+      tap.moved = true
+    }
     if (!swipeRef.current.active) return
     const dx = e.touches[0].clientX - swipeRef.current.startX
     swipeRef.current.currentX = e.touches[0].clientX
@@ -440,7 +710,21 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     }
   }
 
-  function handleTouchEnd() {
+  function handleTouchEnd(e) {
+    // touchend's target is the element the touch STARTED on, so a tap that
+    // begins in the textarea can never blur it, and one that begins outside
+    // always can — checkbox/link/button taps included, which then still run
+    // their own click handlers from read mode. Exemption: anything inside a
+    // [data-keep-edit] ancestor (undo/redo) is an edit control — it must act
+    // on the live edit state and keep the keyboard up, so it never counts as
+    // tap-away. This is a deliberate whitelist, not a re-opening of the
+    // original hole: every non-exempt tap still blurs.
+    if (!tapAwayRef.current.moved && bodyMode === 'edit') {
+      const body = bodyRef.current
+      const keepEdit = e.target instanceof Element && e.target.closest('[data-keep-edit]')
+      if (body && !keepEdit && e.target !== body) body.blur()
+    }
+    tapAwayRef.current.moved = true
     if (!swipeRef.current.active) return
     swipeRef.current.active = false
     const dx = swipeRef.current.currentX - swipeRef.current.startX
@@ -609,9 +893,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         // Left-edge shadow gives the sliding panel depth over the revealed layer.
         boxShadow: '-8px 0 24px rgba(0,0,0,0.35)',
       }}
-      onTouchStart={!isDesktop ? handleTouchStart : undefined}
-      onTouchMove={!isDesktop ? handleTouchMove : undefined}
-      onTouchEnd={!isDesktop ? handleTouchEnd : undefined}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
     >
       {/* ── Header — grid row 1 (auto height, never scrolls) ─────────────────── */}
       {/* EXPERIMENT (neutral scheme): header had a border-b divider and painted
@@ -725,7 +1009,12 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             /* Read mode. Same classes, same box, same wheel chaining as the
                textarea — the two must stay metric-identical or the caret
                mapping and scroll carry-over drift. whitespace-pre-wrap +
-               break-words match textarea wrapping. A click (never a scroll
+               break-words match textarea wrapping; one block per raw line
+               reproduces the same line layout. Known exception: a checkbox is
+               not the same width as its raw "- [ ] " marker, so WRAPPING (and
+               with it scrollTop carry-over) can drift slightly on checklist
+               lines — the caret offset itself stays exact everywhere, it's a
+               string offset and immune to wrapping. A click (never a scroll
                gesture — those don't produce clicks) drops into edit at the
                tapped character; empty space below the text appends. */
             <div
@@ -744,6 +1033,11 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
               <button
                 onClick={undo}
                 disabled={past.length === 0}
+                // Edit control: undo-then-keep-typing must not cost a
+                // re-entry tap, so it's exempt from tap-away (data-keep-edit)
+                // and from desktop's native mousedown focus steal.
+                data-keep-edit=""
+                onMouseDown={e => e.preventDefault()}
                 className="p-1.5 rounded-lg transition-opacity flex-shrink-0 text-gray-400 disabled:opacity-25"
                 title="Undo"
               >
@@ -755,6 +1049,8 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
               <button
                 onClick={redo}
                 disabled={future.length === 0}
+                data-keep-edit=""
+                onMouseDown={e => e.preventDefault()}
                 className="p-1.5 rounded-lg transition-opacity flex-shrink-0 text-gray-400 disabled:opacity-25"
                 title="Redo"
               >

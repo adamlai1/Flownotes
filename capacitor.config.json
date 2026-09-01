@@ -1,5 +1,10 @@
 {
   "appId": "com.adamlai.flownotes",
   "appName": "FlowNotes",
-  "webDir": "dist"
+  "webDir": "dist",
+  "plugins": {
+    "Keyboard": {
+      "accessoryBarVisible": false
+    }
+  }
 }

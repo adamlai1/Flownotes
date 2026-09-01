@@ -14,6 +14,7 @@
     "@capacitor/cli": "^8.5.0",
     "@capacitor/core": "^8.5.0",
     "@capacitor/ios": "^8.5.0",
+    "@capacitor/keyboard": "^8.0.5",
     "@supabase/supabase-js": "^2.106.0",
     "framer-motion": "^11.18.2",
     "pdfjs-dist": "^4.10.38",
