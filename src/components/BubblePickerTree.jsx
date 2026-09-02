@@ -35,7 +35,10 @@ export default function BubblePickerTree({
         <div
           key={bubble.id}
           className="flex items-stretch"
-          style={{ paddingLeft: depth * indentPerLevel, minHeight: rowHeight }}
+          // Each row is a scroll-snap point: inert in containers that don't
+          // declare a scroll-snap-type (the pickers), active where one does
+          // (the note sheet's tree box), so no per-surface forking.
+          style={{ paddingLeft: depth * indentPerLevel, minHeight: rowHeight, scrollSnapAlign: 'start' }}
         >
           {hasChildren ? (
             <button

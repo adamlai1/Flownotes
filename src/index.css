@@ -224,29 +224,6 @@ body.bubble-dragging * {
   -webkit-user-select: none !important;
 }
 
-/* ── NoteEditor landscape: text area + metadata side-by-side ─────────────── */
-.note-body-wrapper {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-}
-
-@media (orientation: landscape) {
-  .note-body-wrapper {
-    flex-direction: row;
-  }
-
-  .note-metadata {
-    width: 260px;
-    flex-shrink: 0;
-    overflow-y: auto;
-    border-top: none !important;
-    border-left: 1px solid var(--border);
-  }
-}
-
 /* ── Note read-mode widgets ────────────────────────────────────────────────── */
 /* Numbered-list marker. The digits render as PSEUDO-ELEMENT content, never a
    DOM text node: tap-to-edit's caret math walks the line's text nodes, and the

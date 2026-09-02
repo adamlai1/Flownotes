@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect, useLayoutEffect } from 'react'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion, AnimatePresence, useMotionValue, useTransform, animate } from 'framer-motion'
 import { CONNECTION_TYPES, CUSTOM_TAG_PALETTE, ROOT_BUBBLE_ID } from '../data/defaultData'
 import { getNoteTitle, noteTitle, realBubbleIds, connectionType, generateId } from '../utils/helpers'
 import { buildLockIndex } from '../utils/locks'
@@ -15,11 +15,25 @@ import { linkSegments } from '../lib/linkify'
 import { inlineSegments, toggleInline, toggleLinePrefix, insertLink } from '../lib/mdFormat'
 import BubblePickerTree from './BubblePickerTree'
 
-// The Bubble section sits partway down the editor's scrolling page, so the
-// expanded tree never collides with a real height ceiling — geometric fit
-// can't be the opening rule here. Instead: open expanded only when the fully
-// expanded tree is at most this many rows.
-const NOTE_VIEW_MAX_EXPANDED_ROWS = 10
+// ONE metric definition for the note-body boxes in UNBOUNDED mode (the read
+// div always; the edit textarea on desktop and during the keyboard rise).
+// Those two must stay metric-identical — the caret mapping and the scroll
+// position surviving the mode swap both depend on it — and a shared object
+// is what keeps them from drifting if either gets restyled later. The
+// flex-grow stretches the box to fill the full-height page column, so a
+// short note's blank space stays part of the box (tap-below-text appends at
+// the end) and the stats row beneath is pushed to the screen bottom; long
+// notes grow past the fill into one continuous page.
+// DELIBERATE exception: while the keyboard is up the textarea leaves this
+// style for a fixed-height internally-scrolling box (see boundBoxH) — the
+// swap seams there are handled by explicit one-shot scroll conversions, not
+// by metric parity.
+const BODY_BOX_STYLE = { flex: '1 0 auto', userSelect: 'text', WebkitUserSelect: 'text' }
+
+// Details-sheet chevron prominence. A secondary affordance: dark enough not
+// to compete with content, visible enough to be found. ONE knob — tune this
+// on device rather than hunting through styles.
+const SHEET_CHEVRON_OPACITY = 0.5
 
 // Height of the formatting pill floating above the software keyboard, and
 // the visible gap between the pill and the keyboard's top edge.
@@ -54,13 +68,27 @@ function caretOffsetFromPoint(x, y, container) {
     return null
   }
   if (!container.contains(node)) return null
-  // Hit on the container itself (space between lines): offset is a child
-  // index into the line blocks. At/past the last line → null → append.
+  // Hit on the container itself. WebKit reports a point in a line's right
+  // padding as (container, index AFTER that line) — taking that index's
+  // child would land the caret at the START of the NEXT line, attributing
+  // the newline to the wrong side. Resolve by geometry instead: the child
+  // whose vertical band contains the point owns the tap, and a tap past its
+  // text maps to that line's END. No band (below the last line) → null →
+  // append.
   if (node === container) {
-    const kids = node.childNodes
-    if (nodeOffset >= kids.length) return null
-    const start = kids[nodeOffset]?.dataset?.lineStart
-    return start != null ? +start : null
+    const hit = [...node.children].find(k => {
+      const r = k.getBoundingClientRect()
+      return y >= r.top && y < r.bottom
+    })
+    if (!hit) return null
+    const lineStart = +hit.dataset.lineStart
+    const linePrefix = +(hit.dataset.prefixLen || 0)
+    let lastText = null
+    const w = document.createTreeWalker(hit, NodeFilter.SHOW_TEXT)
+    let n
+    while ((n = w.nextNode())) lastText = n
+    if (!lastText) return lineStart + linePrefix // empty line (renders a <br>)
+    return rawTextOffset(hit, lineStart, linePrefix, lastText, lastText.nodeValue.length)
   }
   const base = node.nodeType === Node.TEXT_NODE ? node.parentElement : node
   const lineEl = base?.closest?.('[data-line-start]')
@@ -203,9 +231,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // there now, further markdown slots in the same per-line seam.
   const [bodyMode, setBodyMode] = useState(() => (note.content ? 'read' : 'edit'))
   const readRef = useRef(null)
-  // Caret position + scroll offset carried across the read → edit swap.
+  // Caret position carried across the read → edit swap. (Scroll needs no
+  // carrying: both modes render at natural height inside the SAME outer
+  // scroll container, whose scrollTop survives the swap on its own.)
   const pendingCaretRef = useRef(null)
-  const pendingScrollRef = useRef(0)
   // '' = no manual title: the header derives from the first body line and
   // follows it live. Non-empty = the user set it by hand; it stays fixed
   // until they clear it, which reverts to deriving (stored as null).
@@ -234,32 +263,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   const bodyRef = useRef(null)
   const scrollAreaRef = useRef(null)
 
-  // Desktop-only wheel chaining for the body textarea. Its
-  // overscroll-behavior: contain (kept — it is what the touch path needs)
-  // makes it a scroll container that swallows wheel events even when it has
-  // nothing to scroll, so the editor page beneath never moves. Chain by
-  // hand: with no overflow every wheel tick forwards to the scroll area;
-  // with overflow the textarea scrolls natively and only the ticks it cannot
-  // consume — top edge scrolling up, bottom edge scrolling down, each
-  // direction independently — are forwarded. Purely additive (no
-  // preventDefault, no focus changes), so text selection, caret placement
-  // and typing are untouched; wheel events never fire from touch, so mobile
-  // scrolling is untouched too.
-  function handleBodyWheel(e) {
-    const el = e.currentTarget
-    const outer = scrollAreaRef.current
-    if (!outer) return
-    const scrollable = el.scrollHeight > el.clientHeight
-    const atTop = el.scrollTop <= 0
-    const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 1
-    if (!scrollable || (e.deltaY < 0 && atTop) || (e.deltaY > 0 && atBottom)) {
-      // deltaMode: 0 = pixels, 1 = lines (Firefox), 2 = pages.
-      const step = e.deltaMode === 1 ? e.deltaY * 16
-        : e.deltaMode === 2 ? e.deltaY * outer.clientHeight
-        : e.deltaY
-      outer.scrollTop += step
-    }
-  }
+  // (The old desktop wheel-chaining for the body boxes is gone WITH the
+  // boxes' inner scrollers: content scrolls only in the outer scroll area
+  // now, natively — a forwarding handler here would scroll it twice.)
   const tagInputRef = useRef(null)
   const saveTimerRef = useRef(null)
   const swipeRef = useRef({ active: false, startX: 0, currentX: 0 })
@@ -597,13 +603,20 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     // past the last line) edits at the END of the note, never nowhere.
     const resolved = caretOffsetFromPoint(e.clientX, e.clientY, container)
     pendingCaretRef.current = resolved != null ? resolved : text.length
-    pendingScrollRef.current = container ? container.scrollTop : 0
+    // Where on screen the tapped line sits, as depth from the view's top —
+    // the bounding conversion uses this to keep the line above the fold
+    // once the box shrinks to its keyboard-up height.
+    const outer = scrollAreaRef.current
+    pendingTapDepthRef.current = outer
+      ? e.clientY - outer.getBoundingClientRect().top
+      : null
     setBodyMode('edit')
   }
 
-  // After the read → edit swap: focus, place the caret at the tapped
-  // character, and keep the scroll position (both boxes share exact metrics,
-  // so the same scrollTop shows the same lines).
+  // After the read → edit swap: focus and place the caret at the tapped
+  // character. Scroll position needs nothing — both boxes render at natural,
+  // metric-identical height in the same outer scroll container, so the swap
+  // leaves the visible lines where they were.
   useLayoutEffect(() => {
     if (bodyMode !== 'edit') return
     const off = pendingCaretRef.current
@@ -614,7 +627,6 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     el.focus({ preventScroll: true })
     const pos = Math.max(0, Math.min(off, el.value.length))
     try { el.setSelectionRange(pos, pos) } catch { /* not all inputs support it */ }
-    el.scrollTop = pendingScrollRef.current
   }, [bodyMode])
 
   // Membership invariants: a note always has at least one selection. The
@@ -730,6 +742,191 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     ensurePassword(() => { relockIds(note.id); onSetNoteLocked?.(note.id, true) })
   }
 
+  // ── Details sheet ────────────────────────────────────────────────────────
+  // Tags, filing and connections — organization, not writing. Slides in from
+  // the right over most of the width; the strip of note left visible closes
+  // it (outside-press via the shared dismiss hook, which also swallows the
+  // click so the tap can't edit the note), as do the chevrons, a rightward
+  // drag, and Escape (registered above the editor's own close layer, below
+  // the delete confirm).
+  //
+  // Motion: the sheet is ALWAYS mounted (as its content was when it lived in
+  // the scrolling page) and driven by ONE motion value — sheetX, px from
+  // fully open. Drags write the finger position into it 1:1; every release
+  // hands it to a framer spring, which inherits the motion value's live
+  // velocity: a fast flick completes fast, a slow drag settles slowly, a
+  // short release snaps back. The closed rest position is the sheet's width
+  // plus a margin, putting its border and shadow fully past the panel's
+  // overflow clip so nothing bleeds while closed; `inert` keeps the hidden
+  // content out of desktop's tab order.
+  const [sheetOpen, setSheetOpen] = useState(false)
+  const sheetOpenRef = useRef(false)
+  const sheetRef = useRef(null)
+  const sheetColRef = useRef(null)
+  const sheetTreeBoxRef = useRef(null)
+  // The room the bubble tree may occupy: the sheet's STATIC content column
+  // minus everything that ISN'T the tree — sections above and below,
+  // paddings — all real DOM measurements (scrollHeight is the column's full
+  // content height even though the column itself never scrolls; subtracting
+  // the tree's current height leaves exactly the siblings' total). "Fits"
+  // therefore means fits in the REMAINING space: a fitting tree expands with
+  // no scrollbar anywhere; a non-fitting one collapses, and the tree box —
+  // the only scrollable thing in the sheet — scrolls internally when even
+  // the collapsed rows exceed the remainder. Tags, project and connections
+  // never move.
+  const sheetTreeAvailable = () => {
+    const col = sheetColRef.current
+    const tree = sheetTreeBoxRef.current
+    if (!col || !tree) return null // unknowable → expand
+    return col.clientHeight - (col.scrollHeight - tree.offsetHeight)
+  }
+  // Chevron visibility: hidden while typing — every EXISTING note opens in
+  // read mode, so the affordance is seen before edit is ever reached. The
+  // exception is a brand-new note, which opens straight into edit and never
+  // passes read mode: `everRead` starts false there, keeping the chevron up
+  // for that first capture; the first trip through read mode makes it a
+  // normal note.
+  const [everRead, setEverRead] = useState(() => !!note.content)
+  useEffect(() => {
+    if (bodyMode === 'read' && !everRead) setEverRead(true)
+  }, [bodyMode, everRead])
+  const chevronVisible = !sheetOpen && (bodyMode === 'read' || !everRead)
+  const sheetWidth = () =>
+    Math.min((isDesktop ? Math.min(820, window.innerWidth) : window.innerWidth) - 56, 380)
+  const sheetClosedX = () => sheetWidth() + 12
+  const sheetX = useMotionValue(sheetClosedX())
+  // Keep the closed rest position correct across rotation/resize.
+  useEffect(() => {
+    const sync = () => { if (!sheetOpenRef.current) sheetX.jump(sheetClosedX()) }
+    window.addEventListener('resize', sync)
+    window.addEventListener('orientationchange', sync)
+    return () => {
+      window.removeEventListener('resize', sync)
+      window.removeEventListener('orientationchange', sync)
+    }
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // THE chevron — one element for the sheet's whole life. Its position is a
+  // pure function of sheetX (nothing to hide, nothing to coordinate, no
+  // second copy): at the closed rest it hugs the screen edge as the pull
+  // tab; fully open it straddles the sheet's left border as the grip; in
+  // between it interpolates, tracking a drag frame-for-frame. (It can't be
+  // a CHILD of the sheet: the closed rest parks the sheet wholly past the
+  // panel's overflow clip — border and shadow must not bleed — and a child
+  // chevron would be clipped off-screen with it. A sibling driven by the
+  // same motion value is the version of "belongs to the sheet" that
+  // survives the clip.)
+  const chevronRef = useRef(null)
+  const chevronX = useTransform(sheetX, v => (14 - sheetWidth()) * (1 - v / sheetClosedX()))
+
+  useDismissOnOutside(
+    sheetOpen,
+    () => settleSheet(false),
+    // The chevron toggles rather than dismiss-and-reopen (per the hook's own
+    // contract for triggers), so its press reaches onClick.
+    [sheetRef, chevronRef],
+    { escLevel: zIndex + 4 },
+  )
+
+  // One settle path for every route — chevron, strip, Escape, drag release:
+  // state plus a spring that picks up whatever velocity the finger left.
+  function settleSheet(open) {
+    sheetOpenRef.current = open
+    setSheetOpen(open)
+    animate(sheetX, open ? 0 : sheetClosedX(), { type: 'spring', stiffness: 420, damping: 42 })
+  }
+
+  // Opening blurs the body: the keyboard and format bar dismiss through the
+  // same blur → read path as every other route, and the sheet slides over a
+  // read-mode note — no sheet-over-keyboard stacking to reason about.
+  function openSheet() {
+    bodyRef.current?.blur()
+    settleSheet(true)
+  }
+
+  // Right-edge open drag (armed in handleTouchStart): decided/engaged in the
+  // first ~8px — horizontal-and-leftward tracks the sheet in 1:1, anything
+  // else leaves the touch to whatever it was for.
+  const sheetOpenSwipeRef = useRef({ active: false, decided: false, engaged: false, startX: 0, startY: 0 })
+
+  // Chevron drag — the grip drags the sheet 1:1 in BOTH directions, exactly
+  // like dragging the sheet body: same thresholds, same velocity-carried
+  // settle. Tap-vs-drag is decided by MOVEMENT (8px), never timing, so a
+  // slow deliberate drag is a drag; `moved` also gates onClick so a drag's
+  // trailing click can't double-toggle. Touch events stop here (the grip
+  // owns its gesture — panel recognizers stay out of it) and touchAction
+  // none keeps the browser from chaining a pan.
+  const chevronDragRef = useRef({ active: false, moved: false, fromOpen: false, startX: 0, startBase: 0 })
+  function handleChevronTouchStart(e) {
+    e.stopPropagation()
+    const t = e.touches[0]
+    const base = sheetX.get()
+    chevronDragRef.current = {
+      active: true, moved: false,
+      fromOpen: base < sheetClosedX() / 2,
+      startX: t.clientX, startBase: base,
+    }
+  }
+  function handleChevronTouchMove(e) {
+    e.stopPropagation()
+    const d = chevronDragRef.current
+    if (!d.active) return
+    const dx = e.touches[0].clientX - d.startX
+    if (!d.moved && Math.abs(dx) < 8) return
+    d.moved = true
+    sheetX.set(Math.min(sheetClosedX(), Math.max(0, d.startBase + dx)))
+  }
+  function handleChevronTouchEnd(e) {
+    e.stopPropagation()
+    const d = chevronDragRef.current
+    if (!d.active) return
+    d.active = false
+    if (!d.moved) return // a tap — onClick toggles
+    // Same release rules as the sheet-body and edge drags, picked by which
+    // rest position the drag started from.
+    const v = sheetX.getVelocity()
+    if (d.fromOpen) {
+      const shouldClose = v > 500 || (sheetX.get() > sheetWidth() / 3 && v > -200)
+      settleSheet(!shouldClose)
+    } else {
+      const pulled = sheetClosedX() - sheetX.get()
+      if (v < -500 || (pulled > 80 && v < 200)) openSheet()
+      else settleSheet(false)
+    }
+  }
+
+  // Drag-to-close: same axis decision on the sheet itself; vertical wins →
+  // the sheet's own scroller keeps the gesture. Thresholds: a rightward
+  // flick past 500 px/s closes regardless of distance; past a third of the
+  // width closes unless the finger was flicking back; anything else snaps
+  // back — all through the same velocity-inheriting settle.
+  const sheetDragRef = useRef({ active: false, decided: false, horizontal: false, startX: 0, startY: 0 })
+  function handleSheetTouchStart(e) {
+    const t = e.touches[0]
+    sheetDragRef.current = { active: true, decided: false, horizontal: false, startX: t.clientX, startY: t.clientY }
+  }
+  function handleSheetTouchMove(e) {
+    const d = sheetDragRef.current
+    if (!d.active) return
+    const t = e.touches[0]
+    const dx = t.clientX - d.startX
+    const dy = t.clientY - d.startY
+    if (!d.decided) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return
+      d.decided = true
+      d.horizontal = Math.abs(dx) > Math.abs(dy)
+    }
+    if (d.horizontal) sheetX.set(Math.max(0, dx))
+  }
+  function handleSheetTouchEnd() {
+    const d = sheetDragRef.current
+    d.active = false
+    if (!d.horizontal) return
+    const v = sheetX.getVelocity()
+    const shouldClose = v > 500 || (sheetX.get() > sheetWidth() / 3 && v > -200)
+    settleSheet(!shouldClose)
+  }
+
   function confirmDelete() {
     setShowDeleteConfirm(false)
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
@@ -766,11 +963,21 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   function handleTouchStart(e) {
     const touch = e.touches[0]
     tapAwayRef.current = { startX: touch.clientX, startY: touch.clientY, moved: false }
-    if (!isDesktop && touch.clientX < 28) {
+    // Both edge gestures are disarmed while the details sheet is open: a
+    // rightward swipe then belongs to the sheet (drag-to-close, handled on
+    // the sheet itself), never to swipe-back — the conflict is resolved by
+    // construction, not by racing recognizers.
+    if (!isDesktop && !sheetOpen && touch.clientX < 28) {
       swipeRef.current = { active: true, startX: touch.clientX, currentX: touch.clientX }
       // Move the layer beneath to its parallax start position while it's still fully
       // hidden behind this panel, so there's no visible jump when the reveal begins.
       onSwipeProgress?.(0, true)
+    }
+    // Right-edge mirror gesture: a leftward drag from the right 28px pulls
+    // the details sheet in 1:1 — the chevron is the guaranteed affordance,
+    // this is the fast path.
+    if (!isDesktop && !sheetOpen && touch.clientX > window.innerWidth - 28) {
+      sheetOpenSwipeRef.current = { active: true, decided: false, engaged: false, startX: touch.clientX, startY: touch.clientY }
     }
   }
 
@@ -779,6 +986,18 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     const tap = tapAwayRef.current
     if (Math.abs(touch.clientX - tap.startX) > 10 || Math.abs(touch.clientY - tap.startY) > 10) {
       tap.moved = true
+    }
+    const os = sheetOpenSwipeRef.current
+    if (os.active) {
+      const odx = touch.clientX - os.startX
+      const ody = touch.clientY - os.startY
+      if (!os.decided && (Math.abs(odx) >= 8 || Math.abs(ody) >= 8)) {
+        os.decided = true
+        // Horizontal-and-leftward engages the sheet; a vertical drag from
+        // the edge stays a scroll.
+        os.engaged = Math.abs(odx) > Math.abs(ody) && odx < 0
+      }
+      if (os.engaged) sheetX.set(Math.min(sheetClosedX(), Math.max(0, sheetClosedX() + odx)))
     }
     if (!swipeRef.current.active) return
     const dx = e.touches[0].clientX - swipeRef.current.startX
@@ -804,6 +1023,19 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       if (body && !keepEdit && e.target !== body) body.blur()
     }
     tapAwayRef.current.moved = true
+    if (sheetOpenSwipeRef.current.active) {
+      const os = sheetOpenSwipeRef.current
+      os.active = false
+      if (os.engaged) {
+        // Same shape as the close thresholds, mirrored: a fast leftward
+        // flick opens regardless of distance, 80px of pull opens unless the
+        // finger was flicking back out, anything else settles closed.
+        const v = sheetX.getVelocity()
+        const pulled = sheetClosedX() - sheetX.get()
+        if (v < -500 || (pulled > 80 && v < 200)) openSheet()
+        else settleSheet(false)
+      }
+    }
     if (!swipeRef.current.active) return
     swipeRef.current.active = false
     const dx = swipeRef.current.currentX - swipeRef.current.startX
@@ -849,6 +1081,34 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // bar suppressed) the bar lands directly on the keys, and in Safari it
   // lands on Safari's own accessory bar.
   const [kbGeom, setKbGeom] = useState({ up: false, bottom: 0 })
+
+  // ── Bounded body while the keyboard is up ────────────────────────────────
+  // The custom caret-reveal apparatus (mirror measurement, settle beats, rAF
+  // ordering against iOS's own reveal) is GONE — it was racing an engine we
+  // can't observe. Instead the geometry problem is removed: while the
+  // keyboard is up, the textarea gets a FIXED height ending above the format
+  // bar and scrolls INTERNALLY, so there is exactly one scrolling box while
+  // typing, its size never changes with a keystroke, and iOS's native caret
+  // reveal — against stable geometry — does all the work. Read mode (and
+  // desktop, and the brief keyboard-rise window) stays the unbounded
+  // continuous page.
+  //
+  // The only seams are two ONE-SHOT scroll conversions:
+  //   in  — at the keyboard-up transition, the page's depth into the note
+  //         (captured before the outer content collapses and clamps)
+  //         becomes the box's inner scrollTop;
+  //   out — on blur, the box's inner scrollTop converts back to page scroll
+  //         after the swap to read mode.
+  const [boundBoxH, setBoundBoxH] = useState(null)
+  // Depth of the view into the note at the up-transition; consumed one-shot.
+  const boundScrollRef = useRef(null)
+  // The bounded box's inner scroll at blur; consumed one-shot after the swap.
+  const restoreScrollRef = useRef(null)
+  // The tapped line's depth from the top of the view, captured at the read
+  // tap; consumed one-shot by the bounding conversion to bring a line the
+  // bounded box is too short for above the fold.
+  const pendingTapDepthRef = useRef(null)
+
   useEffect(() => {
     if (bodyMode !== 'edit') {
       setKbGeom(g => (g.up ? { up: false, bottom: 0 } : g))
@@ -857,12 +1117,27 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     if (window.matchMedia(KEYBOARD_MEDIA_QUERY).matches) return
     const vv = window.visualViewport
     let sawKeyboard = false
+    let wasUp = false
     const sync = () => {
       if (!vv || Math.abs((vv.scale || 1) - 1) > 0.01) return
       const occluded = window.innerHeight - vv.height
       if (occluded > 150) sawKeyboard = true
       else if (sawKeyboard && occluded < 60) bodyRef.current?.blur()
       const up = occluded > 150
+      if (up && !wasUp) {
+        // Up-transition: capture the view's depth into the note NOW, while
+        // the page is still unbounded — once the bounded box renders, the
+        // outer scroll content collapses and its scrollTop clamps, which
+        // destroys this information. Consumed one-shot by the bounding
+        // effect below.
+        const el = bodyRef.current
+        const outer = scrollAreaRef.current
+        if (el && outer) {
+          boundScrollRef.current =
+            outer.getBoundingClientRect().top - el.getBoundingClientRect().top
+        }
+      }
+      wasUp = up
       const bottom = Math.round(vv.offsetTop + vv.height)
       setKbGeom(g => (g.up === up && g.bottom === bottom ? g : { up, bottom }))
     }
@@ -882,6 +1157,90 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       nativeHandle?.remove()
     }
   }, [bodyMode])
+
+  // Bounded-box height: from the scroll area's top down to just above the
+  // format bar. Tracks keyboard geometry (rotation included) — NOT keystrokes;
+  // that stability is the whole point.
+  useLayoutEffect(() => {
+    if (!(kbGeom.up && bodyMode === 'edit')) {
+      setBoundBoxH(null)
+      return
+    }
+    const outer = scrollAreaRef.current
+    if (!outer) return
+    const top = outer.getBoundingClientRect().top
+    setBoundBoxH(Math.max(120, kbGeom.bottom - FORMAT_BAR_GAP - FORMAT_BAR_H - 8 - top))
+  }, [kbGeom.up, kbGeom.bottom, bodyMode])
+
+  // One-shot conversion IN, after the bounded box has rendered: align the
+  // textarea's top with the scroll area's top (everything above the text
+  // scrolls away; on re-runs — a rotation — the delta is ~0), then hand the
+  // captured page depth to the box's inner scroll so the line that was at
+  // the top of the view stays at the top of the box. Re-asserting the
+  // selection afterwards nudges WebKit's native caret reveal against the
+  // now-stable box, in case the preserved position left the caret below the
+  // fold.
+  useLayoutEffect(() => {
+    if (boundBoxH == null) return
+    const el = bodyRef.current
+    const outer = scrollAreaRef.current
+    if (!el || !outer) return
+    outer.scrollTop += el.getBoundingClientRect().top - outer.getBoundingClientRect().top
+    if (boundScrollRef.current != null) {
+      el.scrollTop = Math.max(0, boundScrollRef.current)
+      boundScrollRef.current = null
+      // iOS's native reveal can't cover the tapped line here: its focus-time
+      // reveal ran BEFORE the box had its keyboard-up height (against the
+      // unbounded page, where the tapped caret was already visible — nothing
+      // to do), and re-asserting an identical selection afterwards is a
+      // WebKit no-op (no selectionchange → no reveal). So this is done
+      // deterministically from the tap itself: the tapped line's depth from
+      // the view top is preserved by the conversion above; when the bounded
+      // box is too short for that depth, scroll the box the exact difference
+      // so the line lands a comfortable step above the bar. Native reveal
+      // takes over from the first real keystroke on.
+      const depth = pendingTapDepthRef.current
+      pendingTapDepthRef.current = null
+      if (depth != null) {
+        const maxDepth = boundBoxH - 44 // one line height + breathing room
+        if (depth > maxDepth) el.scrollTop += depth - maxDepth
+      }
+    }
+  }, [boundBoxH])
+
+  // One-shot conversion OUT, after the swap back to read mode: the box's
+  // inner depth (captured at blur) becomes page scroll again, so the line
+  // that was at the top of the box stays at the top of the view.
+  useLayoutEffect(() => {
+    if (bodyMode !== 'read') return
+    const s = restoreScrollRef.current
+    restoreScrollRef.current = null
+    if (s == null) return
+    const outer = scrollAreaRef.current
+    const read = readRef.current
+    if (!outer || !read) return
+    outer.scrollTop += read.getBoundingClientRect().top - outer.getBoundingClientRect().top + s
+  }, [bodyMode])
+
+  // Auto-grow — UNBOUNDED mode only (read never mounts the textarea; while
+  // the keyboard is up the box is fixed-height and scrolls internally, so
+  // height must NOT track content there). Keeps the textarea exactly as tall
+  // as its content so the note reads as one continuous page on desktop and
+  // during the brief keyboard-rise window. Re-synced on text changes and
+  // window resize (rewrap). No scroll side effects: caret visibility is
+  // iOS's own job against the bounded box.
+  useLayoutEffect(() => {
+    if (bodyMode !== 'edit' || boundBoxH != null) return
+    const el = bodyRef.current
+    if (!el) return
+    const sync = () => {
+      el.style.height = 'auto'
+      el.style.height = `${el.scrollHeight}px`
+    }
+    sync()
+    window.addEventListener('resize', sync)
+    return () => window.removeEventListener('resize', sync)
+  }, [text, bodyMode, boundBoxH])
 
   // Formatting-bar transforms. Pure rewrites from mdFormat plus the editor's
   // existing plumbing: same history push and debounced save as typing, and
@@ -1202,54 +1561,90 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         )}
       </div>
 
-      {/* ── Scroll area — grid row 2 (1fr), only this scrolls ───────────────── */}
-      <div ref={scrollAreaRef} style={{ overflowY: 'auto', minHeight: 0, WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}>
+      {/* ── Scroll area — grid row 2 (1fr), only this scrolls ─────────────────
+          No keyboard compensation here: while the keyboard is up the
+          textarea is a fixed-height box ending above the format bar (see
+          boundBoxH), so nothing below it needs reserving. */}
+      <div
+        ref={scrollAreaRef}
+        style={{ overflowY: 'auto', minHeight: 0, WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
+      >
 
-        {/* Text content */}
-        <div className="px-5 md:px-10 pt-4 md:pt-8 pb-3 border-b border-white/10">
+        {/* Text content — a full-height flex column with no bottom border:
+            the note reads as one continuous page to the screen bottom (the
+            old border-b was the divider to the metadata that now lives in
+            the sheet). minHeight 100% makes a short note's column fill the
+            visible area, so the flex-grown body box owns the blank space
+            and the stats row lands at the very bottom of the screen. */}
+        <div
+          className="px-5 md:px-10 pt-4 md:pt-8 flex flex-col"
+          style={{ minHeight: '100%', paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
+        >
           {bodyMode === 'edit' ? (
             <textarea
               ref={bodyRef}
               value={text}
               onChange={handleTextChange}
-              onWheel={handleBodyWheel}
-              onBlur={() => setBodyMode('read')}
+              onBlur={e => {
+                // One-shot capture for the return trip: the bounded box's
+                // inner depth converts back to page scroll after the swap.
+                restoreScrollRef.current = boundBoxH != null ? e.target.scrollTop : null
+                setBodyMode('read')
+              }}
               placeholder="Start writing…"
               autoComplete="off"
               autoCorrect="on"
               autoCapitalize="sentences"
               spellCheck={true}
               className="w-full text-[16px] md:text-[17px] text-gray-200 placeholder-gray-700 outline-none resize-none bg-transparent leading-relaxed"
-              style={{ height: '60dvh', overflowY: 'auto', overscrollBehavior: 'contain', userSelect: 'text', WebkitUserSelect: 'text' }}
+              // Two geometries. Keyboard up: a FIXED-height box ending above
+              // the format bar that scrolls internally — stable geometry,
+              // iOS's native caret reveal does the rest. Otherwise (desktop,
+              // keyboard rise): the unbounded auto-grown page, overflow
+              // hidden because auto-grow leaves nothing to scroll (and a
+              // desktop scrollbar would break metric parity with read mode).
+              style={boundBoxH != null
+                ? {
+                    height: boundBoxH, flex: 'none', overflowY: 'auto',
+                    overscrollBehavior: 'contain',
+                    userSelect: 'text', WebkitUserSelect: 'text',
+                  }
+                : { ...BODY_BOX_STYLE, overflowY: 'hidden' }}
             />
           ) : (
-            /* Read mode. Same classes, same box, same wheel chaining as the
-               textarea — the two must stay metric-identical or the caret
-               mapping and scroll carry-over drift. whitespace-pre-wrap +
-               break-words match textarea wrapping; one block per raw line
-               reproduces the same line layout. Known exception: a checkbox is
-               not the same width as its raw "- [ ] " marker, so WRAPPING (and
-               with it scrollTop carry-over) can drift slightly on checklist
-               lines — the caret offset itself stays exact everywhere, it's a
-               string offset and immune to wrapping. A click (never a scroll
-               gesture — those don't produce clicks) drops into edit at the
-               tapped character; empty space below the text appends. */
+            /* Read mode. Same classes, same shared BODY_BOX_STYLE metrics as
+               the textarea — the two must stay metric-identical or the caret
+               mapping and the swap's scroll continuity drift.
+               whitespace-pre-wrap + break-words match textarea wrapping; one
+               block per raw line reproduces the same line layout. Known
+               exception: a checkbox is not the same width as its raw "- [ ] "
+               marker, so WRAPPING can drift slightly on checklist lines —
+               the caret offset itself stays exact everywhere, it's a string
+               offset and immune to wrapping. A click (never a scroll gesture
+               — those don't produce clicks) drops into edit at the tapped
+               character; empty space below the text appends. */
             <div
               ref={readRef}
               onClick={handleReadTap}
-              onWheel={handleBodyWheel}
               className="w-full text-[16px] md:text-[17px] text-gray-200 outline-none bg-transparent leading-relaxed whitespace-pre-wrap break-words"
-              style={{ height: '60dvh', overflowY: 'auto', overscrollBehavior: 'contain', userSelect: 'text', WebkitUserSelect: 'text', cursor: 'text' }}
+              style={{ ...BODY_BOX_STYLE, cursor: 'text' }}
             >
               {text ? renderReadBody(text) : <span className="text-gray-700">Start writing…</span>}
             </div>
           )}
+          {/* Hidden while the keyboard is up: passive metadata has no place
+              in view mid-typing; it returns when the keyboard dismisses. */}
+          {!kbGeom.up && (
           <div className="flex items-end justify-between pt-2">
+            <div className="flex items-end gap-3">
             {/* Undo / Redo. On touch devices these live in the format bar on
-                the keyboard; this row keeps them ONLY for desktop, which has
+                the keyboard; this cluster exists ONLY on desktop, which has
                 no format bar (no software keyboard) and no other undo — the
                 custom history stack means native Ctrl+Z can't restore
-                programmatic transforms on this controlled textarea. */}
+                programmatic transforms on this controlled textarea. It stays
+                with the body (not the details sheet): it's an edit control,
+                not organization, and desktop's only undo must not live
+                behind a chevron. */}
             {isDesktop && (
             <div className="flex items-center gap-1 -ml-1.5">
               <button
@@ -1283,21 +1678,110 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
               </button>
             </div>
             )}
+            {/* Passive metadata about the note in front of you — visible at
+                a glance without opening anything, same reasoning that keeps
+                undo/redo here rather than in the sheet. Word count left,
+                timestamps right: opposite ends of one row at the very bottom
+                of the (now naturally growing) page. */}
+            <p className="text-[11px] text-gray-700">
+              {wordCount} {wordCount === 1 ? 'word' : 'words'}
+            </p>
+            </div>
             <div className="text-right space-y-0.5 ml-auto">
-              <p className="text-[11px] text-gray-700">
-                {wordCount} {wordCount === 1 ? 'word' : 'words'}
-              </p>
               <p className="text-[11px] text-gray-600">Created {formatNoteDate(note.created_at)}</p>
               <p className="text-[11px] text-gray-700">Last edited {formatNoteDate(note.updated_at)}</p>
             </div>
           </div>
+          )}
         </div>
 
-        {/* ── Metadata (scrolls with content) ───────────────────────────────── */}
-        <div className="px-4 md:px-10 pt-5 space-y-6" style={{ paddingBottom: 'calc(2rem + env(safe-area-inset-bottom))' }}>
+      </div>
 
-          {/* Tags — all in one wrapping row */}
-          <div className="flex flex-wrap gap-x-3 gap-y-1.5 items-center">
+      {/* ── Details-sheet chevron — ONE element for open and closed ──────────
+          The visible, tappable affordance (the swipe is the fast path for
+          people who learn it; this is the path everyone can see — the
+          long-press lesson). Rides chevronX, a pure transform of the sheet's
+          own motion value, so it travels with the sheet's edge through every
+          drag — never a second copy, never two on screen. Fades (never pops)
+          for edit mode via SHEET_CHEVRON_OPACITY — the one prominence knob —
+          and runs full-strength while the sheet is open, where it's the
+          grip/close control. The icon flips direction with the state. */}
+      <motion.button
+        ref={chevronRef}
+        type="button"
+        aria-label={sheetOpen ? 'Close note details' : 'Note details'}
+        onClick={() => {
+          if (chevronDragRef.current.moved) return // that gesture was a drag
+          sheetOpen ? settleSheet(false) : openSheet()
+        }}
+        onTouchStart={handleChevronTouchStart}
+        onTouchMove={handleChevronTouchMove}
+        onTouchEnd={handleChevronTouchEnd}
+        className="absolute flex items-center justify-center"
+        style={{
+          x: chevronX, y: '-50%',
+          right: 0, top: '50%',
+          width: 28, height: 64, zIndex: 41,
+          background: 'var(--surface-2)', border: '1px solid var(--border)',
+          borderRadius: 10, color: 'var(--text-muted)',
+          touchAction: 'none',
+          opacity: sheetOpen ? 1 : chevronVisible ? SHEET_CHEVRON_OPACITY : 0,
+          pointerEvents: sheetOpen || chevronVisible ? 'auto' : 'none',
+          transition: 'opacity 0.18s ease',
+        }}
+      >
+        <svg
+          width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+          style={{ transform: sheetOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s ease' }}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
+        </svg>
+      </motion.button>
+
+      {/* ── Details sheet ────────────────────────────────────────────────────
+          Tags, filing and connections. Covers most of the width; the strip
+          of note left visible closes it via the shared dismiss hook (which
+          swallows the click so the tap can't edit the note). Inside the
+          panel: clipped by the panel's overflow — which is what hides it at
+          its closed rest position — and it slides with the panel during any
+          panel motion. */}
+      <motion.div
+        ref={sheetRef}
+        inert={sheetOpen ? undefined : ''}
+        className="absolute inset-y-0 right-0 flex flex-col"
+        style={{
+          x: sheetX,
+          width: 'min(calc(100% - 56px), 380px)',
+          background: 'var(--bg)',
+          borderLeft: '1px solid var(--border)',
+          boxShadow: '-8px 0 24px rgba(0,0,0,0.35)',
+          zIndex: 40,
+        }}
+        onTouchStart={handleSheetTouchStart}
+        onTouchMove={handleSheetTouchMove}
+        onTouchEnd={handleSheetTouchEnd}
+      >
+        {/* (No chevron inside the sheet: THE chevron is the single
+            panel-level element riding chevronX — it straddles this sheet's
+            left border when open and travels with its edge during drags.) */}
+
+        {/* STATIC content column — the sheet itself never scrolls: tags,
+            project and connections hold their places; the tree box below is
+            the one flex child allowed to shrink (and the only scroller). */}
+        <div
+          ref={sheetColRef}
+          className="flex-1 min-h-0 flex flex-col gap-6 pt-5"
+          style={{
+            paddingLeft: 16, paddingRight: 16,
+            paddingBottom: 'calc(1.25rem + env(safe-area-inset-bottom))',
+          }}
+        >
+
+          {/* Tags — all in one wrapping row, under the same small-caps
+              section label the other sections carry. */}
+          <div className="flex-shrink-0">
+            <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Tags</p>
+            <div className="flex flex-wrap gap-x-3 gap-y-1.5 items-center">
             {allCustomTags.map(tag => {
               const selected = tags.includes(tag)
               const color = (project.customTagColors || {})[tag] || '#0A84FF'
@@ -1334,11 +1818,14 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                 + Tag
               </button>
             )}
+            </div>
           </div>
 
-          {/* Bubble membership */}
-          <div>
-            <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Project</p>
+          {/* Bubble membership — the one section that may shrink: its labels
+              and project row stay fixed, the tree box inside takes whatever
+              height remains and scrolls only past that. */}
+          <div className="flex flex-col min-h-0">
+            <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2 flex-shrink-0">Project</p>
             <div className="space-y-0.5">
               {/* Project root — selecting it puts the note loose on the canvas */}
               {(() => {
@@ -1364,23 +1851,38 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                 )
               })()}
             </div>
-            <div className="my-3" style={{ borderTop: '1px solid var(--border)' }} />
-            <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Bubble</p>
-            <div>
-              {/* The list sits partway down a long scrolling page — expanding
-                  it just grows the page, so there is no height it must fit in.
-                  The opening rule is a row budget instead of geometry. */}
+            {/* No rule between PROJECT and BUBBLE — the small-caps labels
+                carry the separation; the margin keeps the section rhythm. */}
+            <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2 mt-4 flex-shrink-0">Bubble</p>
+            <div
+              ref={sheetTreeBoxRef}
+              className="min-h-0 overflow-y-auto"
+              // Snap type MANDATORY, not proximity: the point is that a row
+              // is NEVER half-cut, and proximity only snaps when the rest
+              // position lands near a snap point — a mid-flight stop could
+              // still split a row. Uniform 36px rows snap cleanly. Rows are
+              // the snap points (scroll-snap-align in BubblePickerTree).
+              style={{ flex: '0 1 auto', overscrollBehavior: 'contain', scrollSnapType: 'y mandatory' }}
+            >
+              {/* The sheet's ONLY scroller. flex 0-1-auto: natural height
+                  while the tree fits (no scrollbar), shrunk to the remaining
+                  space when it doesn't — the fit decision (measureAvailable
+                  against that remainder, see sheetTreeAvailable) collapses a
+                  non-fitting tree first, so scrolling only appears when even
+                  the collapsed rows overflow. observeResize on the column
+                  re-decides when the sheet's box changes (rotation). */}
               <BubblePickerTree
                 bubbles={project.bubbles}
                 rowHeight={36}
-                maxExpandedRows={NOTE_VIEW_MAX_EXPANDED_ROWS}
+                measureAvailable={sheetTreeAvailable}
+                observeResize={() => sheetColRef.current}
                 renderRow={renderBubblePickerRow}
               />
             </div>
           </div>
 
           {/* Connections */}
-          <div>
+          <div className="flex-shrink-0">
             <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Connections</p>
 
             {/* Forward connections: this note → other note (deletable) */}
@@ -1495,7 +1997,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           </div>
 
         </div>
-      </div>
+      </motion.div>
 
       {/* ── Format bar — floats above the software keyboard ─────────────────
           Only while the body is editing AND the keyboard is actually up
