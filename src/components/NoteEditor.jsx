@@ -34,11 +34,21 @@ const BODY_BOX_STYLE = { flex: '1 0 auto', userSelect: 'text', WebkitUserSelect:
 // to compete with content, visible enough to be found. ONE knob — tune this
 // on device rather than hunting through styles.
 const SHEET_CHEVRON_OPACITY = 0.5
+// The chevron's inset from the panel's right edge at its closed rest. The
+// note's scroll area paints an 8px scrollbar (index.css, app-wide rules)
+// along that same edge; a chevron flush to the edge sat on top of the
+// thumb. Equal to the scrollbar width, so the tab hugs the scrollbar lane
+// instead of covering it. chevronX compensates, so the OPEN position (the
+// grip straddling the sheet's left border) is unchanged.
+const CHEVRON_EDGE_INSET = 8
 
 // Height of the formatting pill floating above the software keyboard, and
 // the visible gap between the pill and the keyboard's top edge.
 const FORMAT_BAR_H = 48
 const FORMAT_BAR_GAP = 8
+
+// Downward drag (px) at the top of the note that reveals the metadata row.
+const META_REVEAL_PULL = 40
 
 
 // Map a screen point to a character offset in the raw note text. Read mode
@@ -817,7 +827,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // same motion value is the version of "belongs to the sheet" that
   // survives the clip.)
   const chevronRef = useRef(null)
-  const chevronX = useTransform(sheetX, v => (14 - sheetWidth()) * (1 - v / sheetClosedX()))
+  const chevronX = useTransform(sheetX, v => (14 + CHEVRON_EDGE_INSET - sheetWidth()) * (1 - v / sheetClosedX()))
 
   useDismissOnOutside(
     sheetOpen,
@@ -963,6 +973,16 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   function handleTouchStart(e) {
     const touch = e.touches[0]
     tapAwayRef.current = { startX: touch.clientX, startY: touch.clientY, moved: false }
+    touchActiveRef.current = true
+    // Pull-to-reveal metadata: eligible only when the touch starts inside
+    // the note's scroll area, at its top, with the row hidden and no
+    // keyboard up. Decided in handleTouchMove.
+    const outer = scrollAreaRef.current
+    metaPullRef.current = {
+      eligible: !hasFinePointer && !metaShown && !!outer && outer.scrollTop <= 0 &&
+        e.target instanceof Node && outer.contains(e.target),
+      startX: touch.clientX, startY: touch.clientY,
+    }
     // Both edge gestures are disarmed while the details sheet is open: a
     // rightward swipe then belongs to the sheet (drag-to-close, handled on
     // the sheet itself), never to swipe-back — the conflict is resolved by
@@ -987,6 +1007,17 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     if (Math.abs(touch.clientX - tap.startX) > 10 || Math.abs(touch.clientY - tap.startY) > 10) {
       tap.moved = true
     }
+    const mp = metaPullRef.current
+    if (mp.eligible) {
+      const dy = touch.clientY - mp.startY
+      const dx = touch.clientX - mp.startX
+      if (dy > META_REVEAL_PULL && dy > Math.abs(dx)) {
+        mp.eligible = false
+        setMetaRevealed(true)
+      } else if (dy < -8 || (Math.abs(dx) > 12 && Math.abs(dx) > dy)) {
+        mp.eligible = false // an upward or sideways drag is not a pull
+      }
+    }
     const os = sheetOpenSwipeRef.current
     if (os.active) {
       const odx = touch.clientX - os.startX
@@ -1009,6 +1040,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   }
 
   function handleTouchEnd(e) {
+    touchActiveRef.current = false
+    metaPullRef.current.eligible = false
+    scheduleMetaHide()
     // touchend's target is the element the touch STARTED on, so a tap that
     // begins in the textarea can never blur it, and one that begins outside
     // always can — checkbox/link/button taps included, which then still run
@@ -1050,7 +1084,8 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     }
   }
 
-  // Keyboard-gone watchdog + keyboard geometry, one visualViewport source.
+  // Keyboard-gone watchdog + keyboard geometry — ONE component, TWO detection
+  // paths, chosen by platform.
   //
   // Watchdog: tap-away above only covers dismissal routes that reach our own
   // touch handlers — but iOS can take the keyboard down by itself (a touch in
@@ -1063,23 +1098,29 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // read swap. Software-keyboard devices only; desktop window resizes must
   // never kick the editor out of edit.
   //
-  // Web signal: visualViewport. innerHeight does not shrink for the iOS
-  // keyboard, so innerHeight − vv.height ≈ keyboard occlusion. Arm once real
-  // occlusion has been seen (>150px — the smallest iOS keyboard is taller),
-  // fire when it collapses (<60px allows browser-chrome jitter). Pinch zoom
-  // also shrinks vv.height, so events are ignored while zoomed.
+  // Web path (Safari, mobile web): visualViewport. innerHeight does not shrink
+  // for the iOS keyboard, so innerHeight − vv.height ≈ keyboard occlusion. Arm
+  // once real occlusion has been seen (>150px — the smallest iOS keyboard is
+  // taller), fire when it collapses (<60px allows browser-chrome jitter).
+  // Pinch zoom also shrinks vv.height, so events are ignored while zoomed.
   //
-  // Native signal: @capacitor/keyboard's keyboardWillHide. With resize "none"
-  // the WKWebView viewport behaves like Safari's and the vv path should cover
-  // the app too; the plugin event is the guaranteed signal there, not an
-  // app-only fork — the web path above runs everywhere.
+  // Native path (Capacitor app): @capacitor/keyboard's keyboardWillShow /
+  // keyboardDidShow / keyboardWillHide. visualViewport is NOT a usable signal
+  // in the app: on load the plugin removes WKWebView's own observers for the
+  // UIKeyboard will-show / will-hide / change-frame notifications (see
+  // Keyboard.m, load), which are how WebKit learns the keyboard's frame — so
+  // vv.height never shrinks there — and with resize "none" the web view's
+  // frame is never changed either, so innerHeight − vv.height stays 0 for
+  // the whole session. The plugin events carry the keyboard height in
+  // points (= CSS px at scale 1); since the web view is not resized, the
+  // keyboard's top edge is innerHeight − keyboardHeight.
   //
-  // Geometry: kbGeom.bottom is the keyboard's top edge (vv.offsetTop +
-  // vv.height) in layout-viewport coordinates — where the format bar's bottom
-  // must sit. Nothing here hardcodes an accessory-bar height: vv.height
-  // already excludes whatever occludes the viewport, so in the app (accessory
-  // bar suppressed) the bar lands directly on the keys, and in Safari it
-  // lands on Safari's own accessory bar.
+  // Geometry: kbGeom.bottom is the keyboard's top edge in layout-viewport
+  // coordinates — where the format bar's bottom must sit. Nothing here
+  // hardcodes an accessory-bar height: on the web, vv.height already
+  // excludes whatever occludes the viewport, so in Safari the bar lands on
+  // Safari's own accessory bar; in the app (accessory bar suppressed) the
+  // plugin's height is the keys alone and the bar lands directly on them.
   const [kbGeom, setKbGeom] = useState({ up: false, bottom: 0 })
 
   // ── Bounded body while the keyboard is up ────────────────────────────────
@@ -1109,21 +1150,53 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // bounded box is too short for above the fold.
   const pendingTapDepthRef = useRef(null)
 
+  // Native keyboard state, mirrored from the plugin for the EDITOR's lifetime
+  // rather than per edit session. Registering inside the edit-session effect
+  // would race the keyboard itself: focus happens in a layout effect BEFORE
+  // that effect runs, and addListener is a bridge round-trip, so the first
+  // keyboardWillShow could land before anyone was listening and the session
+  // would start blind. The latest height lives in a ref; the edit session
+  // installs nativeApplyRef to be told about changes and reads the ref on
+  // entry, so either order — event first or session first — converges.
+  const nativeKbRef = useRef({ height: 0 })
+  const nativeApplyRef = useRef(null)
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return
+    let cancelled = false
+    const handles = []
+    const onShow = info => {
+      nativeKbRef.current = { height: Number(info?.keyboardHeight) || 0 }
+      nativeApplyRef.current?.()
+    }
+    const onHide = () => {
+      // Blur BEFORE the geometry write: onBlur's one-shot capture reads the
+      // bounded box's inner scrollTop, which must still be the bounded box.
+      bodyRef.current?.blur()
+      nativeKbRef.current = { height: 0 }
+      nativeApplyRef.current?.()
+    }
+    Promise.all([
+      Keyboard.addListener('keyboardWillShow', onShow),
+      Keyboard.addListener('keyboardDidShow', onShow),
+      Keyboard.addListener('keyboardWillHide', onHide),
+    ]).then(hs => { if (cancelled) hs.forEach(h => h.remove()); else handles.push(...hs) })
+    return () => {
+      cancelled = true
+      handles.forEach(h => h.remove())
+    }
+  }, [])
+
   useEffect(() => {
     if (bodyMode !== 'edit') {
       setKbGeom(g => (g.up ? { up: false, bottom: 0 } : g))
       return
     }
     if (window.matchMedia(KEYBOARD_MEDIA_QUERY).matches) return
-    const vv = window.visualViewport
-    let sawKeyboard = false
+
+    // Shared tail of both detection paths: the up-transition capture, then
+    // the geometry write.
     let wasUp = false
-    const sync = () => {
-      if (!vv || Math.abs((vv.scale || 1) - 1) > 0.01) return
-      const occluded = window.innerHeight - vv.height
-      if (occluded > 150) sawKeyboard = true
-      else if (sawKeyboard && occluded < 60) bodyRef.current?.blur()
-      const up = occluded > 150
+    const apply = (up, bottom) => {
       if (up && !wasUp) {
         // Up-transition: capture the view's depth into the note NOW, while
         // the page is still unbounded — once the bounded box renders, the
@@ -1138,23 +1211,34 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         }
       }
       wasUp = up
-      const bottom = Math.round(vv.offsetTop + vv.height)
       setKbGeom(g => (g.up === up && g.bottom === bottom ? g : { up, bottom }))
+    }
+
+    if (Capacitor.isNativePlatform()) {
+      const syncNative = () => {
+        const h = nativeKbRef.current.height
+        apply(h > 0, Math.round(window.innerHeight - h))
+      }
+      nativeApplyRef.current = syncNative
+      syncNative()
+      return () => { nativeApplyRef.current = null }
+    }
+
+    const vv = window.visualViewport
+    let sawKeyboard = false
+    const sync = () => {
+      if (!vv || Math.abs((vv.scale || 1) - 1) > 0.01) return
+      const occluded = window.innerHeight - vv.height
+      if (occluded > 150) sawKeyboard = true
+      else if (sawKeyboard && occluded < 60) bodyRef.current?.blur()
+      apply(occluded > 150, Math.round(vv.offsetTop + vv.height))
     }
     sync()
     vv?.addEventListener('resize', sync)
     vv?.addEventListener('scroll', sync)
-    let cancelled = false
-    let nativeHandle = null
-    if (Capacitor.isNativePlatform()) {
-      Keyboard.addListener('keyboardWillHide', () => bodyRef.current?.blur())
-        .then(h => { if (cancelled) h.remove(); else nativeHandle = h })
-    }
     return () => {
-      cancelled = true
       vv?.removeEventListener('resize', sync)
       vv?.removeEventListener('scroll', sync)
-      nativeHandle?.remove()
     }
   }, [bodyMode])
 
@@ -1294,6 +1378,57 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   }
 
   const wordCount = text.trim() ? text.trim().split(/\s+/).length : 0
+
+  // ── Pull-to-reveal metadata (Apple Notes) ─────────────────────────────
+  // Word count and timestamps live at the TOP of the note, parked at zero
+  // height. A short pull-down at the top (META_REVEAL_PULL of downward
+  // drag, or the rubber-band past it) reveals the row with a height
+  // animation; it stays until the note has been scrolled back up past it,
+  // then collapses INSTANTLY with a matching scrollTop compensation — the
+  // row is off-screen by then, so nothing visible moves. The collapse waits
+  // for scrolling to settle (no scroll events for 150ms, no finger down):
+  // a scrollTop write mid-momentum would stop the scroll dead. Fine-pointer
+  // devices have no pull gesture, so there the row is simply always shown.
+  // While the keyboard is up the row is collapsed regardless (see
+  // metaShown): passive metadata has no place in view mid-typing, and the
+  // bounded-box conversions must not see its height change under them.
+  const hasFinePointer = window.matchMedia(KEYBOARD_MEDIA_QUERY).matches
+  const [metaRevealed, setMetaRevealed] = useState(hasFinePointer)
+  const metaShown = metaRevealed && !kbGeom.up
+  const metaInnerRef = useRef(null)
+  const metaPullRef = useRef({ eligible: false, startX: 0, startY: 0 })
+  const metaHideTimerRef = useRef(null)
+  const metaHideCompRef = useRef(0)
+  const touchActiveRef = useRef(false)
+  const scheduleMetaHide = () => {
+    if (hasFinePointer) return
+    clearTimeout(metaHideTimerRef.current)
+    metaHideTimerRef.current = setTimeout(() => {
+      if (touchActiveRef.current) return
+      const outer = scrollAreaRef.current
+      const h = metaInnerRef.current?.offsetHeight || 0 // 0 while collapsed
+      if (outer && h && outer.scrollTop >= h) {
+        metaHideCompRef.current = h
+        setMetaRevealed(false)
+      }
+    }, 150)
+  }
+  useEffect(() => () => clearTimeout(metaHideTimerRef.current), [])
+  // Keyboard up → forget the reveal (the row is already collapsed by
+  // metaShown in this same render, so this changes nothing on screen; it
+  // keeps the row from popping back — and shifting the page — when the
+  // keyboard leaves).
+  useEffect(() => {
+    if (kbGeom.up && !hasFinePointer) setMetaRevealed(false)
+  }, [kbGeom.up]) // eslint-disable-line react-hooks/exhaustive-deps
+  // Hide compensation: after the instant collapse commits, before paint,
+  // take the row's former height back out of the page scroll.
+  useLayoutEffect(() => {
+    if (metaRevealed) return
+    const h = metaHideCompRef.current
+    metaHideCompRef.current = 0
+    if (h && scrollAreaRef.current) scrollAreaRef.current.scrollTop -= h
+  }, [metaRevealed])
   // Manual title when set, else the first non-empty body line, tracking the
   // live text rather than the last saved copy.
   const displayTitle = customTitle || getNoteTitle(text)
@@ -1424,6 +1559,11 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       onTouchStart={handleTouchStart}
       onTouchMove={handleTouchMove}
       onTouchEnd={handleTouchEnd}
+      onTouchCancel={() => {
+        touchActiveRef.current = false
+        metaPullRef.current.eligible = false
+        scheduleMetaHide()
+      }}
     >
       {/* ── Header — grid row 1 (auto height, never scrolls) ─────────────────── */}
       {/* EXPERIMENT (neutral scheme): header had a border-b divider and painted
@@ -1568,6 +1708,18 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       <div
         ref={scrollAreaRef}
         style={{ overflowY: 'auto', minHeight: 0, WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
+        onScroll={() => {
+          // Rubber-band past the top counts as the pull too (iOS reports a
+          // negative scrollTop during the bounce); otherwise every scroll
+          // re-arms the settle check that collapses a scrolled-away row.
+          const outer = scrollAreaRef.current
+          if (!outer) return
+          if (!hasFinePointer && !metaShown && !kbGeom.up && outer.scrollTop < -META_REVEAL_PULL) {
+            setMetaRevealed(true)
+          } else {
+            scheduleMetaHide()
+          }
+        }}
       >
 
         {/* Text content — a full-height flex column with no bottom border:
@@ -1580,6 +1732,78 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           className="px-5 md:px-10 pt-4 md:pt-8 flex flex-col"
           style={{ minHeight: '100%', paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
         >
+          {/* Pull-to-reveal metadata row — see metaShown. A 0fr/1fr grid
+              row animates from nothing to its natural height without
+              measuring; the inner box is what gets measured (offsetHeight)
+              for the hide compensation. Reveal is animated; collapse is
+              instant (it happens off-screen, with the scroll compensated). */}
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateRows: metaShown ? '1fr' : '0fr',
+              transition: metaShown ? 'grid-template-rows 0.25s ease' : 'none',
+            }}
+          >
+            <div ref={metaInnerRef} style={{ minHeight: 0, overflow: 'hidden' }}>
+              <div className="flex items-end justify-between pb-3">
+                <div className="flex items-end gap-3">
+                {/* Undo / Redo. On touch devices these live in the format bar on
+                    the keyboard; this cluster exists ONLY on desktop, which has
+                    no format bar (no software keyboard) and no other undo — the
+                    custom history stack means native Ctrl+Z can't restore
+                    programmatic transforms on this controlled textarea. It stays
+                    with the body (not the details sheet): it's an edit control,
+                    not organization, and desktop's only undo must not live
+                    behind a chevron. */}
+                {isDesktop && (
+                <div className="flex items-center gap-1 -ml-1.5">
+                  <button
+                    onClick={undo}
+                    disabled={past.length === 0}
+                    // Edit control: undo-then-keep-typing must not cost a
+                    // re-entry tap, so it's exempt from tap-away (data-keep-edit)
+                    // and from desktop's native mousedown focus steal.
+                    data-keep-edit=""
+                    onMouseDown={e => e.preventDefault()}
+                    className="p-1.5 rounded-lg transition-opacity flex-shrink-0 text-gray-400 disabled:opacity-25"
+                    title="Undo"
+                  >
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M3 10h10a6 6 0 010 12H9m-6-12l4-4m-4 4l4 4" />
+                    </svg>
+                  </button>
+                  <button
+                    onClick={redo}
+                    disabled={future.length === 0}
+                    data-keep-edit=""
+                    onMouseDown={e => e.preventDefault()}
+                    className="p-1.5 rounded-lg transition-opacity flex-shrink-0 text-gray-400 disabled:opacity-25"
+                    title="Redo"
+                  >
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                        d="M21 10H11a6 6 0 000 12h4m6-12l-4-4m4 4l-4 4" />
+                    </svg>
+                  </button>
+                </div>
+                )}
+                {/* Passive metadata about the note in front of you — visible at
+                    a glance without opening anything, same reasoning that keeps
+                    undo/redo here rather than in the sheet. Word count left,
+                    timestamps right: opposite ends of one row at the top of the
+                    page, revealed by a pull-down (see metaShown). */}
+                <p className="text-[11px] text-gray-700">
+                  {wordCount} {wordCount === 1 ? 'word' : 'words'}
+                </p>
+                </div>
+                <div className="text-right space-y-0.5 ml-auto">
+                  <p className="text-[11px] text-gray-600">Created {formatNoteDate(note.created_at)}</p>
+                  <p className="text-[11px] text-gray-700">Last edited {formatNoteDate(note.updated_at)}</p>
+                </div>
+              </div>
+            </div>
+          </div>
           {bodyMode === 'edit' ? (
             <textarea
               ref={bodyRef}
@@ -1632,67 +1856,6 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
               {text ? renderReadBody(text) : <span className="text-gray-700">Start writing…</span>}
             </div>
           )}
-          {/* Hidden while the keyboard is up: passive metadata has no place
-              in view mid-typing; it returns when the keyboard dismisses. */}
-          {!kbGeom.up && (
-          <div className="flex items-end justify-between pt-2">
-            <div className="flex items-end gap-3">
-            {/* Undo / Redo. On touch devices these live in the format bar on
-                the keyboard; this cluster exists ONLY on desktop, which has
-                no format bar (no software keyboard) and no other undo — the
-                custom history stack means native Ctrl+Z can't restore
-                programmatic transforms on this controlled textarea. It stays
-                with the body (not the details sheet): it's an edit control,
-                not organization, and desktop's only undo must not live
-                behind a chevron. */}
-            {isDesktop && (
-            <div className="flex items-center gap-1 -ml-1.5">
-              <button
-                onClick={undo}
-                disabled={past.length === 0}
-                // Edit control: undo-then-keep-typing must not cost a
-                // re-entry tap, so it's exempt from tap-away (data-keep-edit)
-                // and from desktop's native mousedown focus steal.
-                data-keep-edit=""
-                onMouseDown={e => e.preventDefault()}
-                className="p-1.5 rounded-lg transition-opacity flex-shrink-0 text-gray-400 disabled:opacity-25"
-                title="Undo"
-              >
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                    d="M3 10h10a6 6 0 010 12H9m-6-12l4-4m-4 4l4 4" />
-                </svg>
-              </button>
-              <button
-                onClick={redo}
-                disabled={future.length === 0}
-                data-keep-edit=""
-                onMouseDown={e => e.preventDefault()}
-                className="p-1.5 rounded-lg transition-opacity flex-shrink-0 text-gray-400 disabled:opacity-25"
-                title="Redo"
-              >
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                    d="M21 10H11a6 6 0 000 12h4m6-12l-4-4m4 4l-4 4" />
-                </svg>
-              </button>
-            </div>
-            )}
-            {/* Passive metadata about the note in front of you — visible at
-                a glance without opening anything, same reasoning that keeps
-                undo/redo here rather than in the sheet. Word count left,
-                timestamps right: opposite ends of one row at the very bottom
-                of the (now naturally growing) page. */}
-            <p className="text-[11px] text-gray-700">
-              {wordCount} {wordCount === 1 ? 'word' : 'words'}
-            </p>
-            </div>
-            <div className="text-right space-y-0.5 ml-auto">
-              <p className="text-[11px] text-gray-600">Created {formatNoteDate(note.created_at)}</p>
-              <p className="text-[11px] text-gray-700">Last edited {formatNoteDate(note.updated_at)}</p>
-            </div>
-          </div>
-          )}
         </div>
 
       </div>
@@ -1720,7 +1883,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         className="absolute flex items-center justify-center"
         style={{
           x: chevronX, y: '-50%',
-          right: 0, top: '50%',
+          right: CHEVRON_EDGE_INSET, top: '50%',
           width: 28, height: 64, zIndex: 41,
           background: 'var(--surface-2)', border: '1px solid var(--border)',
           borderRadius: 10, color: 'var(--text-muted)',
@@ -1770,9 +1933,14 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             the one flex child allowed to shrink (and the only scroller). */}
         <div
           ref={sheetColRef}
-          className="flex-1 min-h-0 flex flex-col gap-6 pt-5"
+          className="flex-1 min-h-0 flex flex-col gap-6"
           style={{
             paddingLeft: 16, paddingRight: 16,
+            // The sheet spans the panel's full height, status bar and notch
+            // included (the header above the note handles its own inset;
+            // the sheet is a sibling, not a child of it), so the top inset
+            // is the sheet's own job — same as the bottom already is.
+            paddingTop: 'calc(1.25rem + env(safe-area-inset-top))',
             paddingBottom: 'calc(1.25rem + env(safe-area-inset-bottom))',
           }}
         >
