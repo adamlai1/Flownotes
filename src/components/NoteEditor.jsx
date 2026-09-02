@@ -6,7 +6,9 @@ import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
 import { useToast } from '../contexts/ToastContext'
 import { copyNoteText } from '../utils/noteShare'
-import { useEscapeLayer, ESC_LEVEL } from '../lib/escapeStack'
+import { Capacitor } from '@capacitor/core'
+import { Keyboard } from '@capacitor/keyboard'
+import { useEscapeLayer, ESC_LEVEL, KEYBOARD_MEDIA_QUERY } from '../lib/escapeStack'
 import { useBodyScrollLock } from '../lib/bodyScrollLock'
 import { linkSegments } from '../lib/linkify'
 import { inlineSegments } from '../lib/mdFormat'
@@ -738,6 +740,53 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       onSwipeProgress?.(0, false)
     }
   }
+
+  // Keyboard-gone watchdog. Tap-away above only covers dismissal routes that
+  // reach our own touch handlers — but iOS can take the keyboard down by
+  // itself (a touch in the strip just above the keyboard gets consumed by the
+  // system's keyboard-dismiss handling and never completes as a tap for us)
+  // without moving focus, so no blur fires and the editor is stranded in edit
+  // mode with no keyboard. Enforce the invariant directly: whenever the
+  // software keyboard leaves while the body is editing, blur the textarea, so
+  // EVERY dismissal route — anticipated or not — flows through the same
+  // onBlur → read swap. Software-keyboard devices only; desktop window
+  // resizes must never kick the editor out of edit.
+  //
+  // Web signal: visualViewport. innerHeight does not shrink for the iOS
+  // keyboard, so innerHeight − vv.height ≈ keyboard occlusion. Arm once real
+  // occlusion has been seen (>150px — the smallest iOS keyboard is taller),
+  // fire when it collapses (<60px allows browser-chrome jitter). Pinch zoom
+  // also shrinks vv.height, so events are ignored while zoomed.
+  //
+  // Native signal: @capacitor/keyboard's keyboardWillHide. With resize "none"
+  // the WKWebView viewport behaves like Safari's and the vv path should cover
+  // the app too; the plugin event is the guaranteed signal there, not an
+  // app-only fork — the web path above runs everywhere.
+  useEffect(() => {
+    if (bodyMode !== 'edit') return
+    if (window.matchMedia(KEYBOARD_MEDIA_QUERY).matches) return
+    const vv = window.visualViewport
+    let sawKeyboard = false
+    const check = () => {
+      if (!vv || Math.abs((vv.scale || 1) - 1) > 0.01) return
+      const occluded = window.innerHeight - vv.height
+      if (occluded > 150) sawKeyboard = true
+      else if (sawKeyboard && occluded < 60) bodyRef.current?.blur()
+    }
+    check()
+    vv?.addEventListener('resize', check)
+    let cancelled = false
+    let nativeHandle = null
+    if (Capacitor.isNativePlatform()) {
+      Keyboard.addListener('keyboardWillHide', () => bodyRef.current?.blur())
+        .then(h => { if (cancelled) h.remove(); else nativeHandle = h })
+    }
+    return () => {
+      cancelled = true
+      vv?.removeEventListener('resize', check)
+      nativeHandle?.remove()
+    }
+  }, [bodyMode])
 
   // The bubble rows themselves; tree order, indentation and fit-based
   // auto-collapse come from BubblePickerTree. Tapping a row still only

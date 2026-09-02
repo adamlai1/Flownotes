@@ -4,7 +4,8 @@
   "webDir": "dist",
   "plugins": {
     "Keyboard": {
-      "accessoryBarVisible": false
+      "accessoryBarVisible": false,
+      "resize": "none"
     }
   }
 }
