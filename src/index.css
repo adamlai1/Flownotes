@@ -247,6 +247,27 @@ body.bubble-dragging * {
   }
 }
 
+/* ── Note read-mode widgets ────────────────────────────────────────────────── */
+/* Numbered-list marker. The digits render as PSEUDO-ELEMENT content, never a
+   DOM text node: tap-to-edit's caret math walks the line's text nodes, and the
+   raw "1. " characters are accounted for by data-prefix-len (see NoteEditor's
+   renderReadBody), so the widget must contribute no walkable text. */
+.md-num::before {
+  content: attr(data-num);
+}
+
+/* ── Format bar ────────────────────────────────────────────────────────────── */
+/* The formatting pill scrolls horizontally; a visible scrollbar inside a
+   44px-tall floating pill reads as clutter, so hide it (the app-wide thin
+   scrollbar rules above would otherwise paint one). */
+.hide-scrollbar {
+  scrollbar-width: none;                               /* Firefox */
+  -ms-overflow-style: none;
+}
+.hide-scrollbar::-webkit-scrollbar {                   /* WebKit / Chromium */
+  display: none;
+}
+
 @layer utilities {
   /* Safe area helpers for notch/home-indicator devices */
   .pt-safe { padding-top: env(safe-area-inset-top); }

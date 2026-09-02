@@ -11,7 +11,7 @@ import { Keyboard } from '@capacitor/keyboard'
 import { useEscapeLayer, ESC_LEVEL, KEYBOARD_MEDIA_QUERY } from '../lib/escapeStack'
 import { useBodyScrollLock } from '../lib/bodyScrollLock'
 import { linkSegments } from '../lib/linkify'
-import { inlineSegments } from '../lib/mdFormat'
+import { inlineSegments, toggleInline, toggleLinePrefix, insertLink } from '../lib/mdFormat'
 import BubblePickerTree from './BubblePickerTree'
 
 // The Bubble section sits partway down the editor's scrolling page, so the
@@ -19,6 +19,11 @@ import BubblePickerTree from './BubblePickerTree'
 // can't be the opening rule here. Instead: open expanded only when the fully
 // expanded tree is at most this many rows.
 const NOTE_VIEW_MAX_EXPANDED_ROWS = 10
+
+// Height of the formatting pill floating above the software keyboard, and
+// the visible gap between the pill and the keyboard's top edge.
+const FORMAT_BAR_H = 44
+const FORMAT_BAR_GAP = 8
 
 
 // Map a screen point to a character offset in the raw note text. Read mode
@@ -122,6 +127,10 @@ const HEADER_STYLES = {
 // the rendered checkbox and what the caret math re-adds via data-prefix-len.
 const CHECKLIST_RE = /^- \[([ xX])\] /
 const CHECKLIST_PREFIX_LEN = 6
+
+// A numbered line: "1. text". Prefix length varies with the digit count, so
+// it's read off the match, never a constant.
+const NUMBERED_RE = /^(\d+)\. /
 
 // Checklist editing sugar, applied in handleTextChange to the value the
 // keyboard already produced — never via keydown/preventDefault, so it cannot
@@ -420,26 +429,45 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     )
   }
 
-  // Inline rendering with bold/italic support. Cheap path: a line with no
-  // inline markers renders exactly as renderInline does, and the caret math's
-  // line-walk stays valid. Formatted path: EVERY rendered run — formatted or
-  // plain — is wrapped in a span stamped with data-raw-start (the absolute
-  // raw offset of its first rendered character), because once any marker in
-  // the line is hidden, a single per-line number can no longer describe the
-  // mapping; the caret math then resolves within the run (see rawTextOffset).
+  // Inline rendering with bold/italic/strike/link support. Cheap path: a line
+  // with no inline markers renders exactly as renderInline does, and the
+  // caret math's line-walk stays valid. Formatted path: EVERY rendered run —
+  // formatted or plain — is wrapped in a span stamped with data-raw-start
+  // (the absolute raw offset of its first rendered character), because once
+  // any marker in the line is hidden, a single per-line number can no longer
+  // describe the mapping; the caret math then resolves within the run (see
+  // rawTextOffset). A markdown link's label renders as the same kind of <a>
+  // the linkifier makes (same open-externally route); its url is hidden, so
+  // the linkifier — which only ever sees the OTHER segments' text — cannot
+  // double-handle it, while bare URLs in those segments still linkify.
   function renderInlineFormatted(str, rawBase) {
     const segs = inlineSegments(str)
-    if (!segs.some(s => s.bold || s.italic)) return renderInline(str)
+    if (!segs.some(s => s.bold || s.italic || s.strike || s.link)) return renderInline(str)
     return segs.map((seg, i) => (
       <span
         key={i}
         data-raw-start={rawBase + seg.rawStart}
-        style={seg.bold || seg.italic ? {
+        style={seg.bold || seg.italic || seg.strike ? {
           fontWeight: seg.bold ? 600 : undefined,
           fontStyle: seg.italic ? 'italic' : undefined,
+          textDecoration: seg.strike ? 'line-through' : undefined,
         } : undefined}
       >
-        {renderInline(seg.text)}
+        {seg.link ? (
+          <a
+            href={seg.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-2"
+            style={{ color: '#6366f1' }}
+            // A link tap is a link tap — never an "edit here" tap.
+            onClick={e => e.stopPropagation()}
+          >
+            {seg.text}
+          </a>
+        ) : (
+          renderInline(seg.text)
+        )}
       </span>
     ))
   }
@@ -476,6 +504,29 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                 </svg>
               </span>
               {renderInlineFormatted(line.slice(BULLET_PREFIX_LEN), start + BULLET_PREFIX_LEN)}
+            </div>
+          )
+        }
+        const nm = line.match(NUMBERED_RE)
+        if (nm) {
+          const plen = nm[0].length
+          return (
+            <div key={start} data-line-start={start} data-prefix-len={plen}>
+              {/* Number widget: the digits render via CSS content (see
+                  .md-num in index.css) so the DOM holds NO text node — the
+                  caret math walks text nodes, and the marker's characters
+                  live in data-prefix-len, exactly like the checkbox. */}
+              <span
+                aria-hidden="true"
+                className="md-num align-middle"
+                data-num={`${nm[1]}.`}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', justifyContent: 'flex-end',
+                  minWidth: 18, height: 18, marginRight: '0.35em',
+                  fontVariantNumeric: 'tabular-nums',
+                }}
+              />
+              {renderInlineFormatted(line.slice(plen), start + plen)}
             </div>
           )
         }
@@ -741,16 +792,18 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     }
   }
 
-  // Keyboard-gone watchdog. Tap-away above only covers dismissal routes that
-  // reach our own touch handlers — but iOS can take the keyboard down by
-  // itself (a touch in the strip just above the keyboard gets consumed by the
-  // system's keyboard-dismiss handling and never completes as a tap for us)
-  // without moving focus, so no blur fires and the editor is stranded in edit
-  // mode with no keyboard. Enforce the invariant directly: whenever the
-  // software keyboard leaves while the body is editing, blur the textarea, so
-  // EVERY dismissal route — anticipated or not — flows through the same
-  // onBlur → read swap. Software-keyboard devices only; desktop window
-  // resizes must never kick the editor out of edit.
+  // Keyboard-gone watchdog + keyboard geometry, one visualViewport source.
+  //
+  // Watchdog: tap-away above only covers dismissal routes that reach our own
+  // touch handlers — but iOS can take the keyboard down by itself (a touch in
+  // the strip just above the keyboard gets consumed by the system's
+  // keyboard-dismiss handling and never completes as a tap for us) without
+  // moving focus, so no blur fires and the editor is stranded in edit mode
+  // with no keyboard. Enforce the invariant directly: whenever the software
+  // keyboard leaves while the body is editing, blur the textarea, so EVERY
+  // dismissal route — anticipated or not — flows through the same onBlur →
+  // read swap. Software-keyboard devices only; desktop window resizes must
+  // never kick the editor out of edit.
   //
   // Web signal: visualViewport. innerHeight does not shrink for the iOS
   // keyboard, so innerHeight − vv.height ≈ keyboard occlusion. Arm once real
@@ -762,19 +815,34 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // the WKWebView viewport behaves like Safari's and the vv path should cover
   // the app too; the plugin event is the guaranteed signal there, not an
   // app-only fork — the web path above runs everywhere.
+  //
+  // Geometry: kbGeom.bottom is the keyboard's top edge (vv.offsetTop +
+  // vv.height) in layout-viewport coordinates — where the format bar's bottom
+  // must sit. Nothing here hardcodes an accessory-bar height: vv.height
+  // already excludes whatever occludes the viewport, so in the app (accessory
+  // bar suppressed) the bar lands directly on the keys, and in Safari it
+  // lands on Safari's own accessory bar.
+  const [kbGeom, setKbGeom] = useState({ up: false, bottom: 0 })
   useEffect(() => {
-    if (bodyMode !== 'edit') return
+    if (bodyMode !== 'edit') {
+      setKbGeom(g => (g.up ? { up: false, bottom: 0 } : g))
+      return
+    }
     if (window.matchMedia(KEYBOARD_MEDIA_QUERY).matches) return
     const vv = window.visualViewport
     let sawKeyboard = false
-    const check = () => {
+    const sync = () => {
       if (!vv || Math.abs((vv.scale || 1) - 1) > 0.01) return
       const occluded = window.innerHeight - vv.height
       if (occluded > 150) sawKeyboard = true
       else if (sawKeyboard && occluded < 60) bodyRef.current?.blur()
+      const up = occluded > 150
+      const bottom = Math.round(vv.offsetTop + vv.height)
+      setKbGeom(g => (g.up === up && g.bottom === bottom ? g : { up, bottom }))
     }
-    check()
-    vv?.addEventListener('resize', check)
+    sync()
+    vv?.addEventListener('resize', sync)
+    vv?.addEventListener('scroll', sync)
     let cancelled = false
     let nativeHandle = null
     if (Capacitor.isNativePlatform()) {
@@ -783,10 +851,36 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     }
     return () => {
       cancelled = true
-      vv?.removeEventListener('resize', check)
+      vv?.removeEventListener('resize', sync)
+      vv?.removeEventListener('scroll', sync)
       nativeHandle?.remove()
     }
   }, [bodyMode])
+
+  // Formatting-bar transforms. Pure rewrites from mdFormat plus the editor's
+  // existing plumbing: same history push and debounced save as typing, and
+  // selection restore through transformCaretRef so the wrapped text stays
+  // selected — which is exactly what lets a second press unwrap. Reading the
+  // selection live off the textarea is safe because bar taps never move
+  // focus (data-keep-edit + no focus steal), so the selection is still the
+  // user's own.
+  function applyFormat(kind) {
+    const el = bodyRef.current
+    if (!el) return
+    const s = el.selectionStart
+    const e = el.selectionEnd
+    const r =
+      kind === 'bold' || kind === 'italic' || kind === 'strike'
+        ? toggleInline(text, s, e, kind === 'bold' ? '**' : kind === 'italic' ? '*' : '~~')
+        : kind === 'link'
+          ? insertLink(text, s, e)
+          : toggleLinePrefix(text, s, e, kind)
+    if (r.text === text) return
+    pushHistory(text)
+    transformCaretRef.current = { start: r.start, end: r.end }
+    setText(r.text)
+    scheduleSave(r.text, selectedBubbleIds, tags, connections)
+  }
 
   // The bubble rows themselves; tree order, indentation and fit-based
   // auto-collapse come from BubblePickerTree. Tapping a row still only
@@ -1077,7 +1171,12 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             </div>
           )}
           <div className="flex items-end justify-between pt-2">
-            {/* Undo / Redo — moved down from the header */}
+            {/* Undo / Redo. On touch devices these live in the format bar on
+                the keyboard; this row keeps them ONLY for desktop, which has
+                no format bar (no software keyboard) and no other undo — the
+                custom history stack means native Ctrl+Z can't restore
+                programmatic transforms on this controlled textarea. */}
+            {isDesktop && (
             <div className="flex items-center gap-1 -ml-1.5">
               <button
                 onClick={undo}
@@ -1109,7 +1208,8 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                 </svg>
               </button>
             </div>
-            <div className="text-right space-y-0.5">
+            )}
+            <div className="text-right space-y-0.5 ml-auto">
               <p className="text-[11px] text-gray-700">
                 {wordCount} {wordCount === 1 ? 'word' : 'words'}
               </p>
@@ -1322,6 +1422,209 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
 
         </div>
       </div>
+
+      {/* ── Format bar — floats above the software keyboard ─────────────────
+          Only while the body is editing AND the keyboard is actually up
+          (kbGeom), so it can never float without a keyboard beneath it. An
+          absolute child of the panel: the panel spans the layout viewport,
+          so translateY positions the row FORMAT_BAR_GAP above the keyboard's
+          top edge — a visible gap, the bar reads as floating rather than
+          attached — and during edge-swipe-back it slides with the panel like
+          everything else. Two detached pieces, Obsidian-style: a fully
+          rounded pill of scrollable controls, and a separate dismiss circle
+          to its right. Both fill with the app's surface treatment
+          (--surface, hairline border, soft shadow), not a bright panel.
+          The pill scrolls horizontally — ten 44px controls, deliberately;
+          targets never shrink to fit the viewport. Touch events stop at this
+          row: a gesture that starts on the bar belongs to the bar (scrolling
+          the pill must not simultaneously drag the panel's edge-swipe or
+          count as tap-away movement), while gestures starting anywhere else
+          are untouched. data-keep-edit stays on the container as the
+          documented tap-away exemption, and onMouseDown preventDefault keeps
+          any focus steal from collapsing the selection the transforms
+          operate on. */}
+      {bodyMode === 'edit' && kbGeom.up && (
+        <div
+          data-keep-edit=""
+          className="absolute flex items-center"
+          style={{
+            top: 0,
+            left: 12,
+            right: 12,
+            height: FORMAT_BAR_H,
+            gap: 10,
+            transform: `translateY(${kbGeom.bottom - FORMAT_BAR_GAP - FORMAT_BAR_H}px)`,
+            zIndex: 30,
+          }}
+          onTouchStart={e => e.stopPropagation()}
+          onTouchMove={e => e.stopPropagation()}
+          onTouchEnd={e => e.stopPropagation()}
+        >
+          <div
+            className="hide-scrollbar flex items-center h-full flex-1 min-w-0"
+            style={{
+              overflowX: 'auto',
+              WebkitOverflowScrolling: 'touch',
+              background: 'var(--surface)',
+              border: '1px solid var(--border)',
+              borderRadius: FORMAT_BAR_H / 2,
+              boxShadow: '0 4px 14px rgba(0,0,0,0.3)',
+              padding: '0 8px',
+            }}
+          >
+          <button
+            type="button"
+            aria-label="Undo"
+            onMouseDown={e => e.preventDefault()}
+            onClick={undo}
+            disabled={past.length === 0}
+            className="h-full flex items-center justify-center active:opacity-50 disabled:opacity-25"
+            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h10a6 6 0 010 12H9m-6-12l4-4m-4 4l4 4" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            aria-label="Redo"
+            onMouseDown={e => e.preventDefault()}
+            onClick={redo}
+            disabled={future.length === 0}
+            className="h-full flex items-center justify-center active:opacity-50 disabled:opacity-25"
+            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M21 10H11a6 6 0 000 12h4m6-12l-4-4m4 4l-4 4" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            aria-label="Checklist"
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => applyFormat('checklist')}
+            className="h-full flex items-center justify-center active:opacity-50"
+            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+          >
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <rect x="3.5" y="3.5" width="17" height="17" rx="4.5" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M8.5 12.2l2.4 2.4 4.6-5" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            aria-label="Bulleted list"
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => applyFormat('bullet')}
+            className="h-full flex items-center justify-center active:opacity-50"
+            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+          >
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <circle cx="5" cy="7" r="1.6" fill="currentColor" stroke="none" />
+              <circle cx="5" cy="17" r="1.6" fill="currentColor" stroke="none" />
+              <path strokeLinecap="round" d="M10 7h10M10 17h10" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            aria-label="Numbered list"
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => applyFormat('numbered')}
+            className="h-full flex items-center justify-center active:opacity-50"
+            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+          >
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+              <text x="2" y="10" fontSize="9" fill="currentColor" stroke="none">1.</text>
+              <text x="2" y="21" fontSize="9" fill="currentColor" stroke="none">2.</text>
+              <path strokeLinecap="round" d="M11 6.5h9M11 17.5h9" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            aria-label="Header"
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => applyFormat('header')}
+            className="h-full flex items-center justify-center active:opacity-50"
+            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+          >
+            <span className="text-[19px] font-semibold leading-none">H</span>
+          </button>
+          <button
+            type="button"
+            aria-label="Bold"
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => applyFormat('bold')}
+            className="h-full flex items-center justify-center active:opacity-50"
+            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+          >
+            <span className="text-[18px] font-bold leading-none">B</span>
+          </button>
+          <button
+            type="button"
+            aria-label="Italic"
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => applyFormat('italic')}
+            className="h-full flex items-center justify-center active:opacity-50"
+            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation', fontFamily: 'Georgia, serif' }}
+          >
+            <span className="text-[19px] italic leading-none">I</span>
+          </button>
+          <button
+            type="button"
+            aria-label="Link"
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => applyFormat('link')}
+            className="h-full flex items-center justify-center active:opacity-50"
+            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path strokeLinecap="round" strokeLinejoin="round"
+                d="M10.5 13.5a4.2 4.2 0 006 0l3.2-3.2a4.24 4.24 0 00-6-6l-1.6 1.6" />
+              <path strokeLinecap="round" strokeLinejoin="round"
+                d="M13.5 10.5a4.2 4.2 0 00-6 0l-3.2 3.2a4.24 4.24 0 006 6l1.6-1.6" />
+            </svg>
+          </button>
+          <button
+            type="button"
+            aria-label="Strikethrough"
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => applyFormat('strike')}
+            className="h-full flex items-center justify-center active:opacity-50"
+            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+          >
+            <span className="text-[18px] font-medium leading-none line-through">S</span>
+          </button>
+          </div>
+          {/* Dismiss circle — a separate piece, not part of the pill. Not a
+              new mechanism: the explicit blur is the very call tap-away
+              makes, so it flows through the same onBlur → read swap (and the
+              keyboard-gone watchdog would agree anyway). */}
+          <button
+            type="button"
+            aria-label="Dismiss keyboard"
+            onMouseDown={e => e.preventDefault()}
+            onClick={() => bodyRef.current?.blur()}
+            className="flex items-center justify-center active:opacity-50 flex-shrink-0"
+            style={{
+              width: FORMAT_BAR_H,
+              height: FORMAT_BAR_H,
+              borderRadius: '50%',
+              background: 'var(--surface)',
+              border: '1px solid var(--border)',
+              boxShadow: '0 4px 14px rgba(0,0,0,0.3)',
+              color: 'var(--text-2)',
+              touchAction: 'manipulation',
+            }}
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+              <rect x="3" y="3.5" width="18" height="11.5" rx="2" />
+              <path strokeLinecap="round" strokeWidth="1.9"
+                d="M6.2 6.8h.01M9.4 6.8h.01M12.6 6.8h.01M15.8 6.8h.01M6.2 9.4h.01M9.4 9.4h.01M12.6 9.4h.01M15.8 9.4h.01M17.8 6.8h.01M17.8 9.4h.01M8 12.2h8" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9.2 18.2l2.8 2.8 2.8-2.8" />
+            </svg>
+          </button>
+        </div>
+      )}
 
     </div>
 

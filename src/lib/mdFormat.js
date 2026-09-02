@@ -4,18 +4,19 @@
 // rewrite the note text plus a selection range; nothing here touches the DOM,
 // state, or persistence.
 
-// The three line-level markers. Mutually exclusive by design: applying one
-// strips whichever of the three the line already carries, so "- [ ] " never
-// stacks on "- " or "# " and every line has at most one hidden prefix.
+// The line-level markers. Mutually exclusive by design: applying one strips
+// whichever marker the line already carries, so "- [ ] " never stacks on
+// "- ", "1. " or "# " and every line has at most one hidden prefix.
 const CHECKLIST_INSERT = '- [ ] '
 const BULLET_INSERT = '- '
 const LINE_MARKER_RES = {
   checklist: /^- \[[ xX]\] /,
   bullet: /^- (?!\[[ xX]\] )/, // lookAHEAD only — iOS 15 Safari can't parse lookbehind
   header: /^#{1,3} /,
+  numbered: /^\d+\. /,
 }
 // Any line marker, longest form first so "- [ ] " never half-matches as "- ".
-const STRIP_RE = /^(?:- \[[ xX]\] |#{1,3} |- )/
+const STRIP_RE = /^(?:- \[[ xX]\] |#{1,3} |\d+\. |- )/
 
 // Toggle an inline marker pair around the selection (bold '**', italic '*').
 // Selection: wrap and keep the inner text selected — which is exactly what
@@ -46,6 +47,10 @@ export function toggleInline(text, start, end, marker) {
 // Toggle a line-level marker on every line the selection touches.
 // kind 'checklist' | 'bullet': if every touched line already has that marker,
 // remove it; otherwise apply it (replacing any other line marker).
+// kind 'numbered': same all-or-nothing rule, but the inserted marker is the
+// line's ordinal WITHIN THE SELECTION — "1. ", "2. ", … — so a multi-line
+// apply comes out sequentially numbered (and re-applying over stale numbers
+// renumbers, since mixed/missing markers count as "not all have it").
 // kind 'header': cycle by the FIRST line's current level — none → # → ## →
 // ### → none — and apply the same target to all touched lines, so a mixed
 // selection lands in one consistent state. Returns { text, start, end }.
@@ -61,15 +66,21 @@ export function toggleLinePrefix(text, start, end, kind) {
     ls = le + 1
   }
 
-  let target
+  // targetFor(i): the marker line i receives — constant for every kind
+  // except numbered, whose marker carries the ordinal.
+  let targetFor
   if (kind === 'header') {
     const m = text.slice(lines[0][0], lines[0][1]).match(LINE_MARKER_RES.header)
     const level = m ? m[0].length - 1 : 0
-    target = level >= 3 ? '' : '#'.repeat(level + 1) + ' '
+    const t = level >= 3 ? '' : '#'.repeat(level + 1) + ' '
+    targetFor = () => t
+  } else if (kind === 'numbered') {
+    const allHave = lines.every(([s, e]) => LINE_MARKER_RES.numbered.test(text.slice(s, e)))
+    targetFor = allHave ? () => '' : i => `${i + 1}. `
   } else {
     const insert = kind === 'checklist' ? CHECKLIST_INSERT : BULLET_INSERT
     const allHave = lines.every(([s, e]) => LINE_MARKER_RES[kind].test(text.slice(s, e)))
-    target = allHave ? '' : insert
+    targetFor = allHave ? () => '' : () => insert
   }
 
   // Rewrite last line first so earlier line offsets stay valid; adjust the
@@ -84,6 +95,7 @@ export function toggleLinePrefix(text, start, end, kind) {
   let newEnd = end
   for (let i = lines.length - 1; i >= 0; i--) {
     const [s, e] = lines[i]
+    const target = targetFor(i)
     const m = result.slice(s, e).match(STRIP_RE)
     const removed = m ? m[0].length : 0
     result = result.slice(0, s) + target + result.slice(s + removed)
@@ -99,13 +111,46 @@ export function toggleLinePrefix(text, start, end, kind) {
   return { text: result, start: newStart, end: newEnd }
 }
 
-// Inline segmentation for read-mode rendering: ***both***, **bold**, *italic*
-// — no nesting, never across lines. Each segment carries rawStart, the offset
-// of its FIRST RENDERED character in the input string (i.e. past any opening
-// marker), which is what read mode stamps as data-raw-start for exact caret
-// mapping. Concatenating segment texts does NOT reproduce the input — the
-// markers are gone; that is the whole point, and why rawStart exists.
-const INLINE_RE = /\*\*\*([^*\n]+)\*\*\*|\*\*([^*\n]+)\*\*|\*([^*\n]+)\*/g
+// Link insertion — insert-only, no toggle: unlike **/~~ pairs there is no
+// natural "press again to unwrap" selection state to detect cheaply, and
+// deleting a link is ordinary text editing.
+// With a selection: the selected text is already the label, so it's wrapped
+// as [label]() and the CURSOR GOES INSIDE THE PARENS — the URL is the one
+// thing still missing, and the next keystroke (usually a paste) should land
+// there. With a bare cursor: an empty skeleton []() is inserted and the
+// CURSOR GOES INSIDE THE BRACKETS — nothing exists yet, and label-then-URL
+// mirrors the reading order and the selection case's flow (label first,
+// parens next). Returns { text, start, end } with a collapsed cursor.
+export function insertLink(text, start, end) {
+  if (start === end) {
+    return {
+      text: text.slice(0, start) + '[]()' + text.slice(start),
+      start: start + 1,
+      end: start + 1,
+    }
+  }
+  const inner = text.slice(start, end)
+  return {
+    text: text.slice(0, start) + '[' + inner + ']()' + text.slice(end),
+    start: end + 3,
+    end: end + 3,
+  }
+}
+
+// Inline segmentation for read-mode rendering: [label](url) links, ***both***,
+// **bold**, *italic*, ~~strike~~ — no nesting, never across lines. Each
+// segment carries rawStart, the offset of its FIRST RENDERED character in the
+// input string (i.e. past any opening marker), which is what read mode stamps
+// as data-raw-start for exact caret mapping. Concatenating segment texts does
+// NOT reproduce the input — the markers (and a link's whole "](url)" tail)
+// are gone; that is the whole point, and why rawStart exists.
+//
+// Links match only with BOTH a label and a url — a half-built [label]() stays
+// visible as raw text while the user is still composing it. The url is hidden
+// entirely (only the label renders), which is also what keeps markdown links
+// from ever colliding with the bare-URL linkifier: the linkifier runs over
+// rendered segment text, and a markdown link's url never appears there.
+const INLINE_RE = /\[([^\]\n]+)\]\(([^)\n]+)\)|\*\*\*([^*\n]+)\*\*\*|\*\*([^*\n]+)\*\*|\*([^*\n]+)\*|~~([^~\n]+)~~/g
 
 export function inlineSegments(str) {
   const out = []
@@ -114,9 +159,19 @@ export function inlineSegments(str) {
   let m
   while ((m = INLINE_RE.exec(str))) {
     if (m.index > last) out.push({ text: str.slice(last, m.index), rawStart: last })
-    if (m[1] != null) out.push({ text: m[1], rawStart: m.index + 3, bold: true, italic: true })
-    else if (m[2] != null) out.push({ text: m[2], rawStart: m.index + 2, bold: true })
-    else out.push({ text: m[3], rawStart: m.index + 1, italic: true })
+    if (m[1] != null) {
+      const url = m[2]
+      out.push({
+        text: m[1],
+        rawStart: m.index + 1,
+        link: true,
+        href: /^https?:\/\//i.test(url) ? url : 'https://' + url,
+      })
+    }
+    else if (m[3] != null) out.push({ text: m[3], rawStart: m.index + 3, bold: true, italic: true })
+    else if (m[4] != null) out.push({ text: m[4], rawStart: m.index + 2, bold: true })
+    else if (m[5] != null) out.push({ text: m[5], rawStart: m.index + 1, italic: true })
+    else out.push({ text: m[6], rawStart: m.index + 2, strike: true })
     last = m.index + m[0].length
   }
   if (last < str.length) out.push({ text: str.slice(last), rawStart: last })
