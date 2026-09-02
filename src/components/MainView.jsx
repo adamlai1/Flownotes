@@ -22,6 +22,8 @@ export default function MainView({
   onDeleteItems,
   onSetNoteLocked,
   onSetBubbleLocked,
+  pinnedIds,
+  onTogglePin,
   onCurrentBubbleChange,
   onAddNotesToBubble,
   onRemoveItemsFromContainer,
@@ -130,25 +132,10 @@ export default function MainView({
   }
   // Selection is only meaningful within the current view + project + filter set.
   useEffect(() => { exitSelect() }, [project.id, viewMode])
-  const [pinnedIds, setPinnedIds] = useState(() => {
-    try { return new Set(JSON.parse(localStorage.getItem(`mindmap-pins-${project.id}`)) || []) }
-    catch { return new Set() }
-  })
-
-  useEffect(() => {
-    try { setPinnedIds(new Set(JSON.parse(localStorage.getItem(`mindmap-pins-${project.id}`)) || [])) }
-    catch { setPinnedIds(new Set()) }
-  }, [project.id])
-
-  function togglePin(noteId) {
-    setPinnedIds(prev => {
-      const next = new Set(prev)
-      if (next.has(noteId)) next.delete(noteId)
-      else next.add(noteId)
-      localStorage.setItem(`mindmap-pins-${project.id}`, JSON.stringify([...next]))
-      return next
-    })
-  }
+  // Pinned-note state (and its localStorage persistence) lives in App now —
+  // the note editor's "..." menu toggles pins too, and either view owning the
+  // state would leave the other stale. `pinnedIds` and `onTogglePin` arrive as
+  // props; same key, same shape as before.
 
   // Sort-menu dismissal is a real backdrop (rendered with the menu below),
   // not a document listener: a document-level outside-close lets the very tap
@@ -630,7 +617,7 @@ export default function MainView({
                       allNotes={project.notes}
                       onClick={() => handleSelectNote(note)}
                       onDelete={() => onDeleteNote(note.id)}
-                      onTogglePin={() => togglePin(note.id)}
+                      onTogglePin={() => onTogglePin(note.id)}
                       onToggleLock={() => handleToggleLock(note)}
                       locked={lockIndex.gatedNoteIds.has(note.id)}
                       pinned
@@ -658,7 +645,7 @@ export default function MainView({
                       allNotes={project.notes}
                       onClick={() => handleSelectNote(note)}
                       onDelete={() => onDeleteNote(note.id)}
-                      onTogglePin={() => togglePin(note.id)}
+                      onTogglePin={() => onTogglePin(note.id)}
                       onToggleLock={() => handleToggleLock(note)}
                       locked={lockIndex.gatedNoteIds.has(note.id)}
                       pinned={pinnedIds.has(note.id)}

@@ -1860,6 +1860,30 @@ export default function App() {
     })
   }
 
+  // ── Pinned notes ────────────────────────────────────────────────────────────
+  // Per-project and device-local (same mindmap-pins-<projectId> localStorage
+  // key MainView owned before) — pins are list presentation, not note data, so
+  // they stay out of the note model and out of sync. The STATE lives here
+  // because two views now toggle it: the All Notes card menu and the note
+  // editor's "..." menu; owned by either one, the other would go stale until a
+  // project switch.
+  const readNotePins = (projectId) => {
+    try { return new Set(JSON.parse(localStorage.getItem(`mindmap-pins-${projectId}`)) || []) }
+    catch { return new Set() }
+  }
+  const [pinnedNoteIds, setPinnedNoteIds] = useState(() => readNotePins(activeProject?.id))
+  useEffect(() => { setPinnedNoteIds(readNotePins(activeProject?.id)) }, [activeProject?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  function toggleNotePin(noteId) {
+    const projectId = activeProjectRef.current.id
+    setPinnedNoteIds(prev => {
+      const next = new Set(prev)
+      if (next.has(noteId)) next.delete(noteId)
+      else next.add(noteId)
+      localStorage.setItem(`mindmap-pins-${projectId}`, JSON.stringify([...next]))
+      return next
+    })
+  }
+
   // "Add to" from select mode: append a bubble to each selected note's
   // memberships. Notes are many-to-many, so every existing membership is kept;
   // the root sentinel is dropped only when the note previously had NO real
@@ -2371,6 +2395,8 @@ export default function App() {
             onDeleteItems={deleteItems}
             onSetNoteLocked={setNoteLocked}
             onSetBubbleLocked={setBubbleLocked}
+            pinnedIds={pinnedNoteIds}
+            onTogglePin={toggleNotePin}
             onCurrentBubbleChange={setCurrentBubbleId}
             onAddNotesToBubble={addNotesToBubble}
             onRemoveItemsFromContainer={removeItemsFromContainer}
@@ -2459,6 +2485,9 @@ export default function App() {
               onUpdateCustomTagColors={updateCustomTagColors}
               onNavigateToNote={isTop ? navigateToNote : undefined}
               onSwipeProgress={isTop ? applyBeneathParallax : undefined}
+              onSetNoteLocked={setNoteLocked}
+              pinned={pinnedNoteIds.has(noteId)}
+              onTogglePin={() => toggleNotePin(noteId)}
               backLabel={backLabel}
               zIndex={50 + index}
             />

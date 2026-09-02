@@ -137,6 +137,37 @@ export function insertLink(text, start, end) {
   }
 }
 
+// Markdown → readable plain text, for sharing. Line markers become their
+// typographic equivalents (☐/☑ for checklists, • for bullets, numbered lines
+// keep their numbers, header prefixes drop); inline markers vanish, links
+// become "label (url)". Sharing hands text to Messages/Mail readers who never
+// see our rendering — raw "**bold**" there is marker soup, not emphasis.
+// Copy deliberately does NOT use this: copied text round-trips (into another
+// markdown editor, or back into the app), so it keeps the markers.
+export function toPlainText(text) {
+  return text.split('\n').map(line => {
+    let rest = line
+    let prefix = ''
+    let m
+    if ((m = line.match(LINE_MARKER_RES.checklist))) {
+      prefix = /[xX]/.test(m[0]) ? '☑ ' : '☐ '
+      rest = line.slice(m[0].length)
+    } else if ((m = line.match(LINE_MARKER_RES.bullet))) {
+      prefix = '• '
+      rest = line.slice(m[0].length)
+    } else if ((m = line.match(LINE_MARKER_RES.header))) {
+      rest = line.slice(m[0].length)
+    } else if ((m = line.match(LINE_MARKER_RES.numbered))) {
+      prefix = m[0]
+      rest = line.slice(m[0].length)
+    }
+    const flat = inlineSegments(rest)
+      .map(s => (s.link ? `${s.text} (${s.href})` : s.text))
+      .join('')
+    return prefix + flat
+  }).join('\n')
+}
+
 // Inline segmentation for read-mode rendering: [label](url) links, ***both***,
 // **bold**, *italic*, ~~strike~~ — no nesting, never across lines. Each
 // segment carries rawStart, the offset of its FIRST RENDERED character in the

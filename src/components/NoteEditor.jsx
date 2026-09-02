@@ -5,7 +5,8 @@ import { getNoteTitle, noteTitle, realBubbleIds, connectionType, generateId } fr
 import { buildLockIndex } from '../utils/locks'
 import { useLock } from '../contexts/LockContext'
 import { useToast } from '../contexts/ToastContext'
-import { copyNoteText } from '../utils/noteShare'
+import { copyNoteText, shareNoteText } from '../utils/noteShare'
+import { useDismissOnOutside } from '../lib/dismiss'
 import { Capacitor } from '@capacitor/core'
 import { Keyboard } from '@capacitor/keyboard'
 import { useEscapeLayer, ESC_LEVEL, KEYBOARD_MEDIA_QUERY } from '../lib/escapeStack'
@@ -22,7 +23,7 @@ const NOTE_VIEW_MAX_EXPANDED_ROWS = 10
 
 // Height of the formatting pill floating above the software keyboard, and
 // the visible gap between the pill and the keyboard's top edge.
-const FORMAT_BAR_H = 44
+const FORMAT_BAR_H = 48
 const FORMAT_BAR_GAP = 8
 
 
@@ -179,8 +180,8 @@ function formatNoteDate(isoStr) {
 }
 
 
-export default function NoteEditor({ note, project, onClose, onUpdateNote, onDeleteNote, onUpdateCustomTagColors, onNavigateToNote, onSwipeProgress, backLabel = 'Notes', zIndex = 50 }) {
-  const { unlockedIds, requestUnlock } = useLock()
+export default function NoteEditor({ note, project, onClose, onUpdateNote, onDeleteNote, onUpdateCustomTagColors, onNavigateToNote, onSwipeProgress, onSetNoteLocked, pinned = false, onTogglePin, backLabel = 'Notes', zIndex = 50 }) {
+  const { unlockedIds, requestUnlock, ensurePassword, relockIds } = useLock()
   const showToast = useToast()
   const [isDesktop, setIsDesktop] = useState(() => window.matchMedia('(min-width: 768px)').matches)
   useEffect(() => {
@@ -704,6 +705,31 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     setShowDeleteConfirm(true)
   }
 
+  // ── Header "..." menu ────────────────────────────────────────────────────
+  // Outside-press + Escape through the shared dismiss hook — no second
+  // mechanism. The escape layer must sit ABOVE the editor's own close layer
+  // (zIndex, ESC_LEVEL.note-based) or Escape-with-menu-open would close the
+  // whole note; zIndex + 5 stays below the delete confirm at zIndex + 10.
+  const [showHeaderMenu, setShowHeaderMenu] = useState(false)
+  const headerMenuRef = useRef(null)
+  const headerMenuBtnRef = useRef(null)
+  useDismissOnOutside(
+    showHeaderMenu,
+    () => setShowHeaderMenu(false),
+    [headerMenuRef, headerMenuBtnRef],
+    { escLevel: zIndex + 5 },
+  )
+
+  // An OPEN note is by definition revealed, so this is only ever the simple
+  // half of the card menus' toggle: remove an existing lock outright, or
+  // create one (password required first). The hidden-note password-prompt
+  // branch can't be reached from inside the editor.
+  function handleToggleLock() {
+    setShowHeaderMenu(false)
+    if (note.locked) { onSetNoteLocked?.(note.id, false); return }
+    ensurePassword(() => { relockIds(note.id); onSetNoteLocked?.(note.id, true) })
+  }
+
   function confirmDelete() {
     setShowDeleteConfirm(false)
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
@@ -1099,33 +1125,81 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         <div className="flex-1" />
 
         {/* Icon cluster — one wrapper so the title-inset measurement reads the
-            group's true extent in a single rect. */}
+            group's true extent in a single rect. Apple Notes pattern: Share +
+            a "..." menu; copy and delete moved into the menu. */}
         <div ref={iconGroupRef} className="flex items-center flex-shrink-0">
-          {/* Copy — the text as it stands in the editor, not the last saved version, so
-              what lands on the clipboard is what's on screen. */}
+          {/* Share — the text as it stands in the editor, not the last saved
+              version, same live-text rule the old copy button had. Falls back
+              to the clipboard where no share sheet exists (see noteShare). */}
           <button
-            onClick={() => copyNoteText({ content: text, title: customTitle || null }).then(showToast)}
+            onClick={() => shareNoteText({ content: text, title: customTitle || null }).then(showToast)}
             disabled={!text.trim()}
-            className="p-1.5 rounded-lg transition-opacity flex-shrink-0 z-10 text-gray-400 disabled:opacity-25"
-            title="Copy note"
+            className="p-3 rounded-lg transition-opacity flex-shrink-0 z-10 text-gray-400 disabled:opacity-25"
+            title="Share note"
           >
-            <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M8 8V5a1 1 0 011-1h10a1 1 0 011 1v10a1 1 0 01-1 1h-3M5 8h10a1 1 0 011 1v10a1 1 0 01-1 1H5a1 1 0 01-1-1V9a1 1 0 011-1z" />
+            <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8}
+                d="M8.5 8H7a2 2 0 00-2 2v9a2 2 0 002 2h10a2 2 0 002-2v-9a2 2 0 00-2-2h-1.5M12 14V2.5m0 0L8.5 6M12 2.5L15.5 6" />
             </svg>
           </button>
 
           <button
-            onClick={handleDelete}
-            className="p-1.5 text-gray-500 hover:text-red-500 rounded-lg transition-colors -mr-1 flex-shrink-0 z-10"
-            title="Delete note"
+            ref={headerMenuBtnRef}
+            onClick={() => setShowHeaderMenu(m => !m)}
+            className="p-3 text-gray-400 rounded-lg transition-colors -mr-2 flex-shrink-0 z-10"
+            title="Note options"
+            aria-label="Note options"
+            aria-expanded={showHeaderMenu}
           >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+            <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+              <circle cx="5" cy="12" r="1.5" />
+              <circle cx="12" cy="12" r="1.5" />
+              <circle cx="19" cy="12" r="1.5" />
             </svg>
           </button>
         </div>
+
+        {/* "..." menu. Dismissal (outside press + Escape) comes entirely from
+            the shared useDismissOnOutside hook registered above. */}
+        {showHeaderMenu && (
+          <div
+            ref={headerMenuRef}
+            className="absolute rounded-xl shadow-lg py-1 min-w-[160px] z-30"
+            style={{ top: '100%', right: 12, background: 'var(--surface-2)', border: '1px solid var(--border)' }}
+          >
+            <button
+              onClick={handleToggleLock}
+              className="w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-gray-800"
+            >
+              {note.locked ? 'Unlock' : 'Lock'}
+            </button>
+            <button
+              onClick={() => { setShowHeaderMenu(false); onTogglePin?.() }}
+              className="w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-gray-800"
+            >
+              {pinned ? 'Unpin' : 'Pin'}
+            </button>
+            <button
+              onClick={() => {
+                setShowHeaderMenu(false)
+                copyNoteText({ content: text, title: customTitle || null }).then(showToast)
+              }}
+              disabled={!text.trim()}
+              className="w-full text-left px-4 py-2.5 text-sm text-gray-300 hover:bg-gray-800 disabled:opacity-25"
+            >
+              Copy
+            </button>
+            {/* Delete — red, at the bottom, separated. Same confirm dialog as
+                the old header trash button (handleDelete → showDeleteConfirm). */}
+            <div style={{ borderTop: '1px solid var(--border)', margin: '4px 0' }} />
+            <button
+              onClick={() => { setShowHeaderMenu(false); handleDelete() }}
+              className="w-full text-left px-4 py-2.5 text-sm text-red-500 hover:bg-red-950"
+            >
+              Delete
+            </button>
+          </div>
+        )}
       </div>
 
       {/* ── Scroll area — grid row 2 (1fr), only this scrolls ───────────────── */}
@@ -1479,9 +1553,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             onClick={undo}
             disabled={past.length === 0}
             className="h-full flex items-center justify-center active:opacity-50 disabled:opacity-25"
-            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+            style={{ width: 48, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
           >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path strokeLinecap="round" strokeLinejoin="round" d="M3 10h10a6 6 0 010 12H9m-6-12l4-4m-4 4l4 4" />
             </svg>
           </button>
@@ -1492,9 +1566,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             onClick={redo}
             disabled={future.length === 0}
             className="h-full flex items-center justify-center active:opacity-50 disabled:opacity-25"
-            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+            style={{ width: 48, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
           >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path strokeLinecap="round" strokeLinejoin="round" d="M21 10H11a6 6 0 000 12h4m6-12l-4-4m4 4l-4 4" />
             </svg>
           </button>
@@ -1504,9 +1578,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             onMouseDown={e => e.preventDefault()}
             onClick={() => applyFormat('checklist')}
             className="h-full flex items-center justify-center active:opacity-50"
-            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+            style={{ width: 48, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
           >
-            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
               <rect x="3.5" y="3.5" width="17" height="17" rx="4.5" />
               <path strokeLinecap="round" strokeLinejoin="round" d="M8.5 12.2l2.4 2.4 4.6-5" />
             </svg>
@@ -1517,9 +1591,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             onMouseDown={e => e.preventDefault()}
             onClick={() => applyFormat('bullet')}
             className="h-full flex items-center justify-center active:opacity-50"
-            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+            style={{ width: 48, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
           >
-            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
               <circle cx="5" cy="7" r="1.6" fill="currentColor" stroke="none" />
               <circle cx="5" cy="17" r="1.6" fill="currentColor" stroke="none" />
               <path strokeLinecap="round" d="M10 7h10M10 17h10" />
@@ -1531,9 +1605,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             onMouseDown={e => e.preventDefault()}
             onClick={() => applyFormat('numbered')}
             className="h-full flex items-center justify-center active:opacity-50"
-            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+            style={{ width: 48, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
           >
-            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
               <text x="2" y="10" fontSize="9" fill="currentColor" stroke="none">1.</text>
               <text x="2" y="21" fontSize="9" fill="currentColor" stroke="none">2.</text>
               <path strokeLinecap="round" d="M11 6.5h9M11 17.5h9" />
@@ -1545,9 +1619,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             onMouseDown={e => e.preventDefault()}
             onClick={() => applyFormat('header')}
             className="h-full flex items-center justify-center active:opacity-50"
-            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+            style={{ width: 48, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
           >
-            <span className="text-[19px] font-semibold leading-none">H</span>
+            <span className="text-[20px] font-semibold leading-none">H</span>
           </button>
           <button
             type="button"
@@ -1555,9 +1629,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             onMouseDown={e => e.preventDefault()}
             onClick={() => applyFormat('bold')}
             className="h-full flex items-center justify-center active:opacity-50"
-            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+            style={{ width: 48, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
           >
-            <span className="text-[18px] font-bold leading-none">B</span>
+            <span className="text-[19px] font-bold leading-none">B</span>
           </button>
           <button
             type="button"
@@ -1565,9 +1639,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             onMouseDown={e => e.preventDefault()}
             onClick={() => applyFormat('italic')}
             className="h-full flex items-center justify-center active:opacity-50"
-            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation', fontFamily: 'Georgia, serif' }}
+            style={{ width: 48, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation', fontFamily: 'Georgia, serif' }}
           >
-            <span className="text-[19px] italic leading-none">I</span>
+            <span className="text-[20px] italic leading-none">I</span>
           </button>
           <button
             type="button"
@@ -1575,9 +1649,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             onMouseDown={e => e.preventDefault()}
             onClick={() => applyFormat('link')}
             className="h-full flex items-center justify-center active:opacity-50"
-            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+            style={{ width: 48, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
           >
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path strokeLinecap="round" strokeLinejoin="round"
                 d="M10.5 13.5a4.2 4.2 0 006 0l3.2-3.2a4.24 4.24 0 00-6-6l-1.6 1.6" />
               <path strokeLinecap="round" strokeLinejoin="round"
@@ -1590,9 +1664,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             onMouseDown={e => e.preventDefault()}
             onClick={() => applyFormat('strike')}
             className="h-full flex items-center justify-center active:opacity-50"
-            style={{ width: 44, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
+            style={{ width: 48, flexShrink: 0, color: 'var(--text-2)', touchAction: 'manipulation' }}
           >
-            <span className="text-[18px] font-medium leading-none line-through">S</span>
+            <span className="text-[19px] font-medium leading-none line-through">S</span>
           </button>
           </div>
           {/* Dismiss circle — a separate piece, not part of the pill. Not a
@@ -1616,7 +1690,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
               touchAction: 'manipulation',
             }}
           >
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6">
               <rect x="3" y="3.5" width="18" height="11.5" rx="2" />
               <path strokeLinecap="round" strokeWidth="1.9"
                 d="M6.2 6.8h.01M9.4 6.8h.01M12.6 6.8h.01M15.8 6.8h.01M6.2 9.4h.01M9.4 9.4h.01M12.6 9.4h.01M15.8 9.4h.01M17.8 6.8h.01M17.8 9.4h.01M8 12.2h8" />
