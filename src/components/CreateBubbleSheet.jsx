@@ -161,9 +161,18 @@ export default function CreateBubbleSheet({
               <BubbleColorPicker value={color} onChange={setColor} />
             </div>
 
+            {/* Both buttons keep the input's focus on press (mousedown
+                preventDefault — the same guard the format bar uses). The
+                suggestion list is inline and lives only while the input is
+                focused: a press that blurred the input unmounted the list,
+                the button row jumped up by the list's height between press
+                and release, and the click landed on whatever had moved under
+                the finger — so Cancel (and Create) needed a second tap
+                whenever suggestions were showing. */}
             <div className="flex gap-3 mt-5 shrink-0">
               <button
                 onClick={onCancel}
+                onMouseDown={e => e.preventDefault()}
                 className="flex-1 py-2.5 rounded-xl text-sm font-medium transition-colors"
                 style={{ background: 'var(--hover)', color: 'var(--text-2)' }}
               >
@@ -171,6 +180,7 @@ export default function CreateBubbleSheet({
               </button>
               <button
                 onClick={submit}
+                onMouseDown={e => e.preventDefault()}
                 disabled={!canCreate}
                 className="flex-1 py-2.5 rounded-xl text-sm font-medium text-white transition-colors bg-indigo-600 enabled:hover:bg-indigo-500 disabled:opacity-40 disabled:cursor-not-allowed"
               >
