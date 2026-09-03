@@ -1,5 +1,6 @@
 import { useState, useRef, forwardRef } from 'react'
 import { useTheme } from '../contexts/ThemeContext'
+import { usePreferences } from '../contexts/PreferencesContext'
 import { rimStyle, BUTTON_RIM } from './BubbleVisualization'
 import { useDismissOnOutside } from '../lib/dismiss'
 
@@ -7,9 +8,12 @@ import { useDismissOnOutside } from '../lib/dismiss'
 //
 // Tap expands the button into two icon tiles — Note in the button's own spot,
 // Bubble directly above it — and hold makes a bubble directly, skipping the
-// expansion. Lives in its own file for one reason worth stating: it needs the
-// theme, and App renders the ThemeProvider itself, so a useTheme() call up there
-// would read the context default rather than the live value.
+// expansion. With the Quick Create preference on, the tap makes a note directly
+// instead and there is no expansion; the hold is unchanged in both modes. Lives
+// in its own file for one reason worth stating: it needs the theme (and now the
+// preference), and App renders both providers itself, so a hook call up there
+// would read the context default rather than the live value — which is also
+// why the tap reports the mode to App's onClick instead of App reading it.
 //
 // The expansion renders HERE, not in a separate component, so the tiles share
 // the button's exact size, radius, fill, rim, and shadow by construction — the
@@ -167,6 +171,7 @@ export default function CreateButton({
   onCollapse,
 }) {
   const { theme } = useTheme()
+  const { quickCreate } = usePreferences()
   const isLight = theme === 'light'
   const [pressed, setPressed] = useState(false)
   const noteTileRef = useRef(null)
@@ -182,7 +187,7 @@ export default function CreateButton({
   return (
     <>
       <button
-        onClick={onClick}
+        onClick={() => onClick(quickCreate)}
         onPointerDown={e => { setPressed(true); onPointerDown?.(e) }}
         onPointerUp={e => { release(); onPointerUp?.(e) }}
         onPointerLeave={e => { release(); onPointerCancel?.(e) }}
@@ -199,7 +204,9 @@ export default function CreateButton({
             ? `transform ${holdMs}ms cubic-bezier(0.4, 0, 0.6, 1)`
             : 'transform 0.18s ease-out',
         }}
-        aria-label="Create note or bubble. Hold to create a bubble directly."
+        aria-label={quickCreate
+          ? 'Create note. Hold to create a bubble.'
+          : 'Create note or bubble. Hold to create a bubble directly.'}
       >
         <span
           style={{

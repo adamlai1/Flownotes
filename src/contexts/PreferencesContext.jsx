@@ -25,6 +25,14 @@ const STORAGE_KEY = 'mindmap-note-size'
 // sign-out's clearAllProjectData: like theme and note size, it's a device
 // setting, not user context.
 const BOUNCY_KEY = 'mindmap-bouncy'
+
+// Quick create: '1' = the + button's tap creates a note directly and only the
+// hold creates a bubble (the original gesture model); absent / '0' = the tap
+// expands into Note and Bubble tiles, hold still creates a bubble. Same
+// storage story as bouncy: localStorage-only, never synced, not swept on
+// sign-out — how one device's button responds is a device habit, and the
+// cloud row would need a new column (user_preferences.sql) to carry it.
+const QUICK_CREATE_KEY = 'mindmap-quick-create'
 const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)'
 
 // Same breakpoint the layout uses everywhere (isDesktop in App, NoteEditor…).
@@ -61,6 +69,7 @@ export const NOTE_SIZE_SCALE = { small: 1, medium: 1.3, large: 1.6 }
 const PreferencesContext = createContext({
   noteSize: 'medium', setNoteSize: () => {},
   bouncy: true, setBouncy: () => {},
+  quickCreate: false, setQuickCreate: () => {},
 })
 
 export function PreferencesProvider({ children }) {
@@ -132,6 +141,12 @@ export function PreferencesProvider({ children }) {
 
   const bouncy = bouncyPref === null ? !reducedMotion : bouncyPref === '1'
 
+  const [quickCreate, setQuickCreateState] = useState(() => localStorage.getItem(QUICK_CREATE_KEY) === '1')
+  function setQuickCreate(value) {
+    setQuickCreateState(!!value)
+    localStorage.setItem(QUICK_CREATE_KEY, value ? '1' : '0')
+  }
+
   function setNoteSize(size) {
     if (!NOTE_SIZES.includes(size)) return
     // Live read, not the deviceClass state — a resize this instant still lands
@@ -150,7 +165,7 @@ export function PreferencesProvider({ children }) {
   const noteSize = sizes[deviceClass] ?? 'medium'
 
   return (
-    <PreferencesContext.Provider value={{ noteSize, setNoteSize, bouncy, setBouncy }}>
+    <PreferencesContext.Provider value={{ noteSize, setNoteSize, bouncy, setBouncy, quickCreate, setQuickCreate }}>
       {children}
     </PreferencesContext.Provider>
   )

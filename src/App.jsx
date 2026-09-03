@@ -2212,6 +2212,11 @@ export default function App() {
   // sheet. The ref resets on the next press. Keyboard activation reaches onClick
   // with no pointer sequence at all, which is why the expansion path lives there
   // and not in onPointerUp.
+  //
+  // `quick` is the Quick Create preference, reported by the button itself (it
+  // sits inside the PreferencesProvider; App renders that provider, so it can't
+  // read the hook): on, the tap creates a note directly and nothing expands —
+  // the original gesture model. The hold path above is untouched by the mode.
   function beginPlusHold() {
     heldFiredRef.current = false
     setPlusHeld(true)
@@ -2236,9 +2241,10 @@ export default function App() {
     setPlusHeld(false)
   }
 
-  function handlePlusClick() {
+  function handlePlusClick(quick) {
     if (heldFiredRef.current) { heldFiredRef.current = false; return }
-    setPlusExpanded(true)
+    if (quick) handleCreateNote()
+    else setPlusExpanded(true)
   }
 
   // ── Keyboard shortcuts (desktop) ─────────────────────────────────────────────
@@ -2414,7 +2420,8 @@ export default function App() {
         </div>
       </div>
 
-      {/* Floating Create Button — tap expands into Note/Bubble tiles, hold for a bubble */}
+      {/* Floating Create Button — tap expands into Note/Bubble tiles (or, with
+          Quick Create on, makes a note directly), hold for a bubble */}
       <CreateButton
         held={plusHeld}
         holdMs={LONG_PRESS_MS}

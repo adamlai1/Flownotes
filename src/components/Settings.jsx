@@ -120,7 +120,7 @@ function openExternal(url) {
 
 export default function Settings({ onClose, zIndex = 50, project, onImportNotes, onSignOut, onDeleteAccount, shareImport, onShareImportDone }) {
   const { theme, toggleTheme } = useTheme()
-  const { noteSize, setNoteSize, bouncy, setBouncy } = usePreferences()
+  const { noteSize, setNoteSize, bouncy, setBouncy, quickCreate, setQuickCreate } = usePreferences()
   const { user, guestMode, signInWithGoogle, signInWithApple } = useAuth()
   const {
     hasPassword,
@@ -330,6 +330,33 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes,
                 >
                   <span style={{
                     position: 'absolute', top: 3, left: bouncy ? 23 : 3,
+                    width: 24, height: 24, borderRadius: '50%',
+                    background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.25)',
+                    transition: 'left 0.2s ease',
+                  }} />
+                </button>
+              </div>
+              <Divider />
+              <div className="flex items-center justify-between px-4 py-3.5">
+                <div>
+                  <p className="text-sm font-medium" style={{ color: 'var(--text)' }}>Quick Create</p>
+                  <p className="text-xs mt-0.5" style={{ color: 'var(--text-muted)' }}>
+                    {quickCreate ? 'Tap + for a note, hold for a bubble' : 'Tap + to choose a note or a bubble'}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setQuickCreate(!quickCreate)}
+                  className="relative flex-shrink-0 focus:outline-none"
+                  style={{
+                    width: 50, height: 30, borderRadius: 15,
+                    background: quickCreate ? '#34C759' : 'rgba(255,255,255,0.18)',
+                    border: quickCreate ? 'none' : '1px solid rgba(255,255,255,0.12)',
+                    transition: 'background 0.2s ease',
+                  }}
+                  aria-label="Toggle quick create"
+                >
+                  <span style={{
+                    position: 'absolute', top: 3, left: quickCreate ? 23 : 3,
                     width: 24, height: 24, borderRadius: '50%',
                     background: '#fff', boxShadow: '0 1px 4px rgba(0,0,0,0.25)',
                     transition: 'left 0.2s ease',
