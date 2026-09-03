@@ -2,38 +2,51 @@ import { createContext, useContext, useState, useEffect, useRef } from 'react'
 import { useAuth } from './AuthContext'
 import { loadPreferencesFromCloud, savePreferencesToCloud } from '../lib/syncService'
 
-// Display preferences that aren't the theme (kept separate from ThemeContext so each
-// context stays single-concern). Currently just the bubble-view note card size.
+// Display and gesture preferences that aren't the theme (kept separate from
+// ThemeContext so each context stays single-concern): bubble-view note card
+// size, bouncy animations, and quick create.
 //
-// localStorage is the always-available copy (instant load, guest mode, offline). When
-// the user is signed in, the cloud row (user_preferences) is the source of truth: it's
-// pulled on sign-in and written on every change, mirroring how notes sync.
+// All three follow one storage story. localStorage is the always-available copy
+// (instant load, guest mode, offline). When the user is signed in, the cloud row
+// (user_preferences) is the source of truth: it's pulled on sign-in and written
+// on every change, mirroring how notes sync. Per field, the merge on sign-in is:
+// a cloud value wins and is written locally; a cloud NULL ("no choice on this
+// account yet") is seeded from the device's local explicit choice, if any.
 //
-// The size is kept PER DEVICE CLASS (desktop / mobile), classified by the same
+// Sign-out deliberately does NOT sweep any of these (clearAllProjectData leaves
+// them alone): they're device habits as much as account settings, and a
+// signed-out device keeps behaving the way it last did. The one guard that
+// makes that safe is the OWNER STAMP (PREFS_OWNER_KEY): the id of the account
+// the local values were last synced with. When a DIFFERENT account signs in on
+// the device, that residue is not seeded into the new account's row and is
+// replaced by the new account's values (or reset to the default where the new
+// account has no choice yet). Without it, one account's habits would leak into
+// the next account's cloud row through the seed-on-NULL rule.
+//
+// Note size is kept PER DEVICE CLASS (desktop / mobile), classified by the same
 // 768px breakpoint the responsive layout uses, so a laptop and a phone each keep
 // their own size and the preference follows the user across devices of the same
-// class. Both values live together: as JSON under the existing localStorage key,
-// and as JSON in the existing note_size column.
+// class. Both values live together: as JSON under the localStorage key, and as
+// JSON in the note_size column.
 
 const NOTE_SIZES = ['small', 'medium', 'large']
 const STORAGE_KEY = 'mindmap-note-size'
 
 // Bouncy animations: '1' / '0' once the user has touched the toggle; absent =
 // untouched, and the default then follows the system reduced-motion setting
-// live. Deliberately localStorage-only (a device preference, never synced —
-// two devices can want different motion), and deliberately NOT swept by
-// sign-out's clearAllProjectData: like theme and note size, it's a device
-// setting, not user context.
+// live. Cloud column `bouncy` (supabase/preferences_sync.sql): true / false /
+// NULL with the same three meanings.
 const BOUNCY_KEY = 'mindmap-bouncy'
+const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)'
 
 // Quick create: '1' = the + button's tap creates a note directly and only the
-// hold creates a bubble (the original gesture model); absent / '0' = the tap
-// expands into Note and Bubble tiles, hold still creates a bubble. Same
-// storage story as bouncy: localStorage-only, never synced, not swept on
-// sign-out — how one device's button responds is a device habit, and the
-// cloud row would need a new column (user_preferences.sql) to carry it.
+// hold creates a bubble (the original gesture model); '0' / absent = the tap
+// expands into Note and Bubble tiles, hold still creates a bubble. Cloud column
+// `quick_create`: true / false / NULL. Default off.
 const QUICK_CREATE_KEY = 'mindmap-quick-create'
-const REDUCED_MOTION_QUERY = '(prefers-reduced-motion: reduce)'
+
+// The account the local values were last synced with (see header).
+const PREFS_OWNER_KEY = 'mindmap-prefs-owner'
 
 // Same breakpoint the layout uses everywhere (isDesktop in App, NoteEditor…).
 const DEVICE_CLASS_QUERY = '(min-width: 768px)'
@@ -61,6 +74,20 @@ function parseSizes(raw, legacyClass) {
   }
 }
 
+// A local tri-state flag: '1' / '0' / null (untouched).
+function readFlag(key) {
+  const v = localStorage.getItem(key)
+  return v === '1' || v === '0' ? v : null
+}
+function writeFlag(key, v) {
+  if (v === null) localStorage.removeItem(key)
+  else localStorage.setItem(key, v)
+}
+// Cloud boolean → local flag. Anything but a real boolean is "no choice".
+function flagFromCloud(v) {
+  return v === true ? '1' : v === false ? '0' : null
+}
+
 // Multiplier applied to a note card's base radius in the bubble view. 'small' is the
 // original size; the layout's spacing/packing all key off each item's radius, so these
 // scale the whole card (and its text) proportionally.
@@ -78,9 +105,12 @@ export function PreferencesProvider({ children }) {
   const [sizes, setSizes] = useState(() =>
     parseSizes(localStorage.getItem(STORAGE_KEY), currentDeviceClass())
   )
-  // Always-current copy for callbacks that shouldn't capture stale state.
-  const sizesRef = useRef(sizes)
-  sizesRef.current = sizes
+  // 'null' = untouched (follow the system), '1' / '0' = explicit choice.
+  const [bouncyPref, setBouncyPref] = useState(() => readFlag(BOUNCY_KEY))
+  const [quickCreatePref, setQuickCreatePref] = useState(() => readFlag(QUICK_CREATE_KEY))
+  // Always-current copies for the sign-in merge, which must not capture stale state.
+  const localRef = useRef(null)
+  localRef.current = { sizes, bouncyPref, quickCreatePref }
   // Avoid re-pulling for a user we've already synced this session.
   const syncedUserRef = useRef(null)
 
@@ -93,11 +123,15 @@ export function PreferencesProvider({ children }) {
     return () => mq.removeEventListener('change', handler)
   }, [])
 
-  // On sign-in, adopt the cloud values (source of truth), per class: a class the
-  // cloud row doesn't cover keeps the local value rather than being reset. The
-  // merged pair is pushed back up so the row always carries both classes. If the
-  // user has no row yet, seed it with the current local values. Failures (table
-  // missing, offline) are ignored — the local copy keeps working.
+  // On sign-in, adopt the cloud values (source of truth), per field: a cloud
+  // value is taken; a cloud NULL keeps the local choice and pushes it up, so the
+  // row ends up carrying everything the device knew — UNLESS the local values
+  // belong to a different account (owner stamp), in which case they're dropped
+  // rather than seeded, and the new account's NULLs reset the device to the
+  // default. Failures (table or column missing, offline) are ignored — the
+  // local copy keeps working, and a later change retries the write. The load
+  // itself degrades per column (see syncService), so an un-migrated account
+  // still syncs note_size while the two flags stay device-local.
   useEffect(() => {
     if (!user) { syncedUserRef.current = null; return }
     if (syncedUserRef.current === user.id) return
@@ -107,20 +141,48 @@ export function PreferencesProvider({ children }) {
       try {
         const remote = await loadPreferencesFromCloud(user.id)
         if (cancelled) return
+        const owner = localStorage.getItem(PREFS_OWNER_KEY)
+        const foreign = !!owner && owner !== user.id
+        const local = foreign
+          ? { sizes: {}, bouncyPref: null, quickCreatePref: null }
+          : localRef.current
+        const push = {}
+
+        // Note size — per class.
         const remoteSizes = parseSizes(remote?.note_size, currentDeviceClass())
-        const merged = { ...sizesRef.current, ...remoteSizes }
-        setSizes(merged)
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
-        await savePreferencesToCloud(user.id, { note_size: JSON.stringify(merged) })
+        const mergedSizes = { ...local.sizes, ...remoteSizes }
+        setSizes(mergedSizes)
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(mergedSizes))
+        push.note_size = JSON.stringify(mergedSizes)
+
+        // Bouncy / quick create — tri-state flags. Only the columns the row
+        // actually carried are considered synced; an un-migrated row simply
+        // has no such key (see selectPreferences), and the local flag stands.
+        const flags = [
+          ['bouncy', BOUNCY_KEY, local.bouncyPref, setBouncyPref],
+          ['quick_create', QUICK_CREATE_KEY, local.quickCreatePref, setQuickCreatePref],
+        ]
+        for (const [col, key, localFlag, set] of flags) {
+          const cloud = flagFromCloud(remote?.[col])
+          if (cloud !== null) {
+            set(cloud)
+            writeFlag(key, cloud)
+          } else {
+            set(localFlag)
+            writeFlag(key, localFlag)
+            if (localFlag !== null) push[col] = localFlag === '1'
+          }
+        }
+
+        localStorage.setItem(PREFS_OWNER_KEY, user.id)
+        await savePreferencesToCloud(user.id, push)
       } catch {
-        // Keep the local value; a later change will retry the write.
+        // Keep the local values; a later change will retry the write.
       }
     })()
     return () => { cancelled = true }
   }, [user])
 
-  // 'null' = untouched (follow the system), '1' / '0' = explicit choice.
-  const [bouncyPref, setBouncyPref] = useState(() => localStorage.getItem(BOUNCY_KEY))
   const [reducedMotion, setReducedMotion] = useState(
     () => window.matchMedia(REDUCED_MOTION_QUERY).matches
   )
@@ -133,28 +195,32 @@ export function PreferencesProvider({ children }) {
     return () => mq.removeEventListener('change', handler)
   }, [])
 
-  function setBouncy(value) {
+  // Write a flag locally and, signed in, to the cloud (stamping the owner so a
+  // later sign-in by someone else knows whose choice this was).
+  function setFlag(key, col, set, value) {
     const v = value ? '1' : '0'
-    setBouncyPref(v)
-    localStorage.setItem(BOUNCY_KEY, v)
+    set(v)
+    writeFlag(key, v)
+    if (user) {
+      localStorage.setItem(PREFS_OWNER_KEY, user.id)
+      savePreferencesToCloud(user.id, { [col]: !!value }).catch(() => {})
+    }
   }
+  function setBouncy(value) { setFlag(BOUNCY_KEY, 'bouncy', setBouncyPref, value) }
+  function setQuickCreate(value) { setFlag(QUICK_CREATE_KEY, 'quick_create', setQuickCreatePref, value) }
 
   const bouncy = bouncyPref === null ? !reducedMotion : bouncyPref === '1'
-
-  const [quickCreate, setQuickCreateState] = useState(() => localStorage.getItem(QUICK_CREATE_KEY) === '1')
-  function setQuickCreate(value) {
-    setQuickCreateState(!!value)
-    localStorage.setItem(QUICK_CREATE_KEY, value ? '1' : '0')
-  }
+  const quickCreate = quickCreatePref === '1'
 
   function setNoteSize(size) {
     if (!NOTE_SIZES.includes(size)) return
     // Live read, not the deviceClass state — a resize this instant still lands
     // the choice on the class the window is actually in.
-    const merged = { ...sizesRef.current, [currentDeviceClass()]: size }
+    const merged = { ...localRef.current.sizes, [currentDeviceClass()]: size }
     setSizes(merged)
     localStorage.setItem(STORAGE_KEY, JSON.stringify(merged))
     if (user) {
+      localStorage.setItem(PREFS_OWNER_KEY, user.id)
       savePreferencesToCloud(user.id, { note_size: JSON.stringify(merged) }).catch(() => {})
     }
   }

@@ -282,28 +282,43 @@ export async function saveCustomTagsToCloud(userId, customTagColors, customTagId
 // Stored in the user_preferences table (see supabase/user_preferences.sql). Both
 // helpers stay quiet if the table doesn't exist yet or the network is down — the
 // caller falls back to the localStorage copy.
+//
+// bouncy and quick_create (supabase/preferences_sync.sql) are OPTIONAL columns:
+// on an account that hasn't run that migration the load retries without any
+// column the server reports missing, and the save strips it (via upsertRows),
+// each with a warning — so note_size and the lock fields keep syncing and the
+// two new preferences simply stay device-local until the migration is run.
+const PREFERENCE_COLUMNS = ['note_size', 'lock_hash', 'lock_salt', 'bouncy', 'quick_create']
+const OPTIONAL_PREFERENCE_COLUMNS = ['bouncy', 'quick_create']
 
-export async function loadPreferencesFromCloud(userId) {
+async function selectPreferences(userId, columns) {
   const { data, error } = await supabase
     .from('user_preferences')
-    .select('note_size, lock_hash, lock_salt')
+    .select(columns.join(', '))
     .eq('user_id', userId)
     .maybeSingle()
-  if (error) throw error
-  return data // null when the user has no saved row yet
+  if (!error) return data // null when the user has no saved row yet
+  const missing = columns.find(col =>
+    OPTIONAL_PREFERENCE_COLUMNS.includes(col) && isMissingColumnError(error, col))
+  if (missing) {
+    console.warn(`[sync] user_preferences.${missing} missing — run supabase/preferences_sync.sql. That preference stays device-local until then.`)
+    return selectPreferences(userId, columns.filter(col => col !== missing))
+  }
+  throw error
 }
 
-// Only the keys present in `prefs` are written, so the lock columns and note_size
-// can be updated independently without clobbering each other.
+export async function loadPreferencesFromCloud(userId) {
+  return selectPreferences(userId, PREFERENCE_COLUMNS)
+}
+
+// Only the keys present in `prefs` are written, so every column can be updated
+// independently without clobbering the others.
 export async function savePreferencesToCloud(userId, prefs) {
   const row = { user_id: userId, updated_at: new Date().toISOString() }
-  if (prefs.note_size !== undefined) row.note_size = prefs.note_size
-  if (prefs.lock_hash !== undefined) row.lock_hash = prefs.lock_hash
-  if (prefs.lock_salt !== undefined) row.lock_salt = prefs.lock_salt
-  const { error } = await supabase
-    .from('user_preferences')
-    .upsert(row, { onConflict: 'user_id' })
-  if (error) throw error
+  for (const col of PREFERENCE_COLUMNS) {
+    if (prefs[col] !== undefined) row[col] = prefs[col]
+  }
+  await upsertRows('user_preferences', [row], 'user_id', OPTIONAL_PREFERENCE_COLUMNS)
 }
 
 // ── Feedback ──────────────────────────────────────────────────────────────────
