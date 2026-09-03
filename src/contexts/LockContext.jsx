@@ -49,14 +49,22 @@ export function LockProvider({ children, onRemoveAllLocks }) {
   // On sign-in the cloud row is the source of truth (same rule as preferences), so
   // a password set on one device applies on the others. Failures are ignored — the
   // local copy keeps working offline / when the columns aren't migrated yet.
+  //
+  // Keyed on the user ID, not the user object — see PreferencesContext for the
+  // race: on web the auth provider sets the user twice at page load with two
+  // object identities, the second cancelled this run's load and the guard
+  // blocked the re-run, so the cloud password was never pulled on web (and the
+  // local one never seeded an empty row from there). A cancelled run hands the
+  // guard back so a genuine re-run reloads.
+  const userId = user?.id ?? null
   useEffect(() => {
-    if (!user) { syncedUserRef.current = null; return }
-    if (syncedUserRef.current === user.id) return
-    syncedUserRef.current = user.id
+    if (!userId) { syncedUserRef.current = null; return }
+    if (syncedUserRef.current === userId) return
+    syncedUserRef.current = userId
     let cancelled = false
     ;(async () => {
       try {
-        const remote = await loadPreferencesFromCloud(user.id)
+        const remote = await loadPreferencesFromCloud(userId)
         if (cancelled) return
         if (remote?.lock_hash && remote?.lock_salt) {
           const record = { hash: remote.lock_hash, salt: remote.lock_salt }
@@ -64,7 +72,7 @@ export function LockProvider({ children, onRemoveAllLocks }) {
           saveLockRecord(record)
         } else if (lockRecordRef.current) {
           // No cloud password yet — seed it from this device's.
-          await savePreferencesToCloud(user.id, {
+          await savePreferencesToCloud(userId, {
             lock_hash: lockRecordRef.current.hash,
             lock_salt: lockRecordRef.current.salt,
           })
@@ -73,8 +81,11 @@ export function LockProvider({ children, onRemoveAllLocks }) {
         // Keep the local record.
       }
     })()
-    return () => { cancelled = true }
-  }, [user])
+    return () => {
+      cancelled = true
+      if (syncedUserRef.current === userId) syncedUserRef.current = null
+    }
+  }, [userId])
 
   const persistRecord = useCallback((record) => {
     setLockRecord(record)

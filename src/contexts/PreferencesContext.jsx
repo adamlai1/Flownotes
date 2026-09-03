@@ -123,6 +123,17 @@ export function PreferencesProvider({ children }) {
     return () => mq.removeEventListener('change', handler)
   }, [])
 
+  // Keyed on the user ID, not the user object. On web the auth provider sets
+  // the user twice at page load (getSession, then supabase-js's INITIAL_SESSION
+  // event) — same account, two object identities. Keyed on the object, the
+  // second update cancelled the first run's in-flight load and the guard then
+  // blocked the re-run, so the cloud row was never applied on web. The same
+  // race hit StrictMode's double-invoke on the dev server. Two changes: the
+  // ID dependency means a same-account identity change is not a re-run at
+  // all, and a cancelled run hands the guard back so a genuine re-run reloads
+  // instead of being blocked.
+  const userId = user?.id ?? null
+
   // On sign-in, adopt the cloud values (source of truth), per field: a cloud
   // value is taken; a cloud NULL keeps the local choice and pushes it up, so the
   // row ends up carrying everything the device knew — UNLESS the local values
@@ -133,16 +144,16 @@ export function PreferencesProvider({ children }) {
   // itself degrades per column (see syncService), so an un-migrated account
   // still syncs note_size while the two flags stay device-local.
   useEffect(() => {
-    if (!user) { syncedUserRef.current = null; return }
-    if (syncedUserRef.current === user.id) return
-    syncedUserRef.current = user.id
+    if (!userId) { syncedUserRef.current = null; return }
+    if (syncedUserRef.current === userId) return
+    syncedUserRef.current = userId
     let cancelled = false
     ;(async () => {
       try {
-        const remote = await loadPreferencesFromCloud(user.id)
+        const remote = await loadPreferencesFromCloud(userId)
         if (cancelled) return
         const owner = localStorage.getItem(PREFS_OWNER_KEY)
-        const foreign = !!owner && owner !== user.id
+        const foreign = !!owner && owner !== userId
         const local = foreign
           ? { sizes: {}, bouncyPref: null, quickCreatePref: null }
           : localRef.current
@@ -174,14 +185,19 @@ export function PreferencesProvider({ children }) {
           }
         }
 
-        localStorage.setItem(PREFS_OWNER_KEY, user.id)
-        await savePreferencesToCloud(user.id, push)
+        localStorage.setItem(PREFS_OWNER_KEY, userId)
+        await savePreferencesToCloud(userId, push)
       } catch {
         // Keep the local values; a later change will retry the write.
       }
     })()
-    return () => { cancelled = true }
-  }, [user])
+    return () => {
+      cancelled = true
+      // A cancelled run never applied anything: give the guard back so the
+      // next run for this user loads instead of assuming it was done.
+      if (syncedUserRef.current === userId) syncedUserRef.current = null
+    }
+  }, [userId])
 
   const [reducedMotion, setReducedMotion] = useState(
     () => window.matchMedia(REDUCED_MOTION_QUERY).matches
