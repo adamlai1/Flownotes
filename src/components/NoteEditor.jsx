@@ -52,10 +52,15 @@ const FORMAT_BAR_GAP = 8
 const LINE_H = 26
 // The bounded box's bottom sits this far above the format bar's top edge.
 const BOX_BAR_MARGIN = 8
-// A tapped line's BOTTOM must end up at least this far above the format
-// bar's top edge — one full line of margin — or the box scrolls by exactly
-// the shortfall; already-clear lines are left alone.
+// Tap clearance has two different edges on purpose. The NO-OP test is the
+// bounded box's own bottom edge: a line whose bottom is inside the box is
+// visible above the keyboard and bar, and must not move at all. Only a
+// line that is NOT inside the box scrolls — and then it lands with a full
+// line of margin above the bar, not merely at the edge.
 const TAP_LINE_MARGIN = LINE_H
+// Duration of the tap-clearance scroll. Smooth for the tap; a keystroke
+// during it cancels and snaps (the user is ahead of the animation).
+const TAP_SCROLL_MS = 260
 // The format bar's top edge in layout-viewport coordinates.
 const barTopOf = g => g.bottom - FORMAT_BAR_GAP - FORMAT_BAR_H
 
@@ -402,6 +407,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   }, [text])
 
   function handleTextChange(e) {
+    // Typing during the tap-clearance scroll: the user is ahead of the
+    // animation — snap to its target and let iOS's native caret reveal
+    // take over from here.
+    cancelTapScroll(true)
     const val = e.target.value
     const t = checklistInputTransform(text, val, e.target.selectionStart)
     pushHistory(text)
@@ -636,6 +645,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     const hitRect = hit?.getBoundingClientRect()
     if (hitRect && hitRect.height > 0) lineBottom = Math.max(hitRect.bottom, e.clientY)
     pendingTapLineRef.current = readTop != null ? lineBottom - readTop : null
+    tapDiagRef.current = { outerScrollAtTap: scrollAreaRef.current?.scrollTop, lineBottomAtTap: lineBottom }
     setBodyMode('edit')
   }
 
@@ -1152,6 +1162,40 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // The tapped line's bottom as a content coordinate, captured at the read
   // tap; consumed one-shot by the bounding conversion.
   const pendingTapLineRef = useRef(null)
+  // TEMPORARY diagnostic for the tap-clearance geometry: numbers captured at
+  // the tap, printed by the conversion-in effect. Read in Safari Web
+  // Inspector attached to the app. Remove once the geometry is confirmed.
+  const tapDiagRef = useRef(null)
+  // The in-flight tap-clearance animation: { raf, el, target }. Cancelled
+  // (and snapped to target) by a keystroke or blur; cancelled on unmount.
+  const tapScrollAnimRef = useRef(null)
+  const cancelTapScroll = useCallback((snap) => {
+    const a = tapScrollAnimRef.current
+    if (!a) return
+    tapScrollAnimRef.current = null
+    cancelAnimationFrame(a.raf)
+    if (snap) a.el.scrollTop = a.target
+  }, [])
+  useEffect(() => () => cancelTapScroll(false), [cancelTapScroll])
+  // Animate the box's inner scroll to `target` (ease-out). Writes scrollTop
+  // directly every frame — no smooth-scroll API, so a cancel is
+  // deterministic and the snap lands exactly on target.
+  const animateTapScroll = (el, target) => {
+    cancelTapScroll(false)
+    const from = el.scrollTop
+    if (Math.abs(target - from) < 1) { el.scrollTop = target; return }
+    const t0 = performance.now()
+    const step = (now) => {
+      const a = tapScrollAnimRef.current
+      if (!a) return
+      const p = Math.min(1, (now - t0) / TAP_SCROLL_MS)
+      const eased = 1 - Math.pow(1 - p, 3)
+      el.scrollTop = from + (target - from) * eased
+      if (p < 1) a.raf = requestAnimationFrame(step)
+      else tapScrollAnimRef.current = null
+    }
+    tapScrollAnimRef.current = { raf: requestAnimationFrame(step), el, target }
+  }
 
   // Native keyboard state, mirrored from the plugin for the EDITOR's lifetime
   // rather than per edit session. Registering inside the edit-session effect
@@ -1298,13 +1342,26 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     const elTopBefore = boundElTopRef.current
     if (elTopBefore == null) return
     boundElTopRef.current = null
-    el.scrollTop = Math.max(0, el.getBoundingClientRect().top - elTopBefore)
+    const rect0 = el.getBoundingClientRect()
+    el.scrollTop = Math.max(0, rect0.top - elTopBefore)
     const line = pendingTapLineRef.current
     pendingTapLineRef.current = null
+    const diag = tapDiagRef.current
+    tapDiagRef.current = null
     if (line != null) {
-      const lineBottomNow = el.getBoundingClientRect().top + line - el.scrollTop
-      const limit = bar - TAP_LINE_MARGIN
-      if (lineBottomNow > limit) el.scrollTop += lineBottomNow - limit
+      const rect = el.getBoundingClientRect()
+      const lineBottomNow = rect.top + line - el.scrollTop
+      // No-op test against the box's VISIBLE bottom edge; landing target a
+      // full line above the bar. Smooth from here — keystroke/blur snap.
+      const boxBottom = rect.bottom
+      const target = bar - TAP_LINE_MARGIN
+      const needs = lineBottomNow > boxBottom
+      console.debug('[tap-scroll]', {
+        ...diag, elTopBefore, elTopNow: rect.top, boxScrollTop: el.scrollTop,
+        outerScrollNow: outer.scrollTop, lineBottomNow, boxBottom, bar, boundBoxH,
+        scrollBy: needs ? lineBottomNow - target : 0,
+      })
+      if (needs) animateTapScroll(el, el.scrollTop + (lineBottomNow - target))
     }
   }, [boundBoxH]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1792,7 +1849,16 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             and the stats row lands at the very bottom of the screen. */}
         <div
           className="px-5 md:px-10 pt-4 md:pt-8 flex flex-col"
-          style={{ minHeight: '100%', paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))' }}
+          // Half a screen of scrollable space below the last line (Apple
+          // Notes) in the unbounded page. NOT while the keyboard is up: the
+          // bounded box carries its own room, and the outer must collapse
+          // to exactly its own height then (see the box-height effect).
+          style={{
+            minHeight: '100%',
+            paddingBottom: boundBoxH != null
+              ? 'calc(0.75rem + env(safe-area-inset-bottom))'
+              : 'calc(50vh + env(safe-area-inset-bottom))',
+          }}
         >
           {bodyMode === 'edit' ? (
             <textarea
@@ -1800,6 +1866,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
               value={text}
               onChange={handleTextChange}
               onBlur={e => {
+                cancelTapScroll(true)
                 // One-shot capture for the return trip: the bounded box's
                 // inner depth converts back to page scroll after the swap.
                 restoreScrollRef.current = boundBoxH != null
@@ -1823,10 +1890,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                 ? {
                     height: boundBoxH, flex: 'none', overflowY: 'auto',
                     overscrollBehavior: 'contain',
-                    // Room below the last line: without it the inner scroll
-                    // clamps and the note's final lines can never be brought
-                    // TAP_LINE_MARGIN clear of the bar.
-                    paddingBottom: LINE_H,
+                    // Apple Notes-style room below the last line: half the
+                    // visible box, so any line — the last included — can be
+                    // scrolled well clear of the keyboard and bar.
+                    paddingBottom: Math.round(boundBoxH / 2),
                     userSelect: 'text', WebkitUserSelect: 'text',
                   }
                 : { ...BODY_BOX_STYLE, overflowY: 'hidden' }}
