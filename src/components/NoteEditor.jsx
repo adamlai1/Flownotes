@@ -68,13 +68,27 @@ const SHEET_TREE_OVERFLOW_RATIO = 2
 // to compete with content, visible enough to be found. ONE knob — tune this
 // on device rather than hunting through styles.
 const SHEET_CHEVRON_OPACITY = 0.5
-// The chevron's inset from the panel's right edge at its closed rest. The
-// note's scroll area paints an 8px scrollbar (index.css, app-wide rules)
-// along that same edge; a chevron flush to the edge sat on top of the
-// thumb. Equal to the scrollbar width, so the tab hugs the scrollbar lane
-// instead of covering it. chevronX compensates, so the OPEN position (the
-// grip straddling the sheet's left border) is unchanged.
-const CHEVRON_EDGE_INSET = 8
+// Scroll-linked chevron fade (touch only). The chevron fades on GESTURE
+// scrolling only — a finger down, or momentum that followed one; the page's
+// own programmatic scroll writes (parking the metadata row on open, the
+// return trip after edit, snaps) never fade it, so every non-scroll
+// transition shows it at once. It returns CHEVRON_RESTORE_DELAY_MS after the
+// last gesture scroll event — the moment the scroll stopped, however it
+// stopped — a conservative value that outlasts the native indicator's
+// longest fade, so after a scroll the two are never up together. A tap in
+// the right-edge region restores it at once (a restore, never an open); if
+// momentum is still running then, the two overlap briefly — accepted, rather
+// than inferring the indicator's fade from anything. One delay, everywhere.
+const CHEVRON_FADE_MS = 180
+const CHEVRON_RESTORE_DELAY_MS = 1000
+// The chevron's inset from the panel's right edge at its closed rest. 0:
+// flush to the edge, in the scroll indicator's lane. The indicator is an iOS
+// overlay that reserves no layout space, and the scroll-linked fade keeps
+// the two from being up at the same time (the chevron hides while the
+// indicator shows and returns after it has gone). chevronX compensates for
+// whatever this is, so the OPEN position (the grip straddling the sheet's
+// left border) never moves with it.
+const CHEVRON_EDGE_INSET = 0
 
 // Height of the formatting pill floating above the software keyboard, and
 // the visible gap between the pill and the keyboard's top edge.
@@ -153,6 +167,36 @@ function caretOffsetFromPoint(x, y, container) {
     while ((n = w.nextNode())) lastText = n
     if (!lastText) return lineStart + linePrefix // empty line (renders a <br>)
     return rawTextOffset(hit, lineStart, linePrefix, lastText, lastText.nodeValue.length)
+  }
+  return rawOffsetFromDomPosition(node, nodeOffset, container)
+}
+
+// Raw offset of a line's END (its last rendered character), or its content
+// start when it renders no text (an empty line's <br>).
+function lineEndOffset(lineEl) {
+  const lineStart = +lineEl.dataset.lineStart
+  const prefix = +(lineEl.dataset.prefixLen || 0)
+  let lastText = null
+  const w = document.createTreeWalker(lineEl, NodeFilter.SHOW_TEXT)
+  let n
+  while ((n = w.nextNode())) lastText = n
+  if (!lastText) return lineStart + prefix
+  return rawTextOffset(lineEl, lineStart, prefix, lastText, lastText.nodeValue.length)
+}
+
+// Map a DOM position (node, offset) inside the read box to a raw text offset —
+// the same walk a tap point resolves through, also used for the two endpoints
+// of a DOM selection (desktop drag-select → edit with the selection). A
+// position ON the container (child index — what a selection that spans whole
+// lines reports) resolves to the boundary between lines: index 0 is the first
+// line's start, otherwise the END of the line before the index.
+function rawOffsetFromDomPosition(node, nodeOffset, container) {
+  if (!container || !node || !container.contains(node)) return null
+  if (node === container) {
+    const kids = [...container.children]
+    if (!kids.length) return null
+    if (nodeOffset <= 0) return +kids[0].dataset.lineStart + +(kids[0].dataset.prefixLen || 0)
+    return lineEndOffset(kids[Math.min(nodeOffset, kids.length) - 1])
   }
   const base = node.nodeType === Node.TEXT_NODE ? node.parentElement : node
   const lineEl = base?.closest?.('[data-line-start]')
@@ -367,6 +411,54 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   const tagInputRef = useRef(null)
   const saveTimerRef = useRef(null)
   const swipeRef = useRef({ active: false, startX: 0, currentX: 0 })
+  // ── Claiming a touch for the sheet ──────────────────────────────────────
+  // React's touch listeners are PASSIVE, so nothing in the JSX handlers can
+  // stop iOS from also scrolling the note under a sheet drag. The claim is
+  // made in a native, non-passive touchmove listener on the panel (below):
+  // it makes the direction decision for the two sheet gestures on the first
+  // qualifying move — while the event is still cancelable, i.e. before the
+  // scroll view has taken the touch — and once a gesture is recognized as
+  // the sheet's, every subsequent touchmove of that touch is preventDefault-ed,
+  // so the scroller never receives it. touchClaimRef names the owner for the
+  // current touch: 'open' (edge drag opening the sheet), 'sheet' (drag on the
+  // open sheet), 'strip' (any touch on the note strip while the sheet is
+  // open — the note is not scrollable then at all). The JSX handlers only
+  // TRACK (sheetX follows the finger); they no longer decide.
+  const panelRef = useRef(null)
+  const touchClaimRef = useRef(null)
+  useEffect(() => {
+    const el = panelRef.current
+    if (!el) return
+    const onMove = (e) => {
+      const t = e.touches[0]
+      if (!t) return
+      const os = sheetOpenSwipeRef.current
+      if (os.active && !os.decided) {
+        const odx = t.clientX - os.startX
+        const ody = t.clientY - os.startY
+        if (Math.abs(odx) >= 6 || Math.abs(ody) >= 6) {
+          os.decided = true
+          // Horizontal-and-leftward engages the sheet — only while the touch
+          // can still be claimed; a vertical drag from the edge stays a scroll.
+          os.engaged = e.cancelable && Math.abs(odx) > Math.abs(ody) && odx < 0
+          if (os.engaged) touchClaimRef.current = 'open'
+        }
+      }
+      const d = sheetDragRef.current
+      if (d.active && !d.decided) {
+        const dx = t.clientX - d.startX
+        const dy = t.clientY - d.startY
+        if (Math.abs(dx) >= 6 || Math.abs(dy) >= 6) {
+          d.decided = true
+          d.horizontal = e.cancelable && Math.abs(dx) > Math.abs(dy)
+          if (d.horizontal) touchClaimRef.current = 'sheet'
+        }
+      }
+      if (touchClaimRef.current && e.cancelable) e.preventDefault()
+    }
+    el.addEventListener('touchmove', onMove, { passive: false })
+    return () => el.removeEventListener('touchmove', onMove)
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   const scheduleSave = useCallback((content, bubbleIds, tagsArr, connsArr) => {
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current)
@@ -696,15 +788,37 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   }
 
   function handleReadTap(e) {
-    // Preserve text selection: dragging out a selection ends in a click on
-    // this container; entering edit there would destroy the selection.
-    const sel = window.getSelection?.()
-    if (sel && !sel.isCollapsed) return
     const container = readRef.current
+    const sel = window.getSelection?.()
+    if (sel && !sel.isCollapsed) {
+      // A selection exists. Touch: it came from a long-press, and it stays a
+      // read-mode selection (copy / look up / share) — entering edit would
+      // put a keyboard between the user and the callout. Fine pointer: it
+      // came from a drag, whose mouseup ends in this click; the drag means
+      // "edit here", so enter edit with the same range selected. Endpoints
+      // outside the read box (a drag that ran into the chrome) are left
+      // alone rather than guessed.
+      if (!hasFinePointer) return
+      const r = sel.rangeCount ? sel.getRangeAt(0) : null
+      if (!r) return
+      const a = rawOffsetFromDomPosition(r.startContainer, r.startOffset, container)
+      const b = rawOffsetFromDomPosition(r.endContainer, r.endOffset, container)
+      if (a == null || b == null || a === b) return
+      pendingCaretRef.current = { start: Math.min(a, b), end: Math.max(a, b) }
+      pendingTapLineRef.current = null
+      pinColumn()
+      setBodyMode('edit')
+      return
+    }
     // Append is the default: a tap that resolves to nothing (the empty space
     // past the last line) edits at the END of the note, never nowhere.
     const resolved = caretOffsetFromPoint(e.clientX, e.clientY, container)
     pendingCaretRef.current = resolved != null ? resolved : text.length
+    // An append (tap past the text — the read box's blank space or the tail
+    // element) is about the LAST LINE, not the tap point: the clearance
+    // check below should bring that line clear of the bar, not a point
+    // half a screen under it.
+    const lastLine = resolved == null ? container?.lastElementChild : null
     // Where the tapped LINE's bottom sits, as a coordinate inside the note
     // content (relative to the read box's top; the textarea replaces it
     // metric-identically, so the coordinate survives the swap and any
@@ -715,9 +829,13 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     // paragraph); fall back to half a line below the touch point.
     const readTop = container ? container.getBoundingClientRect().top : null
     let lineBottom = e.clientY + LINE_H / 2
-    const hit = document.caretRangeFromPoint?.(e.clientX, e.clientY)
-    const hitRect = hit?.getBoundingClientRect()
-    if (hitRect && hitRect.height > 0) lineBottom = Math.max(hitRect.bottom, e.clientY)
+    if (lastLine) {
+      lineBottom = lastLine.getBoundingClientRect().bottom
+    } else {
+      const hit = document.caretRangeFromPoint?.(e.clientX, e.clientY)
+      const hitRect = hit?.getBoundingClientRect()
+      if (hitRect && hitRect.height > 0) lineBottom = Math.max(hitRect.bottom, e.clientY)
+    }
     pendingTapLineRef.current = readTop != null ? lineBottom - readTop : null
     // Before the swap, while the read box still holds the column's height:
     // the textarea that replaces it is laid out at its auto height first
@@ -739,8 +857,11 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     const el = bodyRef.current
     if (!el) return
     el.focus({ preventScroll: true })
-    const pos = Math.max(0, Math.min(off, el.value.length))
-    try { el.setSelectionRange(pos, pos) } catch { /* not all inputs support it */ }
+    // A number places the caret; { start, end } carries a selection across
+    // (desktop drag-select in read mode).
+    const range = typeof off === 'number' ? { start: off, end: off } : off
+    const clamp = v => Math.max(0, Math.min(v, el.value.length))
+    try { el.setSelectionRange(clamp(range.start), clamp(range.end)) } catch { /* not all inputs support it */ }
   }, [bodyMode])
 
   // Membership invariants: a note always has at least one selection. The
@@ -925,6 +1046,58 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     if (bodyMode === 'read' && !everRead) setEverRead(true)
   }, [bodyMode, everRead])
   const chevronVisible = !sheetOpen && (bodyMode === 'read' || !everRead)
+  // The note column's horizontal padding (className px-5 / md:px-10 on the
+  // column) — the bounded box extends under the right half of it so its
+  // scroll indicator sits at the screen edge like the page's. Same 768px
+  // breakpoint as the md: variant.
+  const bodyPadX = isDesktop ? 40 : 20
+  // Scroll-linked fade (see CHEVRON_FADE_MS / CHEVRON_RESTORE_DELAY_MS).
+  // State drives the opacity; the ref mirrors it for the touch handlers,
+  // which must not close over a stale render. A tap that restores the
+  // chevron is flagged so the click it produces is swallowed rather than
+  // opening the sheet.
+  //
+  // The restore timer is armed by TOUCH END (and by momentum scroll events
+  // after the finger is up, which re-arm it so it fires once the momentum
+  // ends) — never by a scroll event while a finger is down. So a held,
+  // motionless finger keeps the chevron hidden, in step with the native
+  // scroll indicator, and the delay counts from the lift.
+  const [chevronFaded, setChevronFaded] = useState(false)
+  const chevronFadedRef = useRef(false)
+  const chevronRestoreTimerRef = useRef(null)
+  const chevronRestoreTapRef = useRef(false)
+  // True from a touch's start until the scroll it started has settled (or at
+  // touch end, if it never scrolled): the gate that makes momentum count as
+  // gesture scrolling and programmatic writes not. A tap-restore closes it
+  // too, so momentum still running after the tap doesn't re-fade the chevron.
+  const gestureScrollRef = useRef(false)
+  const restoreChevron = () => {
+    clearTimeout(chevronRestoreTimerRef.current)
+    gestureScrollRef.current = false
+    if (chevronFadedRef.current) { chevronFadedRef.current = false; setChevronFaded(false) }
+  }
+  // Leaving edit mode is not a scroll: show the chevron at once (its
+  // visibility rule already keeps it hidden while editing).
+  useEffect(() => {
+    if (bodyMode === 'read') restoreChevron()
+  }, [bodyMode]) // eslint-disable-line react-hooks/exhaustive-deps
+  const armChevronRestore = () => {
+    clearTimeout(chevronRestoreTimerRef.current)
+    if (chevronFadedRef.current) {
+      chevronRestoreTimerRef.current = setTimeout(restoreChevron, CHEVRON_RESTORE_DELAY_MS)
+    }
+  }
+  // Restore by tap: immediate. No attempt to halt momentum or wait out the
+  // indicator's fade — a brief overlap there is accepted.
+  const restoreChevronByTap = restoreChevron
+  const fadeChevronForScroll = () => {
+    if (hasFinePointer) return // desktop overlay: as-is
+    if (!touchActiveRef.current && !gestureScrollRef.current) return // programmatic: not scrolling
+    if (!chevronFadedRef.current) { chevronFadedRef.current = true; setChevronFaded(true) }
+    if (touchActiveRef.current) clearTimeout(chevronRestoreTimerRef.current) // finger down: stay hidden
+    else armChevronRestore() // momentum: re-arm from each event, fires after the last
+  }
+  useEffect(() => () => clearTimeout(chevronRestoreTimerRef.current), [])
   const sheetWidth = () =>
     Math.min((isDesktop ? Math.min(820, window.innerWidth) : window.innerWidth) - 56, 380)
   const sheetClosedX = () => sheetWidth() + 12
@@ -1002,6 +1175,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   const chevronDragRef = useRef({ active: false, moved: false, fromOpen: false, startX: 0, startBase: 0 })
   function handleChevronTouchStart(e) {
     e.stopPropagation()
+    // A touch on the faded chevron brings it back at once; that touch's click
+    // is then a restore, not an open (see onClick). Drags still track.
+    chevronRestoreTapRef.current = chevronFadedRef.current
+    if (chevronFadedRef.current) restoreChevronByTap()
     const t = e.touches[0]
     const base = sheetX.get()
     chevronDragRef.current = {
@@ -1049,17 +1226,12 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     sheetDragRef.current = { active: true, decided: false, horizontal: false, startX: t.clientX, startY: t.clientY }
   }
   function handleSheetTouchMove(e) {
+    // Direction is decided in the native claim listener (so a horizontal
+    // drag owns the touch and the tree box under it cannot scroll); this
+    // only tracks.
     const d = sheetDragRef.current
-    if (!d.active) return
-    const t = e.touches[0]
-    const dx = t.clientX - d.startX
-    const dy = t.clientY - d.startY
-    if (!d.decided) {
-      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return
-      d.decided = true
-      d.horizontal = Math.abs(dx) > Math.abs(dy)
-    }
-    if (d.horizontal) sheetX.set(Math.max(0, dx))
+    if (!d.active || !d.horizontal) return
+    sheetX.set(Math.max(0, e.touches[0].clientX - d.startX))
   }
   function handleSheetTouchEnd() {
     const d = sheetDragRef.current
@@ -1107,6 +1279,12 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     const touch = e.touches[0]
     tapAwayRef.current = { startX: touch.clientX, startY: touch.clientY, moved: false }
     touchActiveRef.current = true
+    gestureScrollRef.current = true
+    // Sheet open: a touch on the note strip belongs to closing the sheet
+    // (the dismiss hook closes it on the press); the note must not scroll
+    // from the same touch — claim it now, before any move.
+    touchClaimRef.current =
+      sheetOpen && !docked && !(sheetRef.current?.contains(e.target)) ? 'strip' : null
     // Both edge gestures are disarmed while the details sheet is open: a
     // rightward swipe then belongs to the sheet (drag-to-close, handled on
     // the sheet itself), never to swipe-back — the conflict is resolved by
@@ -1131,17 +1309,12 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     if (Math.abs(touch.clientX - tap.startX) > 10 || Math.abs(touch.clientY - tap.startY) > 10) {
       tap.moved = true
     }
+    // Decision (engaged or not) is made in the native claim listener; this
+    // only tracks the finger 1:1 once engaged.
     const os = sheetOpenSwipeRef.current
-    if (os.active) {
+    if (os.active && os.engaged) {
       const odx = touch.clientX - os.startX
-      const ody = touch.clientY - os.startY
-      if (!os.decided && (Math.abs(odx) >= 8 || Math.abs(ody) >= 8)) {
-        os.decided = true
-        // Horizontal-and-leftward engages the sheet; a vertical drag from
-        // the edge stays a scroll.
-        os.engaged = Math.abs(odx) > Math.abs(ody) && odx < 0
-      }
-      if (os.engaged) sheetX.set(Math.min(sheetClosedX(), Math.max(0, sheetClosedX() + odx)))
+      sheetX.set(Math.min(sheetClosedX(), Math.max(0, sheetClosedX() + odx)))
     }
     if (!swipeRef.current.active) return
     const dx = e.touches[0].clientX - swipeRef.current.startX
@@ -1154,7 +1327,18 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
 
   function handleTouchEnd(e) {
     touchActiveRef.current = false
+    touchClaimRef.current = null
+    // A touch that never scrolled leaves nothing to settle; one that did
+    // keeps the gate open for its momentum until the restore.
+    if (!chevronFadedRef.current) gestureScrollRef.current = false
     scheduleMetaSnap()
+    // A tap (no movement) in the right-edge region while the chevron is faded
+    // restores it — the chevron's own touches never reach here (they stop
+    // propagation), so this covers the rest of the edge strip. Same 28px
+    // zone the sheet-open swipe arms in.
+    const tap = tapAwayRef.current
+    if (!tap.moved && chevronFadedRef.current && tap.startX > window.innerWidth - 28) restoreChevronByTap()
+    else armChevronRestore() // finger up: the restore delay counts from here
     // touchend's target is the element the touch STARTED on, so a tap that
     // begins in the textarea can never blur it, and one that begins outside
     // always can — checkbox/link/button taps included, which then still run
@@ -1328,6 +1512,33 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     el.scrollTop -= el.clientHeight / 2 - lh / 2
   }
 
+  // Parking the metadata row on keyboard-up. The row is a read-mode
+  // affordance; while editing it is always parked (page scrollTop = its
+  // height), so it can never sit above the box like a sticky header. If it
+  // was showing at the moment of keyboard-up, parking moves the text up by
+  // its height — done as a short slide during the keyboard's own rise
+  // rather than an instant jump. parkOuterRef carries the target from the
+  // box-height effect to the conversion-in effect, which starts the slide
+  // after the box has rendered (the box is sized for the PARKED position).
+  const parkOuterRef = useRef(null)
+  const parkAnimRef = useRef(null)
+  const cancelParkSlide = () => {
+    if (parkAnimRef.current) { cancelAnimationFrame(parkAnimRef.current); parkAnimRef.current = null }
+  }
+  useEffect(() => cancelParkSlide, [])
+  const slideOuterTo = (outer, target) => {
+    cancelParkSlide()
+    const from = outer.scrollTop
+    if (Math.abs(target - from) < 1) { outer.scrollTop = target; return }
+    const t0 = performance.now()
+    const step = (now) => {
+      const p = Math.min(1, (now - t0) / TAP_SCROLL_MS)
+      outer.scrollTop = from + (target - from) * (1 - Math.pow(1 - p, 3))
+      parkAnimRef.current = p < 1 ? requestAnimationFrame(step) : null
+    }
+    parkAnimRef.current = requestAnimationFrame(step)
+  }
+
   const animateTapScroll = (el, target) => {
     cancelTapScroll(false)
     const from = el.scrollTop
@@ -1449,13 +1660,17 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     // the metadata row and the column's top padding, and once the box
     // renders the outer's content is shorter than the area, so its
     // scrollTop clamps — to the metadata row's height at most (the column's
-    // minHeight of 100% guarantees exactly that much range). Predict where
-    // the textarea's top lands after that clamp and size the box from
-    // there; the conversion-in effect measures the real landing and
-    // corrects once if the prediction was off.
+    // minHeight of 100% guarantees exactly that much range). The row is
+    // PARKED while editing (see parkOuterRef): the outer ends at the row's
+    // height whether it clamps down to it (scrolled past the row) or slides
+    // up to it (row showing). Either way the textarea's top lands at its
+    // current top plus (scroll - row height); size the box for that. The
+    // conversion-in effect measures the real landing and corrects once if
+    // the prediction was off.
+    const rowH = metaRowRef.current?.offsetHeight || 0
     const scroll = outer.scrollTop
-    const clamped = Math.min(scroll, metaRowRef.current?.offsetHeight || 0)
-    const boxTop = el.getBoundingClientRect().top + (scroll - clamped)
+    const boxTop = el.getBoundingClientRect().top + (scroll - rowH)
+    parkOuterRef.current = scroll < rowH ? rowH : null
     setBoundBoxH(Math.max(120, barTopOf(kbGeom) - BOX_BAR_MARGIN - boxTop))
   }, [kbGeom.up, kbGeom.bottom, bodyMode])
 
@@ -1481,11 +1696,20 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     const outer = scrollAreaRef.current
     if (!el || !outer) return
     const bar = barTopOf(kbGeom)
-    const want = Math.max(120, bar - BOX_BAR_MARGIN - el.getBoundingClientRect().top)
+    // A pending park slide hasn't moved the page yet: every viewport
+    // measurement below is taken pre-slide and shifted by parkDelta to the
+    // parked position the box was sized for.
+    const park = parkOuterRef.current
+    const parkDelta = park != null ? Math.max(0, park - outer.scrollTop) : 0
+    const want = Math.max(120, bar - BOX_BAR_MARGIN - (el.getBoundingClientRect().top - parkDelta))
     if (Math.abs(want - boundBoxH) > 1 && !boundPass2Ref.current) {
       boundPass2Ref.current = true
       setBoundBoxH(want)
       return
+    }
+    if (park != null) {
+      parkOuterRef.current = null
+      slideOuterTo(outer, park)
     }
     const elTopBefore = boundElTopRef.current
     if (elTopBefore == null) return
@@ -1496,10 +1720,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     pendingTapLineRef.current = null
     if (line != null) {
       const rect = el.getBoundingClientRect()
-      const lineBottomNow = rect.top + line - el.scrollTop
+      const lineBottomNow = rect.top + line - el.scrollTop - parkDelta
       // No-op test against the box's VISIBLE bottom edge; landing target a
       // full line above the bar. Smooth from here — keystroke/blur snap.
-      const boxBottom = rect.bottom
+      const boxBottom = rect.bottom - parkDelta
       const target = bar - TAP_LINE_MARGIN
       const needs = lineBottomNow > boxBottom
       if (needs) animateTapScroll(el, el.scrollTop + (lineBottomNow - target))
@@ -1803,6 +2027,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       onMouseDown={isDesktop ? (e => { if (e.target === e.currentTarget) handleClose() }) : undefined}
     >
     <div
+      ref={panelRef}
       // The column is minmax(0, 1fr), NOT the implicit auto: grid items
       // default to min-width auto, so the header's intrinsic width (a nowrap
       // title) would otherwise blow the track — and with it every row —
@@ -1841,7 +2066,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       onTouchEnd={handleTouchEnd}
       onTouchCancel={() => {
         touchActiveRef.current = false
+        touchClaimRef.current = null
+        if (!chevronFadedRef.current) gestureScrollRef.current = false
         scheduleMetaSnap()
+        armChevronRestore()
       }}
     >
       {/* ── Header — grid row 1 (auto height, never scrolls) ─────────────────── */}
@@ -1987,8 +2215,21 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           boundBoxH), so nothing below it needs reserving. */}
       <div
         ref={scrollAreaRef}
-        style={{ gridColumn: 1, overflowY: 'auto', minHeight: 0, WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
-        onScroll={scheduleMetaSnap}
+        // While the bounded box is up the page is not the scroller — the box
+        // is — and its only range is the parked metadata row, which stays
+        // parked (see the box-height effect). overflow: hidden, NOT a hidden
+        // ::-webkit-scrollbar: toggling the scrollbar's existence made WebKit
+        // rebuild it, and the rebuilt indicator came back a different tone
+        // after every edit round trip. Programmatic scrollTop writes (the
+        // park slide, the exit conversion) work on overflow: hidden.
+        style={{
+          gridColumn: 1, minHeight: 0, WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain',
+          // Also not scrollable while the overlay sheet is open: a drag on
+          // the visible note strip closes the sheet and stops there; the
+          // note scrolls again on the next touch, after it has closed.
+          overflowY: (bodyMode === 'edit' && boundBoxH != null) || (sheetOpen && !docked) ? 'hidden' : 'auto',
+        }}
+        onScroll={() => { scheduleMetaSnap(); fadeChevronForScroll() }}
       >
 
         {/* Metadata row, touch: the first row of the scroll content; the
@@ -2025,11 +2266,17 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           // 60vh, not 50: the box lets the last line reach the box's
           // midpoint, roughly 40% down the screen; the page must allow the
           // same depth or the exit clamps by the difference.
+          //
+          // The tail is an ELEMENT (below), not column padding: padding sits
+          // outside the read box, so a tap in it reached nothing — the read
+          // box's flex-grow only ever filled what was left above the padding,
+          // ~175px on a phone — and "tap below the last line to append"
+          // silently stopped working the day the tail landed. The tail
+          // element forwards its taps to the read handler, which resolves
+          // an off-text point to the end of the note.
           style={{
             minHeight: '100%',
-            paddingBottom: hasFinePointer || (bodyMode === 'edit' && boundBoxH != null)
-              ? 'calc(0.75rem + env(safe-area-inset-bottom))'
-              : 'calc(60vh + env(safe-area-inset-bottom))',
+            paddingBottom: 'calc(0.75rem + env(safe-area-inset-bottom))',
           }}
         >
           {bodyMode === 'edit' ? (
@@ -2041,6 +2288,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
               onScroll={handleBodyScroll}
               onBlur={e => {
                 cancelTapScroll(true)
+                cancelParkSlide()
                 // One-shot capture for the return trip: the bounded box's
                 // inner depth converts back to page scroll after the swap.
                 restoreScrollRef.current = boundBoxH != null
@@ -2068,6 +2316,17 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                     // visible box, so any line — the last included — can be
                     // scrolled well clear of the keyboard and bar.
                     paddingBottom: Math.round(boundBoxH / 2),
+                    // The box's scroll indicator must sit where the page's
+                    // does — at the screen edge — not at the text's right
+                    // edge inside the column padding. Extend the box under
+                    // the column's right padding and give the same amount
+                    // back as the box's own padding: the text keeps its
+                    // exact wrap width (metric parity with read mode), and
+                    // the indicator moves to the edge. BODY_PAD_X mirrors the
+                    // column's px-5 / md:px-10.
+                    width: `calc(100% + ${bodyPadX}px)`,
+                    marginRight: -bodyPadX,
+                    paddingRight: bodyPadX,
                     userSelect: 'text', WebkitUserSelect: 'text',
                   }
                 : { ...BODY_BOX_STYLE, overflowY: 'hidden' }}
@@ -2087,7 +2346,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             <div
               ref={readRef}
               onClick={handleReadTap}
-              className="w-full text-[16px] md:text-[17px] text-gray-200 outline-none bg-transparent leading-relaxed whitespace-pre-wrap break-words"
+              className="note-read-body w-full text-[16px] md:text-[17px] text-gray-200 outline-none bg-transparent leading-relaxed whitespace-pre-wrap break-words"
               style={{ ...BODY_BOX_STYLE, cursor: 'text' }}
             >
               {text ? renderReadBody(text) : <span className="text-gray-700">Start writing…</span>}
@@ -2098,6 +2357,16 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
               row lands at the bottom of the screen; on a long note it
               follows the last line. */}
           {hasFinePointer && <div className="pt-2">{metaRow}</div>}
+          {/* Scrollable tail below the last line (see the column comment):
+              part of the tap target in read mode — a tap here appends. In
+              edit mode it's inert, so the existing tap-away handling blurs
+              as before. */}
+          {!hasFinePointer && !(bodyMode === 'edit' && boundBoxH != null) && (
+            <div
+              onClick={bodyMode === 'read' ? handleReadTap : undefined}
+              style={{ height: '60vh', flexShrink: 0, cursor: 'text' }}
+            />
+          )}
         </div>
 
       </div>
@@ -2118,6 +2387,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         aria-label={sheetOpen ? 'Close note details' : 'Note details'}
         onClick={() => {
           if (chevronDragRef.current.moved) return // that gesture was a drag
+          if (chevronRestoreTapRef.current) { chevronRestoreTapRef.current = false; return } // restored it — that's all
           sheetOpen ? settleSheet(false) : openSheet()
         }}
         onTouchStart={handleChevronTouchStart}
@@ -2131,9 +2401,11 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           background: 'var(--surface-2)', border: '1px solid var(--border)',
           borderRadius: 10, color: 'var(--text-muted)',
           touchAction: 'none',
-          opacity: sheetOpen ? 1 : chevronVisible ? SHEET_CHEVRON_OPACITY : 0,
+          // Faded by scrolling → 0, but it keeps its pointer events so the
+          // restoring tap lands on it.
+          opacity: sheetOpen ? 1 : chevronVisible && !chevronFaded ? SHEET_CHEVRON_OPACITY : 0,
           pointerEvents: sheetOpen || chevronVisible ? 'auto' : 'none',
-          transition: 'opacity 0.18s ease',
+          transition: `opacity ${CHEVRON_FADE_MS}ms ease`,
         }}
       >
         <svg

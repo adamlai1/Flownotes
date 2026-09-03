@@ -224,6 +224,20 @@ body.bubble-dragging * {
   -webkit-user-select: none !important;
 }
 
+/* ── Note read-mode body: selectable ───────────────────────────────────────── */
+/* The base layer makes EVERY element unselectable (`* { user-select: none }`).
+   The read box sets user-select: text inline, but that reaches only the box
+   itself: its text lives in child line blocks and inline spans, each matched
+   by `*` directly, and a direct match beats inheritance — so a long-press
+   (iOS) or a drag (desktop) had nothing selectable to start on. Unlayered,
+   so it wins over the base layer; scoped to the read body, so the rest of
+   the app keeps the global default (canvas drag, bubble labels, chrome). */
+.note-read-body,
+.note-read-body * {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 /* ── Note read-mode widgets ────────────────────────────────────────────────── */
 /* Numbered-list marker. The digits render as PSEUDO-ELEMENT content, never a
    DOM text node: tap-to-edit's caret math walks the line's text nodes, and the
