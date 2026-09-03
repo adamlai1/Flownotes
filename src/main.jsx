@@ -5,6 +5,7 @@ import App from './App.jsx'
 import { AuthProvider } from './contexts/AuthContext.jsx'
 import { initNativeAuth, AUTH_ERROR_EVENT } from './lib/nativeAuth.js'
 import { initShareImport } from './lib/shareImport.js'
+import { initVoiceCapture } from './lib/voiceCapture.js'
 
 // Register the OAuth callback listener before React mounts — iOS can deliver the
 // appUrlOpen event before any component's effects run.
@@ -14,6 +15,11 @@ initNativeAuth()
 // mailbox check runs before any component mounts, and shareImport.js buffers
 // the payload until App.jsx subscribes.
 initShareImport()
+
+// Siri voice captures: the queue listeners go up now, but nothing is drained
+// until App.jsx subscribes a consumer — see voiceCapture.js for why draining
+// waits on the login gate and the initial sync.
+initVoiceCapture()
 
 // ── Global error overlay ──────────────────────────────────────────────────────
 

@@ -22,6 +22,14 @@
 	<string>$(MARKETING_VERSION)</string>
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- Names Siri accepts wherever an App Shortcut phrase says
+	     \(.applicationName) — this is how "Add a note to Nubble" resolves
+	     while CFBundleDisplayName stays as it is. Inert until an
+	     AppShortcutsProvider is compiled in (ios/VOICE_CAPTURE_SETUP.md). -->
+	<key>INAlternativeAppNames</key>
+	<array>
+		<string>Nubble</string>
+	</array>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

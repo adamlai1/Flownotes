@@ -1,5 +1,6 @@
 import UIKit
 import Capacitor
+import os.log
 
 // ── Share Extension hand-off ─────────────────────────────────────────────────
 //
@@ -47,12 +48,193 @@ public class SharedImportPlugin: CAPPlugin, CAPBridgedPlugin {
     }
 }
 
+// ── Siri voice capture queue ────────────────────────────────────────────────
+//
+// The App Group hand-off for AddNoteIntent (ios/voice-capture-src, compiled
+// into the App target by ios/VOICE_CAPTURE_SETUP.md). Lives here, in an
+// existing compile source, for the same reason SharedImportPlugin does: main
+// builds without any "add files" step. Until the intent is added this code is
+// registered but idle — the queue directory is simply never written to.
+//
+// Why NOT the share extension's single UserDefaults key: Siri can queue
+// several notes before Nubble is next opened, and two processes doing
+// read-modify-write on one key have no lock — the app clearing the key right
+// after an intent appended to it would drop a capture. So each capture is its
+// own file in the App Group container, written atomically. Nothing ever
+// rewrites another capture's data, and the app deletes a file only after the
+// web layer confirms that capture is in localStorage (list, persist, ack).
+// Captures never expire: unlike a share, a spoken note is a committed note.
+
+enum VoiceCaptureError: LocalizedError {
+    case appGroupUnavailable
+    case readbackFailed
+
+    // Siri reads this aloud when the intent throws.
+    var errorDescription: String? {
+        switch self {
+        case .appGroupUnavailable: return "Nubble couldn't save the note. Please open Nubble and try again."
+        case .readbackFailed:      return "Nubble couldn't verify the note was saved. Please try again."
+        }
+    }
+}
+
+enum VoiceCaptureStore {
+    // Must match the App Group on the App target (App.entitlements). Same
+    // group the share extension uses — no second group.
+    static let appGroupId = "group.com.adamlai.flownotes"
+    private static let folderName = "VoiceCaptures"
+
+    /// Posted (main queue) after every successful append. VoiceCapturePlugin
+    /// relays it to the web layer so a note spoken while Nubble is open lands
+    /// immediately instead of on the next foreground.
+    static let addedNotification = Notification.Name("com.adamlai.flownotes.VoiceCaptureStore.added")
+
+    private static let log = Logger(subsystem: "com.adamlai.flownotes.VoiceCapture", category: "store")
+
+    /// The queue directory inside the App Group container, created on first
+    /// use by whichever process gets there first — the intent can run before
+    /// the app has ever launched.
+    static func directory() throws -> URL {
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId) else {
+            log.error("App Group unavailable — capability missing on the App target?")
+            throw VoiceCaptureError.appGroupUnavailable
+        }
+        let dir = container.appendingPathComponent(folderName, isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    /// Writes one capture as its own file and returns its id. The id becomes
+    /// the note's id on the web side, which is what makes re-delivery after a
+    /// crash between persist and ack idempotent.
+    @discardableResult
+    static func append(_ text: String) throws -> String {
+        let dir = try directory()
+        let id = UUID().uuidString.lowercased()
+        // ts in milliseconds so JS can feed it straight to new Date(): the
+        // note is stamped with when it was SPOKEN, not when Nubble next opened.
+        let payload: [String: Any] = [
+            "id": id,
+            "text": text,
+            "ts": Date().timeIntervalSince1970 * 1000,
+        ]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        let url = dir.appendingPathComponent(id).appendingPathExtension("json")
+        try data.write(to: url, options: .atomic)
+
+        // Read-back verification, same discipline as the share extension:
+        // prove the bytes landed before Siri says "Added".
+        guard let back = try? Data(contentsOf: url), back == data else {
+            log.error("capture \(id, privacy: .public) FAILED readback")
+            try? FileManager.default.removeItem(at: url)
+            throw VoiceCaptureError.readbackFailed
+        }
+        let depth = (try? FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".json") }.count) ?? -1
+        log.notice("capture \(id, privacy: .public) written: \(text.count, privacy: .public) chars, queue depth \(depth, privacy: .public)")
+
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(name: addedNotification, object: nil)
+        }
+        return id
+    }
+
+    /// Every queued capture, oldest first. Read-only: nothing is removed
+    /// until ack(). A file that fails to parse is logged and skipped, never
+    /// deleted — it stays for a human to look at rather than vanishing.
+    static func list() -> [[String: Any]] {
+        guard let dir = try? directory() else { return [] }
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
+        var captures: [[String: Any]] = []
+        for name in names where name.hasSuffix(".json") {
+            let url = dir.appendingPathComponent(name)
+            guard let data = try? Data(contentsOf: url),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let id = obj["id"] as? String, !id.isEmpty,
+                  let text = obj["text"] as? String, !text.isEmpty
+            else {
+                log.error("skipping unreadable capture file \(name, privacy: .public)")
+                continue
+            }
+            captures.append([
+                "id": id,
+                "text": text,
+                "ts": (obj["ts"] as? Double) ?? 0,
+            ])
+        }
+        captures.sort { (($0["ts"] as? Double) ?? 0) < (($1["ts"] as? Double) ?? 0) }
+        if !captures.isEmpty {
+            log.notice("list: \(captures.count, privacy: .public) queued capture(s)")
+        }
+        return captures
+    }
+
+    /// Deletes exactly the given captures. Called by the web layer only after
+    /// those notes are in localStorage.
+    static func ack(_ ids: [String]) {
+        guard !ids.isEmpty, let dir = try? directory() else { return }
+        var removed = 0
+        for id in ids {
+            // ids are our own lowercase UUID strings; refuse anything else so a
+            // malformed id can never resolve to a path outside the queue.
+            guard id.range(of: "^[0-9a-f-]{36}$", options: .regularExpression) != nil else { continue }
+            let url = dir.appendingPathComponent(id).appendingPathExtension("json")
+            if (try? FileManager.default.removeItem(at: url)) != nil { removed += 1 }
+        }
+        log.notice("ack: removed \(removed, privacy: .public) of \(ids.count, privacy: .public)")
+    }
+}
+
+/// Bridge between VoiceCaptureStore and the web layer (src/lib/voiceCapture.js).
+///
+/// Two-phase on purpose — list() is read-only and ack(ids) deletes — so a
+/// crash between reading a capture and saving it as a note loses nothing:
+/// the capture is simply listed again next time. (Contrast SharedImportPlugin's
+/// read-and-clear take(), which is fine for a single share the user is
+/// standing there waiting for, and not fine for a queue of spoken notes.)
+@objc(VoiceCapturePlugin)
+public class VoiceCapturePlugin: CAPPlugin, CAPBridgedPlugin {
+    public let identifier = "VoiceCapturePlugin"
+    public let jsName = "VoiceCapture"
+    public let pluginMethods: [CAPPluginMethod] = [
+        CAPPluginMethod(name: "list", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "ack", returnType: CAPPluginReturnPromise),
+    ]
+
+    private var observer: NSObjectProtocol?
+
+    public override func load() {
+        // Same-process signal: the intent ran inside an already-running Nubble.
+        // retainUntilConsumed so an event fired before the web layer has
+        // subscribed (cold start) is delivered once it does.
+        observer = NotificationCenter.default.addObserver(
+            forName: VoiceCaptureStore.addedNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.notifyListeners("captured", data: [:], retainUntilConsumed: true)
+        }
+    }
+
+    deinit {
+        if let observer = observer { NotificationCenter.default.removeObserver(observer) }
+    }
+
+    @objc func list(_ call: CAPPluginCall) {
+        call.resolve(["captures": VoiceCaptureStore.list()])
+    }
+
+    @objc func ack(_ call: CAPPluginCall) {
+        let ids = call.getArray("ids", String.self) ?? []
+        VoiceCaptureStore.ack(ids)
+        call.resolve()
+    }
+}
+
 /// The app's bridge view controller. Exists only to register plugins defined
 /// in the app project itself (Capacitor auto-discovers packaged plugins, but
 /// local ones must be registered by hand since Capacitor 6).
 class MainViewController: CAPBridgeViewController {
     override open func capacitorDidLoad() {
         bridge?.registerPluginInstance(SharedImportPlugin())
+        bridge?.registerPluginInstance(VoiceCapturePlugin())
     }
 }
 

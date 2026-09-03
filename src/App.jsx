@@ -84,6 +84,7 @@ import { LockProvider } from './contexts/LockContext'
 import { useAuth } from './contexts/AuthContext'
 import { useEscapeShortcut, useKeyShortcuts } from './lib/escapeStack'
 import { onShareImport } from './lib/shareImport'
+import { onVoiceCaptures } from './lib/voiceCapture'
 
 // EXPERIMENT (neutral scheme): the bubble-colour vignette, drawn at the app shell
 // so the band spans the FULL screen — safe-area top to bottom — instead of clipping
@@ -921,6 +922,80 @@ export default function App() {
     // opens (or stays open) and mounts ImportNotes prefilled.
     setSettingsOpen(true)
   }), [])
+
+  // ── Siri voice captures ─────────────────────────────────────────────────────
+  //
+  // Queued in the App Group by AddNoteIntent (see src/lib/voiceCapture.js);
+  // drained here into the active project's root. The queue is consumed ONLY
+  // while this app is ready to own the notes, and "ready" is deliberately
+  // strict:
+  //   guest      → past the login gate with a project loaded
+  //   signed in  → the initial cloud sync for THIS user has settled
+  // A capture that landed in the local default project before sign-in would
+  // be local-only work to the merge dialog, and "use cloud" would silently
+  // discard it — the exact loss class the sync rework closed. So until the
+  // sync has run (merge question answered, cloud state applied), captures
+  // wait in the App Group where nothing can touch them. Offline at startup
+  // counts as NOT settled (that path clears syncedUserRef so a later sync can
+  // still run the merge), so they keep waiting — loss-free — until a sync
+  // succeeds.
+  const [initialSyncSettledFor, setInitialSyncSettledFor] = useState(null)
+  const voiceReady = Boolean(activeProject) && !loading &&
+    (user ? initialSyncSettledFor === user.id : guestMode)
+  // Always-current consumer, so the single subscription below never calls a
+  // stale closure over updateProject / the toast bridge.
+  const voiceConsumerRef = useRef(null)
+  voiceConsumerRef.current = (captures) => {
+    const current = activeProjectRef.current
+    if (!current) return [] // nothing acked — captures stay queued
+
+    // The capture id IS the note id, so a capture already persisted (crash
+    // between persist and ack, or a project switch in between) is skipped
+    // wherever it lives, not re-created. Checked against storage, not state:
+    // every project on the device, not just the one on screen.
+    const known = new Set()
+    for (const p of loadAllProjects(loadProjectList() ?? [])) {
+      for (const n of p.notes ?? []) known.add(n.id)
+    }
+    for (const n of current.notes) known.add(n.id)
+
+    const fresh = captures.filter(c => !known.has(c.id))
+    if (fresh.length) {
+      const newNotes = fresh.map(c => {
+        // Stamp the note with when it was SPOKEN (ms from Swift), falling back
+        // to now if a capture somehow carries no timestamp.
+        const when = Number.isFinite(c.ts) && c.ts > 0 ? new Date(c.ts) : new Date()
+        const iso = Number.isNaN(when.getTime()) ? new Date().toISOString() : when.toISOString()
+        return {
+          id: c.id,
+          content: c.text.trim(),
+          created_at: iso,
+          updated_at: iso,
+          // Capture only: root level, no bubble membership guessed.
+          bubble_ids: [ROOT_BUBBLE_ID],
+          tags: [],
+          connections: [],
+          locked: false,
+        }
+      })
+      const updated = { ...current, notes: [...newNotes, ...current.notes] }
+      // Land it in localStorage NOW — not on scheduleSave's 400 ms debounce —
+      // because the ack that follows deletes the only other copy.
+      saveProject(updated)
+      updateProject(updated)
+      toastRef.current?.(newNotes.length === 1
+        ? 'Added a note from Siri'
+        : `Added ${newNotes.length} notes from Siri`)
+    }
+    // Everything listed is now in storage (fresh just written, the rest
+    // already there), so all of it is safe to delete from the queue.
+    return captures.map(c => c.id)
+  }
+  useEffect(() => {
+    if (!voiceReady) return
+    return onVoiceCaptures(captures => voiceConsumerRef.current(captures))
+  }, [voiceReady])
+
   const [showOnboarding, setShowOnboarding] = useState(() =>
     !localStorage.getItem('hasSeenOnboarding')
   )
@@ -1092,6 +1167,7 @@ export default function App() {
     if (!user) {
       setSyncStatus('idle')
       syncedUserRef.current = null
+      setInitialSyncSettledFor(null)
       // A prompt can't outlive the sign-in that raised it.
       setMergePrompt(null)
       mergeChoiceRef.current = null
@@ -1506,7 +1582,14 @@ export default function App() {
       }
     }
 
-    doInitialSync()
+    // Voice captures may only be drained once this sync has SETTLED for this
+    // user. Every successful path leaves syncedUserRef at user.id; the
+    // offline and error paths clear it (so the merge can still run later),
+    // and the merge dialog's "stay signed out" path signs out — none of those
+    // may release the queue.
+    doInitialSync().then(() => {
+      if (syncedUserRef.current === user.id) setInitialSyncSettledFor(user.id)
+    })
   }, [user, projectList])
 
   // Button handler for GuestMergeDialog — hides the dialog and hands the choice
