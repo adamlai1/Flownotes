@@ -1,4 +1,4 @@
-import { flattenBubbleTree, countExpandedBubbleRows, collapsibleBubbleIds } from '../utils/bubbleTree'
+import { flattenBubbleTree } from '../utils/bubbleTree'
 import { useFitCollapse } from '../lib/useFitCollapse'
 
 // The hierarchical bubble list shared by both pickers — the canvas "Add to"
@@ -20,13 +20,19 @@ export default function BubblePickerTree({
   measureAvailable,      // () => px the fully expanded tree may occupy
   observeResize,         // optional: () => Element to re-check on resize
   refitOnResize = false, // a resize re-decides even after a manual chevron (see useFitCollapse)
+  overflowRatio = null,  // depth-limited fit: expanded height may reach this × available (see useFitCollapse)
   maxExpandedRows,       // unbounded container: expand iff full row count ≤ this
   renderRow,             // (bubble) => the row button; rendered flex-1 beside the chevron
 }) {
-  const rowCount = countExpandedBubbleRows(bubbles, { hiddenIds })
-  const parentIds = collapsibleBubbleIds(bubbles, { hiddenIds })
+  // One walk of the fully expanded tree feeds every input the fit rule needs:
+  // the row count and chevron ids (all-or-nothing) and the per-row depths
+  // (depth-limited).
+  const expandedRows = flattenBubbleTree(bubbles, { hiddenIds })
+  const rowCount = expandedRows.length
+  const parentIds = expandedRows.filter(r => r.hasChildren).map(r => r.bubble.id)
   const { collapsedIds, isExpanded, toggleExpanded } = useFitCollapse({
     rowCount, parentIds, rowHeight, extraHeight, measureAvailable, observeResize, maxExpandedRows, refitOnResize,
+    depthLimitRatio: overflowRatio, rows: expandedRows,
   })
   const rows = flattenBubbleTree(bubbles, { hiddenIds, collapsedIds })
 

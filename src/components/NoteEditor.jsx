@@ -36,11 +36,33 @@ const BODY_BOX_STYLE = { flex: '1 0 auto', userSelect: 'text', WebkitUserSelect:
 //                 (this alone would dock an iPad with a trackpad in
 //                 portrait, where two columns can't fit);
 //   ≥ 1100px:     the note column reads comfortably down to ~760px and the
-//                 docked sheet needs 340px; 760 + 340 = 1100. Between 1100
-//                 and the docked panel's 1160px max the note gives, not the
-//                 sheet. Below 1100 a fine-pointer device gets the overlay.
+//                 docked sheet needs 340px; 760 + 340 = 1100. Below 1100 a
+//                 fine-pointer device gets the overlay.
+//
+// Placement: the NOTE stays exactly where it is without a sheet — centered,
+// 820 wide — and the sheet hangs off its right edge. The pair is therefore
+// off-center, weighted right; that is intended. When the sheet would run
+// off the right edge of the window (below 820 + 2×340 = 1500px), the pair
+// slides left just enough to keep the sheet fully on screen — the note
+// gives up centering only by the amount the sheet needs — and below 1160
+// the note itself narrows (its max width becomes the window minus the
+// sheet). See PANEL_DOCKED_MARGIN_LEFT.
 const DOCK_MEDIA_QUERY = '(hover: hover) and (pointer: fine) and (min-width: 1100px)'
 const SHEET_DOCK_W = 340
+const NOTE_PANEL_W = 820
+// Left offset of the note panel when docked, as a CSS clamp against the
+// backdrop's width: centered (50% − half the note) while that leaves room
+// for the sheet, else pushed left to (width − note − sheet), floored at 0.
+// clamp() with max < min yields min, which is the < 1160 case: flush left
+// with the note narrowed by maxWidth.
+const PANEL_DOCKED_MARGIN_LEFT =
+  `clamp(0px, calc(50% - ${NOTE_PANEL_W / 2}px), calc(100% - ${NOTE_PANEL_W + SHEET_DOCK_W}px))`
+
+// Details-sheet bubble tree: how far past the visible tree height the
+// expanded tree may reach before the deepest levels fold (depth-limited fit,
+// see useFitCollapse). 2 = the tree scrolls up to twice its visible height.
+// ONE knob — tune this on device.
+const SHEET_TREE_OVERFLOW_RATIO = 2
 
 // Details-sheet chevron prominence. A secondary affordance: dark enough not
 // to compete with content, visible enough to be found. ONE knob — tune this
@@ -59,9 +81,15 @@ const CHEVRON_EDGE_INSET = 8
 const FORMAT_BAR_H = 48
 const FORMAT_BAR_GAP = 8
 
-// Body line height: 16px × leading-relaxed (1.625). Used for the tap
-// clearance only — a bound on how far a tapped line must sit above the bar.
+// Body line height: 16px × leading-relaxed (1.625). A fallback bound only —
+// anything that can measure reads the live value via lineHeightOf.
 const LINE_H = 26
+// The textarea's computed line height, which is the height of one caret line
+// and therefore the largest scroll an edge-aligned reveal can produce.
+function lineHeightOf(el) {
+  const v = parseFloat(getComputedStyle(el).lineHeight)
+  return Number.isFinite(v) && v > 0 ? v : LINE_H
+}
 // The bounded box's bottom sits this far above the format bar's top edge.
 const BOX_BAR_MARGIN = 8
 // Tap clearance has two different edges on purpose. The NO-OP test is the
@@ -855,11 +883,12 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // paddings — all real DOM measurements (scrollHeight is the column's full
   // content height even though the column itself never scrolls; subtracting
   // the tree's current height leaves exactly the siblings' total). "Fits"
-  // therefore means fits in the REMAINING space: a fitting tree expands with
-  // no scrollbar anywhere; a non-fitting one collapses, and the tree box —
-  // the only scrollable thing in the sheet — scrolls internally when even
-  // the collapsed rows exceed the remainder. Tags, project and connections
-  // never move.
+  // therefore means fits in the REMAINING space. The rule is depth-limited
+  // (SHEET_TREE_OVERFLOW_RATIO): a tree that fits expands fully with no
+  // scrollbar; a deeper one opens as far down as keeps the expanded height
+  // within the ratio × the remainder, deepest levels folded first, and the
+  // tree box — the only scrollable thing in the sheet — scrolls internally
+  // by up to that ratio. Tags, project and connections never move.
   const sheetTreeAvailable = () => {
     const col = sheetColRef.current
     const tree = sheetTreeBoxRef.current
@@ -1235,6 +1264,51 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // Animate the box's inner scroll to `target` (ease-out). Writes scrollTop
   // directly every frame — no smooth-scroll API, so a cancel is
   // deterministic and the snap lands exactly on target.
+  // ── Keystroke reveal correction ──────────────────────────────────────────
+  // After every editing command WebKit reveals the caret with its default
+  // alignment, alignCenterIfNeeded (ScrollAlignment.cpp): no scroll if the
+  // caret rect is visible, scroll to the CLOSEST EDGE if it is partially
+  // visible (the one-line case), and CENTER it if it is fully hidden. A caret
+  // that lands on a line entirely below the box's bottom edge — a word
+  // wrapping, autocorrect completing a wrapped word, Enter anywhere but the
+  // very end of the note (Editor.cpp uses edge alignment only there) — is
+  // centered: half a box up, six or seven lines above the bar.
+  //
+  // The correction pulls that back so the caret sits at the bottom edge,
+  // exactly where an edge-aligned reveal would have put it. It keys on the
+  // scroll DELTA between beforeinput (before WebKit's command) and the scroll
+  // event the reveal fires: an edge reveal of a partially visible line moves
+  // by less than one line height; anything more is a centering, and a
+  // centering puts the caret rect's center at exactly half the box, so the
+  // pull-back is half the box minus half a line — no caret measurement, and
+  // both the threshold and the amount derive from the live line height.
+  //
+  // Why the scroll event and not the post-render effect: scroll events are
+  // dispatched in the rendering update's scroll steps, BEFORE paint, whether
+  // WebKit fires `input` before or after its reveal — so the centered frame
+  // is corrected in the same commit and never painted. The pending window
+  // closes at the next animation frame (which runs after the scroll steps
+  // in the same update), so a later user scroll is never misread.
+  const inputRevealRef = useRef(null)
+  const handleBodyBeforeInput = e => {
+    if (boundBoxH == null) { inputRevealRef.current = null; return }
+    // A tap-clearance animation still in flight snaps first, so the pre
+    // value reflects the settled position and the snap can't read as a reveal.
+    cancelTapScroll(true)
+    inputRevealRef.current = { pre: e.target.scrollTop }
+    requestAnimationFrame(() => { inputRevealRef.current = null })
+  }
+  const handleBodyScroll = e => {
+    const pending = inputRevealRef.current
+    if (!pending) return
+    inputRevealRef.current = null
+    const el = e.target
+    const lh = lineHeightOf(el)
+    const delta = el.scrollTop - pending.pre
+    if (delta <= lh) return // an edge-aligned reveal (or nothing) — leave it
+    el.scrollTop -= el.clientHeight / 2 - lh / 2
+  }
+
   const animateTapScroll = (el, target) => {
     cancelTapScroll(false)
     const from = el.scrollTop
@@ -1693,7 +1767,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         background: isDesktop ? 'rgba(0,0,0,0.6)' : 'transparent',
         display: isDesktop ? 'flex' : 'block',
         alignItems: isDesktop ? 'stretch' : undefined,
-        justifyContent: isDesktop ? 'center' : undefined,
+        // Docked: the panel positions itself with a margin (note centered
+        // when the sheet fits beside it, see PANEL_DOCKED_MARGIN_LEFT).
+        justifyContent: isDesktop ? (docked ? 'flex-start' : 'center') : undefined,
       }}
       initial={isDesktop ? { opacity: 0 } : { x: '100%' }}
       animate={isDesktop ? { opacity: 1 } : { x: 0 }}
@@ -1716,17 +1792,20 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       style={isDesktop ? {
         position: 'relative',
         width: '100%',
-        // Docked: the note's 820 plus the sheet column; the sheet is a
-        // fixed track, the note track gives when the panel is narrower.
-        maxWidth: docked ? 820 + SHEET_DOCK_W : 820,
+        // Docked: the panel is still just the note; the sheet is positioned
+        // OUTSIDE it, off its right edge. The note keeps its 820 unless the
+        // window can't hold note + sheet, then it narrows to leave the
+        // sheet's width. Overflow must be visible for the sheet to show.
+        maxWidth: docked ? `min(${NOTE_PANEL_W}px, calc(100% - ${SHEET_DOCK_W}px))` : NOTE_PANEL_W,
+        marginLeft: docked ? PANEL_DOCKED_MARGIN_LEFT : undefined,
         // EXPERIMENT (neutral scheme): was var(--surface) — the panel matches the
         // pitch-black ground so the bare header doesn't read as a black band on a
         // lighter panel (both branches below).
         background: 'var(--bg)',
         display: 'grid',
         gridTemplateRows: 'auto 1fr',
-        gridTemplateColumns: docked ? `minmax(0, 1fr) ${SHEET_DOCK_W}px` : 'minmax(0, 1fr)',
-        overflow: 'hidden',
+        gridTemplateColumns: 'minmax(0, 1fr)',
+        overflow: docked ? 'visible' : 'hidden',
         borderLeft: '1px solid var(--border)',
         borderRight: '1px solid var(--border)',
       } : {
@@ -1939,6 +2018,8 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
               ref={bodyRef}
               value={text}
               onChange={handleTextChange}
+              onBeforeInput={handleBodyBeforeInput}
+              onScroll={handleBodyScroll}
               onBlur={e => {
                 cancelTapScroll(true)
                 // One-shot capture for the return trip: the bounded box's
@@ -2052,19 +2133,21 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           panel: clipped by the panel's overflow — which is what hides it at
           its closed rest position — and it slides with the panel during any
           panel motion. */}
-      {/* Docked (desktop): the panel's second grid column, spanning both
-          rows so it runs the full panel height beside header + note; a
-          plain static sibling — no motion value, no inert, no gestures.
-          Otherwise the slide-in overlay exactly as before. */}
+      {/* Docked (desktop): absolutely positioned OFF the panel's right edge
+          (left: 100%), full panel height, so the note panel keeps its own
+          width and centering; a plain static sibling — no motion value, no
+          inert, no gestures. The panel's right border is the seam, so no
+          left border here; a right border closes the sheet off. Otherwise
+          the slide-in overlay exactly as before. */}
       <motion.div
         ref={sheetRef}
         inert={docked || sheetOpen ? undefined : ''}
         className={docked ? 'flex flex-col min-h-0' : 'absolute inset-y-0 right-0 flex flex-col'}
         style={docked ? {
-          gridColumn: 2,
-          gridRow: '1 / -1',
+          position: 'absolute', top: 0, bottom: 0, left: '100%',
+          width: SHEET_DOCK_W,
           background: 'var(--bg)',
-          borderLeft: '1px solid var(--border)',
+          borderRight: '1px solid var(--border)',
         } : {
           x: sheetX,
           width: 'min(calc(100% - 56px), 380px)',
@@ -2187,11 +2270,13 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             >
               {/* The sheet's ONLY scroller. flex 0-1-auto: natural height
                   while the tree fits (no scrollbar), shrunk to the remaining
-                  space when it doesn't — the fit decision (measureAvailable
-                  against that remainder, see sheetTreeAvailable) collapses a
-                  non-fitting tree first, so scrolling only appears when even
-                  the collapsed rows overflow. observeResize on the column
-                  re-decides when the sheet's box changes (rotation). */}
+                  space when it doesn't — the depth-limited fit decision
+                  (measureAvailable against that remainder, see
+                  sheetTreeAvailable) folds the deepest levels until the
+                  expanded tree is within SHEET_TREE_OVERFLOW_RATIO × that
+                  space, so it scrolls at most that far. observeResize on the
+                  column re-decides when the sheet's box changes (rotation,
+                  or any window resize when docked). */}
               <BubblePickerTree
                 bubbles={project.bubbles}
                 rowHeight={36}
@@ -2201,6 +2286,11 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                 // resize hands control back to the rule; the overlay keeps
                 // its open-to-close session semantics.
                 refitOnResize={docked}
+                // Depth-limited, not all-or-nothing: open as deep as fits
+                // within SHEET_TREE_OVERFLOW_RATIO × the box, deepest levels
+                // folded first. The sheet only — the pickers and sidebar
+                // keep the all-or-nothing rule.
+                overflowRatio={SHEET_TREE_OVERFLOW_RATIO}
                 renderRow={renderBubblePickerRow}
               />
             </div>
