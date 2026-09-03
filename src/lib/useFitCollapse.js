@@ -20,8 +20,15 @@ import { useLayoutEffect, useRef, useState, useCallback } from 'react'
 //     overrides it again. The session ends when `active` goes false; state
 //     is kept while closing (so branches don't visibly snap shut during a
 //     close animation) and decided afresh on the next open.
+//   - refitOnResize: for a surface whose session is effectively permanent
+//     (a docked column that never closes), a container resize hands
+//     control back to the rule — otherwise one manual chevron would
+//     disable re-fitting for the rest of the editor's life, and a window
+//     resize is exactly when a fresh decision is wanted. Manual toggles
+//     still stick between resizes.
 export function useFitCollapse({
   active = true,     // surface is on screen; false→true starts a new session
+  refitOnResize = false, // container resize re-decides even after a manual toggle
   rowCount,          // rows the fully expanded tree would show
   parentIds,         // ids of rows that carry a chevron
   rowHeight,         // uniform row height, px
@@ -38,7 +45,7 @@ export function useFitCollapse({
 
   // Latest inputs, so decide() stays identity-stable for the effects below.
   const latestRef = useRef(null)
-  latestRef.current = { rowCount, parentIds, rowHeight, extraHeight, measureAvailable, maxExpandedRows }
+  latestRef.current = { rowCount, parentIds, rowHeight, extraHeight, measureAvailable, maxExpandedRows, refitOnResize }
 
   const decide = useCallback(() => {
     const { rowCount, parentIds, rowHeight, extraHeight, measureAvailable, maxExpandedRows } = latestRef.current
@@ -69,6 +76,7 @@ export function useFitCollapse({
       // The observer always fires once on observe(); the opening decision
       // already covered that layout.
       if (first) { first = false; return }
+      if (latestRef.current.refitOnResize) touchedRef.current = false
       if (!touchedRef.current) decide()
     })
     ro.observe(el)

@@ -30,6 +30,18 @@ import BubblePickerTree from './BubblePickerTree'
 // by metric parity.
 const BODY_BOX_STYLE = { flex: '1 0 auto', userSelect: 'text', WebkitUserSelect: 'text' }
 
+// Docked details sheet (desktop). The sheet is a permanent column beside
+// the note — no chevron, no swipe, no open/close state — when BOTH hold:
+//   fine pointer: touch devices keep the slide-in overlay exactly as is
+//                 (this alone would dock an iPad with a trackpad in
+//                 portrait, where two columns can't fit);
+//   ≥ 1100px:     the note column reads comfortably down to ~760px and the
+//                 docked sheet needs 340px; 760 + 340 = 1100. Between 1100
+//                 and the docked panel's 1160px max the note gives, not the
+//                 sheet. Below 1100 a fine-pointer device gets the overlay.
+const DOCK_MEDIA_QUERY = '(hover: hover) and (pointer: fine) and (min-width: 1100px)'
+const SHEET_DOCK_W = 340
+
 // Details-sheet chevron prominence. A secondary affordance: dark enough not
 // to compete with content, visible enough to be found. ONE knob — tune this
 // on device rather than hunting through styles.
@@ -239,6 +251,15 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   useEffect(() => {
     const mq = window.matchMedia('(min-width: 768px)')
     const handler = e => setIsDesktop(e.matches)
+    mq.addEventListener('change', handler)
+    return () => mq.removeEventListener('change', handler)
+  }, [])
+  // Docked sheet — see DOCK_MEDIA_QUERY. Live: resizing across the line
+  // switches layouts in place.
+  const [docked, setDocked] = useState(() => window.matchMedia(DOCK_MEDIA_QUERY).matches)
+  useEffect(() => {
+    const mq = window.matchMedia(DOCK_MEDIA_QUERY)
+    const handler = e => setDocked(e.matches)
     mq.addEventListener('change', handler)
     return () => mq.removeEventListener('change', handler)
   }, [])
@@ -884,8 +905,17 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   const chevronRef = useRef(null)
   const chevronX = useTransform(sheetX, v => (14 + CHEVRON_EDGE_INSET - sheetWidth()) * (1 - v / sheetClosedX()))
 
+  // Docking makes the overlay's open state meaningless; clear it so a later
+  // undock starts from the closed rest (and the dismiss hook stays idle).
+  useEffect(() => {
+    if (!docked || !sheetOpenRef.current) return
+    sheetOpenRef.current = false
+    setSheetOpen(false)
+    sheetX.jump(sheetClosedX())
+  }, [docked]) // eslint-disable-line react-hooks/exhaustive-deps
+
   useDismissOnOutside(
-    sheetOpen,
+    sheetOpen && !docked,
     () => settleSheet(false),
     // The chevron toggles rather than dismiss-and-reopen (per the hook's own
     // contract for triggers), so its press reaches onClick.
@@ -1591,6 +1621,67 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // All custom tags come from the project-level color map (toggling off just deselects, never removes)
   const allCustomTags = Object.keys(project.customTagColors || {})
 
+  // The metadata row — one definition, two homes (see where it renders).
+  const metaRow = (
+    <div className="flex items-end justify-between">
+      <div className="flex items-end gap-3">
+      {/* Undo / Redo. On touch devices these live in the format bar on
+          the keyboard; this cluster exists ONLY on desktop, which has
+          no format bar (no software keyboard) and no other undo — the
+          custom history stack means native Ctrl+Z can't restore
+          programmatic transforms on this controlled textarea. It stays
+          with the body (not the details sheet): it's an edit control,
+          not organization, and desktop's only undo must not live
+          behind a chevron. */}
+      {isDesktop && (
+      <div className="flex items-center gap-1 -ml-1.5">
+        <button
+          onClick={undo}
+          disabled={past.length === 0}
+          // Edit control: undo-then-keep-typing must not cost a
+          // re-entry tap, so it's exempt from tap-away (data-keep-edit)
+          // and from desktop's native mousedown focus steal.
+          data-keep-edit=""
+          onMouseDown={e => e.preventDefault()}
+          className="p-1.5 rounded-lg transition-opacity flex-shrink-0 text-gray-400 disabled:opacity-25"
+          title="Undo"
+        >
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M3 10h10a6 6 0 010 12H9m-6-12l4-4m-4 4l4 4" />
+          </svg>
+        </button>
+        <button
+          onClick={redo}
+          disabled={future.length === 0}
+          data-keep-edit=""
+          onMouseDown={e => e.preventDefault()}
+          className="p-1.5 rounded-lg transition-opacity flex-shrink-0 text-gray-400 disabled:opacity-25"
+          title="Redo"
+        >
+          <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M21 10H11a6 6 0 000 12h4m6-12l-4-4m4 4l-4 4" />
+          </svg>
+        </button>
+      </div>
+      )}
+      {/* Passive metadata about the note in front of you — visible at
+          a glance without opening anything, same reasoning that keeps
+          undo/redo here rather than in the sheet. Word count left,
+          timestamps right: opposite ends of one row — the top of the
+          page on touch (pull-to-reveal), the bottom on desktop. */}
+      <p className="text-[11px] text-gray-700">
+        {wordCount} {wordCount === 1 ? 'word' : 'words'}
+      </p>
+      </div>
+      <div className="text-right space-y-0.5 ml-auto">
+        <p className="text-[11px] text-gray-600">Created {formatNoteDate(note.created_at)}</p>
+        <p className="text-[11px] text-gray-700">Last edited {formatNoteDate(note.updated_at)}</p>
+      </div>
+    </div>
+  )
+
   return (
     <motion.div
       data-modal
@@ -1625,14 +1716,16 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       style={isDesktop ? {
         position: 'relative',
         width: '100%',
-        maxWidth: 820,
+        // Docked: the note's 820 plus the sheet column; the sheet is a
+        // fixed track, the note track gives when the panel is narrower.
+        maxWidth: docked ? 820 + SHEET_DOCK_W : 820,
         // EXPERIMENT (neutral scheme): was var(--surface) — the panel matches the
         // pitch-black ground so the bare header doesn't read as a black band on a
         // lighter panel (both branches below).
         background: 'var(--bg)',
         display: 'grid',
         gridTemplateRows: 'auto 1fr',
-        gridTemplateColumns: 'minmax(0, 1fr)',
+        gridTemplateColumns: docked ? `minmax(0, 1fr) ${SHEET_DOCK_W}px` : 'minmax(0, 1fr)',
         overflow: 'hidden',
         borderLeft: '1px solid var(--border)',
         borderRight: '1px solid var(--border)',
@@ -1660,6 +1753,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         ref={headerRowRef}
         className="relative flex items-center px-3"
         style={{
+          gridColumn: 1,
           paddingTop: 'max(12px, env(safe-area-inset-top))', paddingBottom: 10,
           background: 'var(--bg)',
         }}
@@ -1795,73 +1889,21 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           boundBoxH), so nothing below it needs reserving. */}
       <div
         ref={scrollAreaRef}
-        style={{ overflowY: 'auto', minHeight: 0, WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
+        style={{ gridColumn: 1, overflowY: 'auto', minHeight: 0, WebkitOverflowScrolling: 'touch', overscrollBehavior: 'contain' }}
         onScroll={scheduleMetaSnap}
       >
 
-        {/* Metadata row — the first row of the scroll content; the scroll
-            area rests with it just above the fold (see scheduleMetaSnap).
-            Its top padding matches the column's, so at rest the note sits
-            exactly where it would without the row. */}
-        <div ref={metaRowRef} className="px-5 md:px-10 pt-4 md:pt-8">
-          <div className="flex items-end justify-between">
-            <div className="flex items-end gap-3">
-            {/* Undo / Redo. On touch devices these live in the format bar on
-                the keyboard; this cluster exists ONLY on desktop, which has
-                no format bar (no software keyboard) and no other undo — the
-                custom history stack means native Ctrl+Z can't restore
-                programmatic transforms on this controlled textarea. It stays
-                with the body (not the details sheet): it's an edit control,
-                not organization, and desktop's only undo must not live
-                behind a chevron. */}
-            {isDesktop && (
-            <div className="flex items-center gap-1 -ml-1.5">
-              <button
-                onClick={undo}
-                disabled={past.length === 0}
-                // Edit control: undo-then-keep-typing must not cost a
-                // re-entry tap, so it's exempt from tap-away (data-keep-edit)
-                // and from desktop's native mousedown focus steal.
-                data-keep-edit=""
-                onMouseDown={e => e.preventDefault()}
-                className="p-1.5 rounded-lg transition-opacity flex-shrink-0 text-gray-400 disabled:opacity-25"
-                title="Undo"
-              >
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                    d="M3 10h10a6 6 0 010 12H9m-6-12l4-4m-4 4l4 4" />
-                </svg>
-              </button>
-              <button
-                onClick={redo}
-                disabled={future.length === 0}
-                data-keep-edit=""
-                onMouseDown={e => e.preventDefault()}
-                className="p-1.5 rounded-lg transition-opacity flex-shrink-0 text-gray-400 disabled:opacity-25"
-                title="Redo"
-              >
-                <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                    d="M21 10H11a6 6 0 000 12h4m6-12l-4-4m4 4l-4 4" />
-                </svg>
-              </button>
-            </div>
-            )}
-            {/* Passive metadata about the note in front of you — visible at
-                a glance without opening anything, same reasoning that keeps
-                undo/redo here rather than in the sheet. Word count left,
-                timestamps right: opposite ends of one row at the top of the
-                page, revealed by a pull-down (see scheduleMetaSnap). */}
-            <p className="text-[11px] text-gray-700">
-              {wordCount} {wordCount === 1 ? 'word' : 'words'}
-            </p>
-            </div>
-            <div className="text-right space-y-0.5 ml-auto">
-              <p className="text-[11px] text-gray-600">Created {formatNoteDate(note.created_at)}</p>
-              <p className="text-[11px] text-gray-700">Last edited {formatNoteDate(note.updated_at)}</p>
-            </div>
+        {/* Metadata row, touch: the first row of the scroll content; the
+            scroll area rests with it just above the fold (see
+            scheduleMetaSnap). Its top padding matches the column's, so at
+            rest the note sits exactly where it would without the row.
+            Fine-pointer devices render metaRow at the BOTTOM of the note
+            instead (below) — no pull gesture there. */}
+        {!hasFinePointer && (
+          <div ref={metaRowRef} className="px-5 md:px-10 pt-4 md:pt-8">
+            {metaRow}
           </div>
-        </div>
+        )}
 
         {/* Text content — a full-height flex column with no bottom border:
             the note reads as one continuous page to the screen bottom (the
@@ -1887,7 +1929,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           // same depth or the exit clamps by the difference.
           style={{
             minHeight: '100%',
-            paddingBottom: bodyMode === 'edit' && boundBoxH != null
+            paddingBottom: hasFinePointer || (bodyMode === 'edit' && boundBoxH != null)
               ? 'calc(0.75rem + env(safe-area-inset-bottom))'
               : 'calc(60vh + env(safe-area-inset-bottom))',
           }}
@@ -1951,6 +1993,11 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
               {text ? renderReadBody(text) : <span className="text-gray-700">Start writing…</span>}
             </div>
           )}
+          {/* Fine pointer: the metadata row at the bottom of the note — the
+              flex-grown body owns the blank space of a short note, so the
+              row lands at the bottom of the screen; on a long note it
+              follows the last line. */}
+          {hasFinePointer && <div className="pt-2">{metaRow}</div>}
         </div>
 
       </div>
@@ -1964,6 +2011,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           for edit mode via SHEET_CHEVRON_OPACITY — the one prominence knob —
           and runs full-strength while the sheet is open, where it's the
           grip/close control. The icon flips direction with the state. */}
+      {!docked && (
       <motion.button
         ref={chevronRef}
         type="button"
@@ -1995,6 +2043,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           <path strokeLinecap="round" strokeLinejoin="round" d="M15 19l-7-7 7-7" />
         </svg>
       </motion.button>
+      )}
 
       {/* ── Details sheet ────────────────────────────────────────────────────
           Tags, filing and connections. Covers most of the width; the strip
@@ -2003,11 +2052,20 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           panel: clipped by the panel's overflow — which is what hides it at
           its closed rest position — and it slides with the panel during any
           panel motion. */}
+      {/* Docked (desktop): the panel's second grid column, spanning both
+          rows so it runs the full panel height beside header + note; a
+          plain static sibling — no motion value, no inert, no gestures.
+          Otherwise the slide-in overlay exactly as before. */}
       <motion.div
         ref={sheetRef}
-        inert={sheetOpen ? undefined : ''}
-        className="absolute inset-y-0 right-0 flex flex-col"
-        style={{
+        inert={docked || sheetOpen ? undefined : ''}
+        className={docked ? 'flex flex-col min-h-0' : 'absolute inset-y-0 right-0 flex flex-col'}
+        style={docked ? {
+          gridColumn: 2,
+          gridRow: '1 / -1',
+          background: 'var(--bg)',
+          borderLeft: '1px solid var(--border)',
+        } : {
           x: sheetX,
           width: 'min(calc(100% - 56px), 380px)',
           background: 'var(--bg)',
@@ -2015,9 +2073,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           boxShadow: '-8px 0 24px rgba(0,0,0,0.35)',
           zIndex: 40,
         }}
-        onTouchStart={handleSheetTouchStart}
-        onTouchMove={handleSheetTouchMove}
-        onTouchEnd={handleSheetTouchEnd}
+        onTouchStart={docked ? undefined : handleSheetTouchStart}
+        onTouchMove={docked ? undefined : handleSheetTouchMove}
+        onTouchEnd={docked ? undefined : handleSheetTouchEnd}
       >
         {/* (No chevron inside the sheet: THE chevron is the single
             panel-level element riding chevronX — it straddles this sheet's
@@ -2139,6 +2197,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                 rowHeight={36}
                 measureAvailable={sheetTreeAvailable}
                 observeResize={() => sheetColRef.current}
+                // Docked, the fit session is the editor's lifetime, so a
+                // resize hands control back to the rule; the overlay keeps
+                // its open-to-close session semantics.
+                refitOnResize={docked}
                 renderRow={renderBubblePickerRow}
               />
             </div>
