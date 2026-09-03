@@ -286,6 +286,31 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const bodyRef = useRef(null)
   const scrollAreaRef = useRef(null)
+  // The note column inside the scroll area (metadata row excluded). Pinned
+  // to its current height across any moment the textarea passes through
+  // its auto height — see pinColumn / the auto-grow effect.
+  const columnRef = useRef(null)
+  // Pin the column at its current height. WHY: a textarea's auto height is
+  // its `rows` height, not its text — so the instant the textarea is laid
+  // out at auto (the read → edit swap, before auto-grow has set its px
+  // height; and every auto-grow re-measure), the column shrinks to its
+  // minHeight, the scroll area's content collapses to ~one screen, and the
+  // scroll area's scrollTop CLAMPS to that. WebKit has no scroll anchoring
+  // to undo it, so on a note scrolled past the top every tap-to-edit jumped
+  // to the top of the note before the keyboard even rose (the clearance
+  // scroll then dragged the tapped line back from off-screen — seen as
+  // "lands too low" / "moves when it shouldn't"). With the column held at
+  // its height, the content never shrinks and nothing clamps. Uses `height`
+  // (not minHeight, which React owns) and is cleared by the auto-grow sync
+  // once the textarea carries its own px height.
+  const pinColumn = () => {
+    const col = columnRef.current
+    if (col && !col.style.height) col.style.height = `${col.getBoundingClientRect().height}px`
+  }
+  const unpinColumn = () => {
+    const col = columnRef.current
+    if (col) col.style.height = ''
+  }
 
   // (The old desktop wheel-chaining for the body boxes is gone WITH the
   // boxes' inner scrollers: content scrolls only in the outer scroll area
@@ -646,6 +671,11 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     if (hitRect && hitRect.height > 0) lineBottom = Math.max(hitRect.bottom, e.clientY)
     pendingTapLineRef.current = readTop != null ? lineBottom - readTop : null
     tapDiagRef.current = { outerScrollAtTap: scrollAreaRef.current?.scrollTop, lineBottomAtTap: lineBottom }
+    // Before the swap, while the read box still holds the column's height:
+    // the textarea that replaces it is laid out at its auto height first
+    // (focus() forces that layout before auto-grow runs), and without the
+    // pin the scroll area clamps to the top of the note right there.
+    pinColumn()
     setBodyMode('edit')
   }
 
@@ -1394,13 +1424,17 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     const el = bodyRef.current
     if (!el) return
     const sync = () => {
+      // Hold the column's height through the auto-height measurement (see
+      // pinColumn), then release: the textarea carries its px height now.
+      pinColumn()
       el.style.height = 'auto'
       el.style.height = `${el.scrollHeight}px`
+      unpinColumn()
     }
     sync()
     window.addEventListener('resize', sync)
     return () => window.removeEventListener('resize', sync)
-  }, [text, bodyMode, boundBoxH])
+  }, [text, bodyMode, boundBoxH]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Formatting-bar transforms. Pure rewrites from mdFormat plus the editor's
   // existing plumbing: same history push and debounced save as typing, and
@@ -1848,6 +1882,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
             visible area, so the flex-grown body box owns the blank space
             and the stats row lands at the very bottom of the screen. */}
         <div
+          ref={columnRef}
           className="px-5 md:px-10 pt-4 md:pt-8 flex flex-col"
           // Half a screen of scrollable space below the last line (Apple
           // Notes) in the unbounded page. NOT while the keyboard is up: the
