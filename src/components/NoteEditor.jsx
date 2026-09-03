@@ -878,22 +878,41 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   const sheetRef = useRef(null)
   const sheetColRef = useRef(null)
   const sheetTreeBoxRef = useRef(null)
-  // The room the bubble tree may occupy: the sheet's STATIC content column
-  // minus everything that ISN'T the tree — sections above and below,
-  // paddings — all real DOM measurements (scrollHeight is the column's full
-  // content height even though the column itself never scrolls; subtracting
-  // the tree's current height leaves exactly the siblings' total). "Fits"
-  // therefore means fits in the REMAINING space. The rule is depth-limited
-  // (SHEET_TREE_OVERFLOW_RATIO): a tree that fits expands fully with no
-  // scrollbar; a deeper one opens as far down as keeps the expanded height
-  // within the ratio × the remainder, deepest levels folded first, and the
-  // tree box — the only scrollable thing in the sheet — scrolls internally
-  // by up to that ratio. Tags, project and connections never move.
+  const sheetConnRef = useRef(null)
+  // The fit session starts only once the sheet is measurable. The picker's
+  // fit decision runs in ITS layout effect, and React runs a child's layout
+  // effects before it attaches refs on ancestor elements — so at the picker's
+  // mount the column and tree-box refs above it are still null, the
+  // measurement was "unknowable", the rule expanded everything blind, and the
+  // resize observer (which asks for the same ref) never attached. This flag
+  // is set in the editor's own layout effect, which runs after the children's
+  // and after ref attachment; a state update from a layout effect is flushed
+  // synchronously before paint (React commits sync-lane work scheduled during
+  // layout effects before returning to the browser — same code path in the
+  // production build), so the first painted frame carries a real decision.
+  const [sheetReady, setSheetReady] = useState(false)
+  useLayoutEffect(() => { setSheetReady(true) }, [])
+  // The room the bubble tree may occupy, from FIXED geometry only — nothing
+  // here depends on how tall the tree currently is (a measurement derived
+  // from the tree's own height answered the question it was meant to
+  // decide): the column's content bottom, minus the tree box's top (everything
+  // above it is fixed-height), minus the section below it (Connections) and
+  // the column gap before that section. "Fits" therefore means fits in the
+  // REMAINING space. The rule is depth-limited (SHEET_TREE_OVERFLOW_RATIO): a
+  // tree that fits expands fully with no scrollbar; a deeper one opens as far
+  // down as keeps the expanded height within the ratio × the remainder,
+  // deepest levels folded first, and the tree box — the only scrollable thing
+  // in the sheet — scrolls internally by up to that ratio. Tags, project and
+  // connections never move. Docked (desktop) skips the rule entirely.
   const sheetTreeAvailable = () => {
     const col = sheetColRef.current
     const tree = sheetTreeBoxRef.current
-    if (!col || !tree) return null // unknowable → expand
-    return col.clientHeight - (col.scrollHeight - tree.offsetHeight)
+    const after = sheetConnRef.current
+    if (!col || !tree || !after) return null // unknowable → expand
+    const cs = getComputedStyle(col)
+    const contentBottom = col.getBoundingClientRect().bottom - (parseFloat(cs.paddingBottom) || 0)
+    const gap = parseFloat(cs.rowGap) || parseFloat(cs.gap) || 0
+    return contentBottom - tree.getBoundingClientRect().top - after.offsetHeight - gap
   }
   // Chevron visibility: hidden while typing — every EXISTING note opens in
   // read mode, so the affordance is seen before edit is ever reached. The
@@ -2282,22 +2301,27 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
                 rowHeight={36}
                 measureAvailable={sheetTreeAvailable}
                 observeResize={() => sheetColRef.current}
+                // Session starts once the refs above exist (see sheetReady).
+                active={sheetReady}
                 // Docked, the fit session is the editor's lifetime, so a
                 // resize hands control back to the rule; the overlay keeps
                 // its open-to-close session semantics.
                 refitOnResize={docked}
-                // Depth-limited, not all-or-nothing: open as deep as fits
-                // within SHEET_TREE_OVERFLOW_RATIO × the box, deepest levels
-                // folded first. The sheet only — the pickers and sidebar
-                // keep the all-or-nothing rule.
-                overflowRatio={SHEET_TREE_OVERFLOW_RATIO}
+                // Touch / overlay: depth-limited, not all-or-nothing — open as
+                // deep as fits within SHEET_TREE_OVERFLOW_RATIO × the box,
+                // deepest levels folded first. Docked (desktop): NO fit
+                // decision at all — an unlimited row budget expands everything
+                // without measuring; the tree box scrolls if it's enormous.
+                // The pickers and sidebar keep the all-or-nothing rule.
+                overflowRatio={docked ? null : SHEET_TREE_OVERFLOW_RATIO}
+                maxExpandedRows={docked ? Infinity : undefined}
                 renderRow={renderBubblePickerRow}
               />
             </div>
           </div>
 
           {/* Connections */}
-          <div className="flex-shrink-0">
+          <div ref={sheetConnRef} className="flex-shrink-0">
             <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Connections</p>
 
             {/* Forward connections: this note → other note (deletable) */}

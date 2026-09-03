@@ -20,6 +20,7 @@ export default function BubblePickerTree({
   measureAvailable,      // () => px the fully expanded tree may occupy
   observeResize,         // optional: () => Element to re-check on resize
   refitOnResize = false, // a resize re-decides even after a manual chevron (see useFitCollapse)
+  active = true,         // fit session on/off (see useFitCollapse); pass false until the container is measurable
   overflowRatio = null,  // depth-limited fit: expanded height may reach this × available (see useFitCollapse)
   maxExpandedRows,       // unbounded container: expand iff full row count ≤ this
   renderRow,             // (bubble) => the row button; rendered flex-1 beside the chevron
@@ -31,7 +32,7 @@ export default function BubblePickerTree({
   const rowCount = expandedRows.length
   const parentIds = expandedRows.filter(r => r.hasChildren).map(r => r.bubble.id)
   const { collapsedIds, isExpanded, toggleExpanded } = useFitCollapse({
-    rowCount, parentIds, rowHeight, extraHeight, measureAvailable, observeResize, maxExpandedRows, refitOnResize,
+    active, rowCount, parentIds, rowHeight, extraHeight, measureAvailable, observeResize, maxExpandedRows, refitOnResize,
     depthLimitRatio: overflowRatio, rows: expandedRows,
   })
   const rows = flattenBubbleTree(bubbles, { hiddenIds, collapsedIds })
