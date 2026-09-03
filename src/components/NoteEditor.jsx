@@ -670,7 +670,6 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     const hitRect = hit?.getBoundingClientRect()
     if (hitRect && hitRect.height > 0) lineBottom = Math.max(hitRect.bottom, e.clientY)
     pendingTapLineRef.current = readTop != null ? lineBottom - readTop : null
-    tapDiagRef.current = { outerScrollAtTap: scrollAreaRef.current?.scrollTop, lineBottomAtTap: lineBottom }
     // Before the swap, while the read box still holds the column's height:
     // the textarea that replaces it is laid out at its auto height first
     // (focus() forces that layout before auto-grow runs), and without the
@@ -1192,10 +1191,6 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // The tapped line's bottom as a content coordinate, captured at the read
   // tap; consumed one-shot by the bounding conversion.
   const pendingTapLineRef = useRef(null)
-  // TEMPORARY diagnostic for the tap-clearance geometry: numbers captured at
-  // the tap, printed by the conversion-in effect. Read in Safari Web
-  // Inspector attached to the app. Remove once the geometry is confirmed.
-  const tapDiagRef = useRef(null)
   // The in-flight tap-clearance animation: { raf, el, target }. Cancelled
   // (and snapped to target) by a keystroke or blur; cancelled on unmount.
   const tapScrollAnimRef = useRef(null)
@@ -1376,8 +1371,6 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     el.scrollTop = Math.max(0, rect0.top - elTopBefore)
     const line = pendingTapLineRef.current
     pendingTapLineRef.current = null
-    const diag = tapDiagRef.current
-    tapDiagRef.current = null
     if (line != null) {
       const rect = el.getBoundingClientRect()
       const lineBottomNow = rect.top + line - el.scrollTop
@@ -1386,11 +1379,6 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       const boxBottom = rect.bottom
       const target = bar - TAP_LINE_MARGIN
       const needs = lineBottomNow > boxBottom
-      console.debug('[tap-scroll]', {
-        ...diag, elTopBefore, elTopNow: rect.top, boxScrollTop: el.scrollTop,
-        outerScrollNow: outer.scrollTop, lineBottomNow, boxBottom, bar, boundBoxH,
-        scrollBy: needs ? lineBottomNow - target : 0,
-      })
       if (needs) animateTapScroll(el, el.scrollTop + (lineBottomNow - target))
     }
   }, [boundBoxH]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -1884,15 +1872,24 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         <div
           ref={columnRef}
           className="px-5 md:px-10 pt-4 md:pt-8 flex flex-col"
-          // Half a screen of scrollable space below the last line (Apple
-          // Notes) in the unbounded page. NOT while the keyboard is up: the
-          // bounded box carries its own room, and the outer must collapse
-          // to exactly its own height then (see the box-height effect).
+          // Scrollable tail below the last line (Apple Notes) in the
+          // unbounded page. NOT while the bounded box is up: the box carries
+          // its own tail, and the outer must collapse to exactly its own
+          // height then (see the box-height effect). Keyed on EDIT + box,
+          // not the box alone: boundBoxH is still set in the render that
+          // swaps back to read, and the exit conversion scrolls the page in
+          // that very render — with only the small padding the page had
+          // too little range, the scroll clamped to the end of the note,
+          // and the last lines snapped back to the screen bottom (which is
+          // exactly where a tapped low line had been before editing).
+          // 60vh, not 50: the box lets the last line reach the box's
+          // midpoint, roughly 40% down the screen; the page must allow the
+          // same depth or the exit clamps by the difference.
           style={{
             minHeight: '100%',
-            paddingBottom: boundBoxH != null
+            paddingBottom: bodyMode === 'edit' && boundBoxH != null
               ? 'calc(0.75rem + env(safe-area-inset-bottom))'
-              : 'calc(50vh + env(safe-area-inset-bottom))',
+              : 'calc(60vh + env(safe-area-inset-bottom))',
           }}
         >
           {bodyMode === 'edit' ? (
