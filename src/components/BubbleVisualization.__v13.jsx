@@ -586,7 +586,7 @@ function recenterBubbles(items, width, height, headerH, bottomPad, noteScale = 1
       bubs[i].cx = cx0 + Math.cos(ang) * (Rtx + step * BUB_HW)
       bubs[i].cy = cy0 + Math.sin(ang) * (Rty + step * BUB_HH)
     }
-    for (let iter = 0; iter < 120; iter++) {
+    for (let iter = 0; iter < 360; iter++) {
       let any = false
       for (let i = 0; i < bubs.length; i++) {
         for (let j = i + 1; j < bubs.length; j++) {
@@ -2749,7 +2749,7 @@ export function separateOverlaps(items, width, height, pinBubbles = false, ellip
   //      previous iteration; a pair whose depth stopped shrinking while both
   //      axes have room is caught in a neighbour cycle — push the other axis.
   const pairDepths = new Map()
-  for (let iter = 0; iter < 120; iter++) {
+  for (let iter = 0; iter < 360; iter++) {
     let moved = false
     // How wrong the arrangement is at the START of this iteration, in px: pair penetration
     // (accumulated below) plus anything hanging off the page. Both are the same unit, so
@@ -2781,7 +2781,7 @@ export function separateOverlaps(items, width, height, pinBubbles = false, ellip
           const before = yielder[axis]
           yielder[axis] += want
           boundsClamp(yielder)
-          const rest = (want - (yielder[axis] - before)) * TRANSFER_DAMPING
+          const gave = yielder[axis] - before; const rest = (want - gave) * (Math.abs(gave) < EPS ? 1 : TRANSFER_DAMPING)
           if (yielder === a) b[axis] -= rest
           else a[axis] -= rest
         }

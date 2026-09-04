@@ -2781,7 +2781,7 @@ export function separateOverlaps(items, width, height, pinBubbles = false, ellip
           const before = yielder[axis]
           yielder[axis] += want
           boundsClamp(yielder)
-          const rest = (want - (yielder[axis] - before)) * TRANSFER_DAMPING
+          const gave = yielder[axis] - before; const rest = (want - gave) * (Math.abs(gave) < EPS ? 1 : TRANSFER_DAMPING)
           if (yielder === a) b[axis] -= rest
           else a[axis] -= rest
         }
