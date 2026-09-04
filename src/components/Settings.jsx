@@ -86,6 +86,11 @@ const TIPS = [
   'Drag an item to the edge of the screen to move it to another page.',
 ]
 
+// Siri works out of the box on the iOS app — App Shortcuts register when the
+// app is installed — so this states what works rather than telling anyone to
+// set something up. Shown only in the native shell, where it's true.
+const SIRI_TIP = '“Hey Siri, add a note to Nubble” saves what you say as a note; “add a note to Ideas in Nubble” files it in that bubble.'
+
 // The bare-key shortcuts, in the order they're worth learning. Kept in step with
 // SHORTCUT_KEYS in lib/escapeStack.js by hand — there is no way to derive a readable
 // label from a keymap, and a list that lies is worse than no list.
@@ -565,7 +570,7 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes,
           <div>
             <SectionHeader label="Tips" />
             <Card>
-              {TIPS.map((tip, i) => (
+              {(Capacitor.isNativePlatform() ? [...TIPS, SIRI_TIP] : TIPS).map((tip, i) => (
                 <Fragment key={tip}>
                   {i > 0 && <Divider />}
                   <p className="text-sm px-4 py-3.5" style={{ color: 'var(--text)', lineHeight: 1.45 }}>
