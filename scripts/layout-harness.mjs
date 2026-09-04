@@ -9,6 +9,13 @@
 //   node scripts/layout-anchor-exp.mjs         # does the anchors' capture density matter?
 //   LAYOUT_ENTRY=<variant.jsx> node scripts/layout-harness.mjs   # A/B a modified copy
 //
+// TESTING LESSON (2026-09-04): the removal fix before this harness was validated from
+// anchors captured on a COMPACT, dense layout, so its scenarios never reached the
+// density band where the pass fails — "removal is clean" was an artefact of where the
+// anchors came from, not a property of the removal path. Validate every layout change
+// against BOTH sweeps AND vary where the anchors are captured (see anchorAt / the
+// anchor experiment); report the table, not a verdict.
+//
 // Findings on 2026-09-04 (see the commit that added this): the pipeline is a pure
 // function of (anchored positions, item count, seed) — add-shaped and remove-shaped
 // note sets of the same count fail identically — so "overlap on add" is overlap at
@@ -190,9 +197,10 @@ export function sweep(BV, { seeds = [1, 2, 3, 4, 5], bubbleCounts = [0, 3, 5], m
   for (const seed of seeds) for (const nBubbles of bubbleCounts) for (const anchorMode of modes) {
     const rows = runner(BV, { seed, nBubbles, n0, anchorMode, anchorAt })
     const key = nBubbles + 'b/' + anchorMode
-    summary[key] ??= { steps: 0, bad: 0, firstBadAt: [] }
+    summary[key] ??= { steps: 0, bad: 0, firstBadAt: [], paginatesAt: [] }
     let first = null
     for (const r of rows) {
+      if (r.note && r.note.startsWith('paginates')) { summary[key].paginatesAt.push(r.step); continue }
       if (r.overlaps === undefined) continue
       totalSteps++; summary[key].steps++
       if (r.overlaps > 0) {
@@ -211,7 +219,7 @@ if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) 
   const add = sweep(BV)
   console.log('ADD sweep: ' + add.totalSteps + ' steps, ' + add.badSteps + ' with residual overlap')
   console.log('  worst depth of bad steps:', JSON.stringify(add.depths), ' extra passes to clear:', JSON.stringify(add.extra), '\n')
-  console.table(Object.entries(add.summary).map(([k, v]) => ({ scenario: k, steps: v.steps, badSteps: v.bad, firstOverlapAt: v.firstBadAt.join(' ') })))
+  console.table(Object.entries(add.summary).map(([k, v]) => ({ scenario: k, steps: v.steps, badSteps: v.bad, firstOverlapAt: v.firstBadAt.join(' '), paginatesAt: v.paginatesAt.join(' ') })))
   const rem = sweep(BV, { runner: runRemove })
   console.log('\nREMOVE sweep: ' + rem.totalSteps + ' steps, ' + rem.badSteps + ' with residual overlap')
   console.log('  worst depth of bad steps:', JSON.stringify(rem.depths), '\n')

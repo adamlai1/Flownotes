@@ -867,6 +867,11 @@ export function noteGridCapacity(width, height, headerH, bottomPad, noteScale = 
 // with fewer items each — the intended trade. Items are never shrunk to fit more in;
 // the floors (noteRFor / minBubbleRFor) are untouched by any of this.
 export const PAGE_FILL = 0.72
+// Note cells a bubble additionally costs on a MIXED page, for the cluster silhouette the
+// notes are kept out of (see pageLoadFor). Calibrated against the layout harness on
+// 2026-09-04: the smallest value at which the add and remove sweeps stay clean below
+// the pagination threshold with 3 and 5 bubbles.
+export const MIXED_CLUSTER_NOTE_COST = 2
 
 // How many pages a given mix of bubbles and notes needs, and the blended per-page count.
 // Capacity comes from each type's REAL footprint, not a one-size bubble grid: notes render
@@ -930,7 +935,21 @@ export function pageLoadFor(bubbleN, noteN, width, height, noteScale, safeBottom
   // content-scaled bubbles (the cell is sized for the minimum bubble, and only the
   // smallest are actually that size) — 0.72 is the stricter of the two.
   const bubblesPerPage = Math.max(1, Math.floor(rawBubblesPerPage * PAGE_FILL))
-  const pageLoad = noteN / notesPerPage + bubbleN / bubblesPerPage
+  // Mixed pages: the bubble cluster costs the notes more than its cells. In pinned
+  // mode every free note is kept OUTSIDE the cluster's ellipse (separateOverlaps'
+  // projectOutOfEllipse), and that silhouette encloses the pockets between bubbles
+  // and the slivers beside them that no note box fits into — area the linear blend
+  // above still counts as note room. The harness (scripts/layout-harness.mjs)
+  // measured the consequence: with 3–5 bubbles, pages the blend admits leave notes
+  // overlapping from roughly 6–12 notes below their nominal note capacity, and
+  // neither more iterations nor a stronger push clears them, because there is no
+  // arrangement to find. So each bubble on a mixed page is also charged
+  // MIXED_CLUSTER_NOTE_COST note cells for its share of the silhouette, and the page
+  // paginates that much sooner. Pure pagination: no size, gap or physics change, and
+  // a level that already fit keeps its layout. Notes-only and bubbles-only pages are
+  // untouched (the cost applies only when both are present).
+  const clusterNotes = (bubbleN > 0 && noteN > 0) ? bubbleN * MIXED_CLUSTER_NOTE_COST : 0
+  const pageLoad = (noteN + clusterNotes) / notesPerPage + bubbleN / bubblesPerPage
   return {
     pageLoad,
     perPage: Math.max(1, Math.floor((bubbleN + noteN) / Math.max(pageLoad, 0.001))),
