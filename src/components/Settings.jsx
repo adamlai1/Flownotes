@@ -8,11 +8,6 @@ import { useAuth } from '../contexts/AuthContext'
 import { useLock } from '../contexts/LockContext'
 import { useEscapeLayer, ESC_LEVEL, KEYBOARD_MEDIA_QUERY } from '../lib/escapeStack'
 import { submitFeedback } from '../lib/syncService'
-import {
-  subscribeVoiceCaptureStatus,
-  peekVoiceQueue,
-  drainVoiceCaptures,
-} from '../lib/voiceCapture'
 import ImportNotes from './ImportNotes'
 
 function Toast({ message }) {
@@ -60,101 +55,6 @@ const Card = ({ children }) => (
 const Divider = () => (
   <div style={{ height: 1, background: 'var(--border)', marginLeft: 16 }} />
 )
-
-// ── Siri capture diagnostics ─────────────────────────────────────────────────
-//
-// Native only. Renders the voice-capture module's status mirror so the
-// readiness gate, the queue depth and the last drain can be read off the
-// screen — no Console.app. Its PRESENCE is itself a check: this panel ships
-// with the same web bundle as the consumer, so if Settings has no "Siri
-// capture" section, the native bundle is stale (`npm run build && npx cap
-// sync ios` was skipped) and no consumer exists either.
-
-const VOICE_PANEL_BUILD = 'voice-capture v1.3'
-
-const StatusRow = ({ label, value, tone }) => (
-  <div className="flex items-start justify-between gap-4 px-4 py-2.5">
-    <span className="text-sm shrink-0" style={{ color: 'var(--text)' }}>{label}</span>
-    <span
-      className="text-xs text-right leading-relaxed break-words"
-      style={{ color: tone === 'ok' ? '#22c55e' : tone === 'bad' ? '#f87171' : 'var(--text-muted)', maxWidth: '68%' }}
-    >
-      {value}
-    </span>
-  </div>
-)
-
-function VoiceCapturePanel() {
-  const [s, setS] = useState(null)
-  const [busy, setBusy] = useState(false)
-
-  useEffect(() => {
-    const unsub = subscribeVoiceCaptureStatus(setS)
-    peekVoiceQueue()
-    return unsub
-  }, [])
-
-  if (!s) return null
-
-  async function refresh() {
-    if (busy) return
-    setBusy(true)
-    try { await peekVoiceQueue() } finally { setBusy(false) }
-  }
-  async function drainNow() {
-    if (busy) return
-    setBusy(true)
-    try { await drainVoiceCaptures(); await peekVoiceQueue() } finally { setBusy(false) }
-  }
-
-  const gateValue = s.gate.ready ? 'Open — captures drain' : `Closed: ${s.gate.reason ?? 'unknown'}`
-  const queueValue = s.pluginError
-    ? `plugin error: ${s.pluginError}`
-    : s.queue === null ? 'not read yet' : s.queue === 0 ? 'empty' : `${s.queue} waiting`
-  const lastDrain = s.drains === 0
-    ? 'never'
-    : `${new Date(s.lastDrainAt).toLocaleTimeString()} — listed ${s.lastListed}, acked ${s.lastAcked}${s.lastError ? `, error: ${s.lastError}` : ''}`
-
-  return (
-    <div>
-      <SectionHeader label="Siri capture" />
-      <Card>
-        <StatusRow label="Bundle" value={VOICE_PANEL_BUILD} tone="ok" />
-        <Divider />
-        <StatusRow label="Gate" value={gateValue} tone={s.gate.ready ? 'ok' : 'bad'} />
-        <Divider />
-        <StatusRow label="Consumer" value={s.consumer ? 'subscribed' : 'not subscribed'} tone={s.consumer ? 'ok' : 'bad'} />
-        <Divider />
-        <StatusRow label="Queue" value={queueValue} tone={s.pluginError ? 'bad' : s.queue ? 'bad' : undefined} />
-        <Divider />
-        <StatusRow label="Last drain" value={lastDrain} tone={s.lastError ? 'bad' : undefined} />
-        <Divider />
-        <div className="flex items-center justify-end gap-2 px-4 py-2.5">
-          <button
-            onClick={refresh}
-            disabled={busy}
-            className="text-[13px] font-medium px-3 py-1.5 rounded-[10px]"
-            style={{ background: 'var(--surface)', border: '1px solid var(--border)', color: 'var(--text)', opacity: busy ? 0.45 : 1 }}
-          >
-            Refresh
-          </button>
-          <button
-            onClick={drainNow}
-            disabled={busy || !s.gate.ready}
-            className="text-[13px] font-medium px-3 py-1.5 rounded-[10px]"
-            style={{ background: '#6366f1', color: '#fff', opacity: (busy || !s.gate.ready) ? 0.45 : 1 }}
-          >
-            Drain now
-          </button>
-        </div>
-      </Card>
-      <p className="text-[11px] mt-2 px-1 leading-relaxed" style={{ color: 'var(--text-muted)' }}>
-        Notes spoken to Siri wait in the queue until the gate is open. If this
-        section is missing entirely, the app is running an old web bundle.
-      </p>
-    </div>
-  )
-}
 
 // Matches the server-side clamp in submitFeedback so the counter can't promise room the
 // insert would truncate.
@@ -588,9 +488,6 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes,
               still stored normally on this device and in your account.
             </p>
           </div>
-
-          {/* SIRI CAPTURE DIAGNOSTICS (native only) */}
-          {Capacitor.isNativePlatform() && <VoiceCapturePanel />}
 
           {/* FEEDBACK */}
           <div>

@@ -12,8 +12,27 @@ capabilities, so `project.pbxproj` is only ever touched by Xcode itself.
 - Extension files (canonical copies to paste in): `share-extension-src/`
 - Web side: already wired (`src/lib/shareImport.js` + Import screen prop)
 
+> ## ⚠️ `git pull` alone is NEVER enough on the Mac
+>
+> The web bundle Xcode packages lives in `ios/App/App/public`, which is
+> **untracked** — git never touches it. After **every** pull, before building:
+>
+> ```
+> npm run build && npx cap sync ios
+> ```
+>
+> Skip it and Xcode happily ships whatever JavaScript was synced last time,
+> while the Swift side is current. That mismatch has now caused **two
+> separate multi-hour debugging sessions** (this extension: app opened with
+> an empty Import; voice capture: queue filled, nothing ever drained). Both
+> times the native side was fine and the fix was this one command. If a
+> symptom looks like "native works, web side does nothing", run it before
+> reading a single log line.
+
 **Prereqs:** Mac with Xcode 15+, signed into the team (749R476GNN), a device
-on iOS 15+. Run `npm run build && npx cap sync ios` first.
+on iOS 15+ (16+ once v1.3's voice capture is in — see
+`VOICE_CAPTURE_SETUP.md`). Run `npm run build && npx cap sync ios` first
+(see above).
 
 **Updating an existing install:** the Xcode target's `ShareViewController.swift`
 is a *pasted copy* of `share-extension-src/ShareViewController.swift`, so any

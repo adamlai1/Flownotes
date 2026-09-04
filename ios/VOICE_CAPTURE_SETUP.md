@@ -52,8 +52,25 @@ This is why there is no App Intents *extension* target: an extension would
 need an iOS 17 floor and would force the intent type into both bundles (the
 shortcuts provider must live in the app), for no gain over the in-app run.
 
+> ## ⚠️ `git pull` alone is NEVER enough on the Mac
+>
+> The web bundle Xcode packages lives in `ios/App/App/public`, which is
+> **untracked** — git never touches it. After **every** pull, before building:
+>
+> ```
+> npm run build && npx cap sync ios
+> ```
+>
+> Skip it and Xcode happily ships whatever JavaScript was synced last time,
+> while the Swift side is current. That mismatch has now caused **two
+> separate multi-hour debugging sessions** (share extension: app opened with
+> an empty Import; voice capture: queue filled, nothing ever drained). Both
+> times the native side was fine and the fix was this one command. If a
+> symptom looks like "native works, web side does nothing", run it before
+> reading a single log line.
+
 **Prereqs:** Mac with Xcode 15+, signed into the team (749R476GNN), a device
-on **iOS 16+**. Run `npm run build && npx cap sync ios` first.
+on **iOS 16+**. Run `npm run build && npx cap sync ios` first (see above).
 
 **Updating an existing install:** unlike the share extension, the intent file
 is added to the target *by reference* (step 4, "Copy items if needed"
@@ -216,35 +233,21 @@ Two categories: `intent` (the intent ran) and `store` (the queue).
 
 ## Troubleshooting
 
-**Start with the in-app panel, not Console.** Settings → **Siri capture**
-(native builds only) shows, live: the bundle marker, whether the readiness
-gate is open and *which condition* is holding it shut, whether the consumer
-is subscribed, the queue depth (read-only — looking never deletes), and the
-last drain's listed/acked counts or error. **Refresh** re-reads the queue;
-**Drain now** runs a drain by hand (only enabled when the gate is open).
-
-- **Settings has no "Siri capture" section at all:** the native app is
-  running an OLD web bundle — the section ships in the same bundle as the
-  consumer, so no section means no consumer either, and the queue can only
-  grow. `ios/App/App/public` is untracked; `git pull` never refreshes it.
-  Run `npm run build && npx cap sync ios`, then rebuild in Xcode. This is
-  the first thing to rule out whenever Siri says "Added" (Console shows
-  `written`) but opening Nubble does nothing.
-- **Panel present, Gate says "Closed: initial sync not settled for …":**
-  the sync effect never resolved for this user — read the sync status the
-  row includes. `syncing` that never ends means a hung initial sync;
-  `error`/`offline` means it bailed and captures are deliberately held
-  (see Part C, offline case).
-- **Panel present, Gate open, Queue shows N waiting, Last drain "never":**
-  the consumer subscribed but no drain ran — tap **Drain now** and read the
-  Last drain row.
-- **Queue says "plugin error: … not implemented":** `VoiceCapturePlugin`
-  isn't registered on the bridge — `MainViewController.capacitorDidLoad`
-  must call `registerPluginInstance(VoiceCapturePlugin())`, and the
-  storyboard must point at `MainViewController`.
-- **Last drain shows "listed N, acked 0" with an error:** the web consumer
-  threw before persisting — the error text is the JS message. Queue is
-  intact.
+- **Siri says "Added" (Console shows `written`, queue depth climbing) but
+  opening Nubble does nothing — no toast, no notes:** rule out a stale web
+  bundle FIRST, before any log filtering. See the warning at the top: the
+  native bundle folder is untracked, so `git pull` leaves the app running
+  JavaScript from before the consumer existed. Run
+  `npm run build && npx cap sync ios`, rebuild in Xcode, open the app —
+  the queue is intact and every waiting capture lands on that open. (This
+  exact symptom cost a multi-hour session on 2026-09-03; the write side was
+  fine the whole time.)
+- **Bundle is current, captures still don't land while signed in:** the
+  readiness gate is holding them — by design when the initial sync didn't
+  settle (offline at launch, or a sync error). Force-quit and relaunch
+  online; a successful sync releases the queue. If the status pill shows
+  synced and they still don't land, that's a bug in `voiceReady` in
+  `App.jsx`; the queue is intact.
 
 - **Siri says "I don't see an app for that" / phrase not recognised:** the
   App Shortcut isn't registered. Step 6 hasn't been run since step 4, or the
