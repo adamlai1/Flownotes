@@ -3,7 +3,7 @@ import { App } from '@capacitor/app'
 
 // iOS Siri / Shortcuts voice capture → notes.
 //
-// AddNoteIntent (ios/voice-capture-src) runs in the background — Nubble is
+// AddNoteIntent (ios/App/App/AddNoteIntent.swift) runs in the background — Nubble is
 // launched without a scene if it isn't running, so there is no web layer to
 // talk to — and writes each spoken note as its own file in the App Group
 // queue (VoiceCaptureStore in ios/App/App/SceneDelegate.swift). This module

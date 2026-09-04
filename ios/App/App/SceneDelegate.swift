@@ -50,8 +50,8 @@ public class SharedImportPlugin: CAPPlugin, CAPBridgedPlugin {
 
 // ── Siri voice capture queue ────────────────────────────────────────────────
 //
-// The App Group hand-off for AddNoteIntent (ios/voice-capture-src, compiled
-// into the App target by ios/VOICE_CAPTURE_SETUP.md). Lives here, in an
+// The App Group hand-off for AddNoteIntent (AddNoteIntent.swift beside this
+// file, made a compile source by ios/VOICE_CAPTURE_SETUP.md). Lives here, in an
 // existing compile source, for the same reason SharedImportPlugin does: main
 // builds without any "add files" step. Until the intent is added this code is
 // registered but idle — the queue directory is simply never written to.
@@ -194,8 +194,8 @@ enum VoiceCaptureStore {
 
     // ── Bubble mirror ────────────────────────────────────────────────────────
     //
-    // The bubble list Siri's entity query reads (voice-capture-src/
-    // BubbleEntity.swift). Written by the web layer through setBubbles();
+    // The bubble list Siri's entity query reads (BubbleEntity.swift beside
+    // this file). Written by the web layer through setBubbles();
     // lives beside the queue, NOT inside it, so list()/ack() never see it.
     // Read best-effort: an unreadable mirror means "no bubbles", never an
     // error, because the intent must run regardless.
@@ -295,7 +295,7 @@ public class VoiceCapturePlugin: CAPPlugin, CAPBridgedPlugin {
     }
 
     /// Tell Siri the bubble entity set changed. Dispatched BY CLASS NAME so
-    /// this file keeps compiling before voice-capture-src is in the target
+    /// this file keeps compiling before the two intent files are in the target
     /// (the same necessity the share extension's launchHostApp documents):
     /// VoiceBubbleSync lives in BubbleEntity.swift and imports AppIntents.
     /// Absent, this is a silent no-op — the mirror is still written and the

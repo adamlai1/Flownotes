@@ -17,8 +17,10 @@ import os.log
 // notification lets VoiceCapturePlugin hand the capture to the web layer at
 // once. Either way the user never leaves Siri.
 //
-// This file is NOT a compile source until ios/VOICE_CAPTURE_SETUP.md adds it
-// to the App target (v1.3). Until then main builds exactly as before.
+// This file sits beside SceneDelegate.swift but is a compile source only once
+// ios/VOICE_CAPTURE_SETUP.md (Part B) adds it — and BubbleEntity.swift — to the
+// App target (v1.3). Until then main builds exactly as before. THIS is the
+// compiled copy: there is no other.
 //
 // Logging: filter Console.app on subsystem com.adamlai.flownotes.VoiceCapture.
 // Only lengths and ids are logged, never the spoken text.

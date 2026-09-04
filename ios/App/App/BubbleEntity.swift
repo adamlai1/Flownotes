@@ -17,9 +17,11 @@ import os.log
 // nothing all resolve to *something*, and the web consumer makes the final
 // filing decision (found → that bubble; not found → root, with a toast).
 //
-// This file is compiled into the App target alongside AddNoteIntent.swift
-// (ios/VOICE_CAPTURE_SETUP.md, Part B) — never into SceneDelegate.swift's
-// world, which must keep compiling before either file is added.
+// This file sits beside SceneDelegate.swift and is compiled into the App
+// target together with AddNoteIntent.swift (ios/VOICE_CAPTURE_SETUP.md, Part
+// B). SceneDelegate.swift never references these types directly — it must
+// keep compiling before either file is added. THIS is the compiled copy:
+// there is no other.
 
 @available(iOS 16.0, *)
 struct BubbleEntity: AppEntity {

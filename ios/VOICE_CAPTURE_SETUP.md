@@ -18,14 +18,20 @@ AppShortcutsProvider is compiled in.
   `App/App/SceneDelegate.swift` next to `SharedImportPlugin`, and
   `MainViewController` already registers the plugin — so main compiles today,
   before any of these steps.
-- The intent (the TWO files this checklist adds to the target):
-  - `voice-capture-src/AddNoteIntent.swift` — `AddNoteIntent` plus
-    `NubbleShortcuts`, the App Shortcuts provider that supplies the Siri
-    phrases.
-  - `voice-capture-src/BubbleEntity.swift` — the optional bubble parameter
-    ("add a note to Ideas in Nubble"): `BubbleEntity`, its query, and
+- The intent (the TWO files this checklist adds to the target), both in
+  `App/App/` next to `SceneDelegate.swift` — **these are the compiled
+  copies; there is no template folder**:
+  - `App/App/AddNoteIntent.swift` — `AddNoteIntent` plus `NubbleShortcuts`,
+    the App Shortcuts provider that supplies the Siri phrases.
+  - `App/App/BubbleEntity.swift` — the optional bubble parameter ("add a
+    note to Ideas in Nubble"): `BubbleEntity`, its query, and
     `VoiceBubbleSync`, which the plugin calls by class name to tell Siri the
     bubble list changed.
+
+  (They used to live in `ios/voice-capture-src/`. Xcode's *Add Files* copied
+  them into `App/App/` rather than referencing them, leaving two copies of
+  which only the `App/App/` one built. The originals were removed so an
+  edit can only ever land in the copy that compiles.)
 - Info.plist: `INAlternativeAppNames` (already in place). `.applicationName`
   in a phrase matches `CFBundleDisplayName` (now "Nubble") *and* every entry
   here, so this is belt-and-braces: "Add a note to Nubble" keeps working
@@ -77,10 +83,10 @@ shortcuts provider must live in the app), for no gain over the in-app run.
 **Prereqs:** Mac with Xcode 15+, signed into the team (749R476GNN), a device
 on **iOS 16+**. Run `npm run build && npx cap sync ios` first (see above).
 
-**Updating an existing install:** unlike the share extension, the intent file
-is added to the target *by reference* (step 4, "Copy items if needed"
-**unchecked**), so the repo file IS the compiled file — edit it in place and
-rebuild; no re-pasting. Web-side changes still need
+**Updating an existing install:** unlike the share extension there is no
+pasted copy — `App/App/AddNoteIntent.swift` and `App/App/BubbleEntity.swift`
+are tracked in git AND are what Xcode compiles, so edit them in place, pull
+on the Mac, rebuild. Web-side changes still need
 `npm run build && npx cap sync ios` or the native bundle goes stale.
 
 ---
@@ -121,23 +127,32 @@ stop receiving updates from 1.3 on.
 
 ## Part B — Add the intent (~5 min)
 
-4. **Add the files to the App target.** In the navigator select the **App**
-   group (the folder holding `SceneDelegate.swift`) → *File → Add Files to
-   "App"…* → select BOTH `ios/voice-capture-src/AddNoteIntent.swift` and
-   `ios/voice-capture-src/BubbleEntity.swift`.
-   - **Copy items if needed: UNCHECKED** (add by reference — the repo file is
-     the one compiled).
-   - *Added folders*: irrelevant for a single file.
+4. **Add the files to the App target.** Both already exist on disk in
+   `ios/App/App/` (they come with `git pull`); this step only tells Xcode
+   to compile them. In the navigator select the **App** group (the folder
+   holding `SceneDelegate.swift`) → *File → Add Files to "App"…* → select
+   BOTH `ios/App/App/AddNoteIntent.swift` and `ios/App/App/BubbleEntity.swift`.
+   - The files are already inside the group's folder, so *Copy items if
+     needed* makes no copy either way — leave it **unchecked** regardless.
    - *Add to targets*: **App** only. Not ShareExtension.
 
    Xcode writes the file references and build-phase entries into
-   `project.pbxproj`. The files show in the navigator with a slightly
-   different path (`../../voice-capture-src/…`) — that is expected.
+   `project.pbxproj` — commit that change from the Mac so the next checkout
+   builds the intent without repeating this step.
+
+   **If Xcode already copied them into `App/App/` before this move** (the
+   original checklist pointed at `ios/voice-capture-src/`, and *Add Files*
+   copied rather than referenced): on the Mac, delete the two untracked
+   copies BEFORE pulling — `git pull` refuses to overwrite untracked files
+   at the same paths — then pull. The tracked files land at exactly the
+   paths the project already references, so nothing else changes:
+
+   ```
+   rm ios/App/App/AddNoteIntent.swift ios/App/App/BubbleEntity.swift && git pull
+   ```
 
    Both or neither: `AddNoteIntent.swift` references `BubbleEntity`, so
-   adding only the intent file fails to compile. (If a build from before the
-   bubble parameter is on the Mac, add `BubbleEntity.swift` to the same
-   target now — the intent file already in the target picks it up.)
+   adding only the intent file fails to compile.
 
 5. **Build the App scheme.** Expected: no errors, and a build log line from
    `appintentsmetadataprocessor` (Xcode extracts the intent + shortcut
