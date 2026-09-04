@@ -9,18 +9,17 @@
 // twice: at 12 a side, an 80px bubble gave the name only 56px of line, which put a
 // two-word name like "Past Memories" out of reach of one line at any allowed size.
 export const TEXT_PAD = 8
-// Minimum vertical padding the LABEL BLOCK (name + count, centred together) keeps
-// from the top and bottom borders. The name's font budget is derived from it
-// (nameBoxHeight), so the block can't cross it: the name shrinks or wraps first.
+// Minimum vertical padding the NAME keeps from the top and bottom borders on a bubble
+// with no count block.
 export const LABEL_MIN_V_PAD = 5
 export const NAME_COUNT_GAP = 4   // vertical gap between the name and the count line
-// Below this radius a bubble with BOTH sub-bubbles and notes shows its counts on one
-// line ("1b · 4n") instead of two ("1 bubble" / "4 notes"): at the 80×53 floor two
-// count lines plus the gap take 25px of a 53px box. Nudge on device. HYST keeps a
-// bubble hovering at the boundary from flipping between forms as it is resized: it
-// collapses below MAX_R and expands again only above MAX_R + HYST_R.
-export const COUNT_ONE_LINE_MAX_R = 50
-export const COUNT_ONE_LINE_HYST_R = 3
+// Minimum clearance between the bottom of the count block and the bottom border. The
+// name is centred on its own and the count hangs beneath it, so the name's font budget
+// is what keeps this clearance (nameBoxHeight): the name shrinks or wraps before the
+// count can get closer than this. It is also what decides whether a bubble with both
+// sub-bubbles and notes shows two count lines or the compressed "1b · 4n" line
+// (countLayoutFor). Nudge on device.
+export const COUNT_MIN_CLEARANCE = 5
 export const COUNT_FONT = 9       // fixed: the count never scales with the name
 export const COUNT_LINE_H = 1.15
 export const NAME_MAX_FONT = 15   // cap, so short names don't dwarf longer ones
@@ -46,17 +45,58 @@ export function wrapLineCount(words, cpl) {
   return lines
 }
 
-// Height available to the name, once the count block has taken its share.
+// Height available to the name, honest about where the count block actually sits.
 //
-// This budget is only true if the name and the count are centred TOGETHER as one
-// block (BubbleCircle lays them out that way). It used to be computed like this while
-// the count hung below a name centred on its own — so the name was sized as if it had
-// the block's room, and the count landed on the bottom border.
+// The name is centred in the box ON ITS OWN, at a consistent height whether or not it
+// has counts, and the count block hangs beneath it. So with a name of height h the
+// count's bottom edge is at H/2 + h/2 + gap + countBlock, and for that to stay
+// COUNT_MIN_CLEARANCE above the border the name may be at most
+// H − 2·(gap + countBlock + clearance) tall. (This used to be H − 2·pad − countBlock,
+// which is the budget for a name and count centred TOGETHER — a geometry the markup
+// never had — so the name was sized for room it didn't have and the count landed on
+// the bottom border.)
 export function nameBoxHeight(boxH, countLines) {
-  const countBlock = countLines > 0
-    ? countLines * COUNT_FONT * COUNT_LINE_H + NAME_COUNT_GAP
-    : 0
-  return Math.max(boxH - LABEL_MIN_V_PAD * 2 - countBlock, NAME_MIN_FONT * NAME_LINE_H)
+  const reserve = countLines > 0
+    ? NAME_COUNT_GAP + countLines * COUNT_FONT * COUNT_LINE_H + COUNT_MIN_CLEARANCE
+    : LABEL_MIN_V_PAD
+  return Math.max(boxH - reserve * 2, NAME_MIN_FONT * NAME_LINE_H)
+}
+
+// Does `name` fit `boxW` × `boxH` at `size` without truncation? (fitNameFont returns
+// the floor both when the name fits there and when nothing fits, so a caller that
+// needs the distinction asks this.)
+function nameFitsAt(name, boxW, boxH, size) {
+  const words = (name || '').split(/\s+/).filter(Boolean)
+  if (!words.length) return true
+  const cpl = Math.floor(boxW / (size * NAME_CHAR_W))
+  const linesAllowed = Math.max(1, Math.floor(boxH / (size * NAME_LINE_H)))
+  return size * NAME_LINE_H <= boxH && wrapLineCount(words, cpl) <= linesAllowed
+}
+
+// Which count form a bubble gets, decided from CLEARANCE, not size, and without any
+// rendering: the box, the fixed count metrics and the name's estimated fit are all
+// known before layout. Returns { countLines, collapsed, nameBoxH }.
+//
+// A bubble with both sub-bubbles and notes keeps the two-line form ("1 bubble" /
+// "4 notes") if, with two lines reserved, the name still fits at a size no smaller
+// than the count text — a name squeezed below its own subtitle has lost the room the
+// two lines were supposed to share. Otherwise it collapses to one line ("1b · 4n"),
+// which frees a count line's worth of budget for the name. So a short name keeps two
+// lines on a bubble where a long, wrapping name collapses — the rule is "does it fit
+// with breathing room", not "is it small". Pure in (name, boxW, boxH, counts), so it
+// can't oscillate: the measured pass that corrects the name's font afterwards only
+// ever moves within the budget chosen here, never the decision.
+export function countLayoutFor(name, boxW, boxH, bubbleCount, noteCount) {
+  const has = (bubbleCount > 0 ? 1 : 0) + (noteCount > 0 ? 1 : 0)
+  if (has < 2) return { countLines: has, collapsed: false, nameBoxH: nameBoxHeight(boxH, has) }
+  const twoLineBox = boxH - 2 * (NAME_COUNT_GAP + 2 * COUNT_FONT * COUNT_LINE_H + COUNT_MIN_CLEARANCE)
+  if (twoLineBox >= COUNT_FONT * NAME_LINE_H) {
+    const size = fitNameFont(name, boxW, twoLineBox)
+    if (size >= COUNT_FONT && nameFitsAt(name, boxW, twoLineBox, size)) {
+      return { countLines: 2, collapsed: false, nameBoxH: nameBoxHeight(boxH, 2) }
+    }
+  }
+  return { countLines: 1, collapsed: true, nameBoxH: nameBoxHeight(boxH, 1) }
 }
 
 // Largest size at which the whole name is estimated to fit in `boxW` × `boxH`.

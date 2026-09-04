@@ -8,7 +8,7 @@ import { buildLockIndex } from '../utils/locks'
 import {
   fitNameFont, nameBoxHeight,
   TEXT_PAD, NAME_COUNT_GAP, COUNT_FONT, COUNT_LINE_H,
-  COUNT_ONE_LINE_MAX_R, COUNT_ONE_LINE_HYST_R,
+  countLayoutFor,
   NAME_MAX_FONT, NAME_MIN_FONT, NAME_LINE_H,
 } from '../utils/bubbleText'
 import { TAG_COLORS, ROOT_BUBBLE_ID, SORT_MODES } from '../data/defaultData'
@@ -1889,32 +1889,27 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating
   const gated = !!item.gated
   const name = gated ? 'Locked' : (item.name || '')
 
-  // Count block. Fixed size — it's secondary information, so it never scales with
-  // the name or the bubble. A bubble with only notes or only sub-bubbles is one
-  // line; one with both is two lines ("1 bubble" / "4 notes") down to
-  // COUNT_ONE_LINE_MAX_R and one compressed line ("1b · 4n") below it — same dot,
-  // same colour, so it reads as the same label squeezed, and the two-line form the
-  // bubble shows when it grows teaches the abbreviation. Hysteresis (see the
-  // constants) so a bubble resized across the boundary settles into one form.
-  const hasBoth = item.childBubbleCount > 0 && item.noteCount > 0
-  const collapsedRef = useRef(false)
-  const collapseCounts = hasBoth && (
-    collapsedRef.current
-      ? item.r < COUNT_ONE_LINE_MAX_R + COUNT_ONE_LINE_HYST_R
-      : item.r < COUNT_ONE_LINE_MAX_R
-  )
-  collapsedRef.current = collapseCounts
-  const countLines = collapseCounts ? 1 : (item.childBubbleCount > 0 ? 1 : 0) + (item.noteCount > 0 ? 1 : 0)
-  const showSub = !gated && countLines > 0 && item.r >= 34
-
   // Rendered box: a wide rounded rectangle, not a circle.
   const W = Math.round(item.r * 2 * BUB_HW)
   const H = Math.round(item.r * 2 * BUB_HH)
-
-  // Vertical budget: the name is centred, the count hangs directly beneath it, and
-  // both have to live inside H with a little breathing room top and bottom.
   const lineW = Math.max(W - TEXT_PAD * 2, 1)   // usable width, every line
-  const nameBoxH = nameBoxHeight(H, showSub ? countLines : 0)
+
+  // Count block. Fixed size — it's secondary information, so it never scales with
+  // the name or the bubble. A bubble with only notes or only sub-bubbles is one
+  // line. One with both is two lines ("1 bubble" / "4 notes") when, with two lines
+  // reserved, the name still fits above them with COUNT_MIN_CLEARANCE below —
+  // otherwise one compressed line ("1b · 4n"): same dot, same colour, so it reads as
+  // the same label squeezed, and the two-line form the bubble shows when it grows
+  // teaches the abbreviation. Decided by clearance, not size (countLayoutFor), from
+  // the name's estimated fit — no render, so nothing to flicker.
+  //
+  // Vertical budget: the name is centred ON ITS OWN, the count hangs directly beneath
+  // it, and nameBoxH is what keeps the count clear of the bottom border.
+  const counts = countLayoutFor(gated ? '' : name, lineW, H, gated ? 0 : item.childBubbleCount, gated ? 0 : item.noteCount)
+  const countLines = counts.countLines
+  const collapseCounts = counts.collapsed
+  const showSub = !gated && countLines > 0 && item.r >= 34
+  const nameBoxH = showSub ? counts.nameBoxH : nameBoxHeight(H, 0)
 
   // Width the name itself gets, which on a gated bubble is what the lock glyph and its
   // gap leave of the line. The gap is figured at the cap rather than the current size so
@@ -2114,12 +2109,11 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating
             place of the dark rest border. Sits inside the overflow:hidden radius at
             inset 0, so nothing clips. */}
         {!isLight && !isDragging && <div aria-hidden style={rimStyle(BUBBLE_RIM)} />}
-        {/* Label block: the title row (lock glyph + name) and the count beneath it are
-            both flow children of the bubble's centred flex column, so they centre
-            TOGETHER as one block. That is the geometry nameBoxHeight budgets for — the
-            count used to hang off the title with position:absolute while the title
-            alone was centred, which sized the name as if it had the whole block's room
-            and put the count on the bottom border. */}
+        {/* Text container: the title is centred (both axes) in the bubble ON ITS OWN, at
+            the same height whether or not it has counts. The count is anchored right
+            below the title text (top: 100%) so it hugs it without moving the title;
+            nameBoxHeight budgets the title for exactly this geometry, so the count's
+            bottom edge keeps COUNT_MIN_CLEARANCE from the border. */}
         <div style={{
           position: 'relative',
           display: 'flex',
@@ -2159,44 +2153,43 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating
           }}>
             {name}
           </span>
+          {showSub && (
+            <div style={{
+              position: 'absolute',
+              top: '100%',       // directly below the title text
+              // Match the title's horizontal padding (aligns with the title content box).
+              left: TEXT_PAD,
+              right: TEXT_PAD,
+              marginTop: NAME_COUNT_GAP,
+              // Fixed, except that it never outgrows the name above it: a long name in a
+              // small bubble can be sized down past COUNT_FONT, and a count bigger than
+              // the title it belongs to reads as the more important of the two. The
+              // height budget still reserves COUNT_FONT, so this only ever frees space.
+              fontSize: Math.min(COUNT_FONT, fontSize),
+              color: isLight ? (solidText === '#ffffff' ? 'rgba(255,255,255,0.65)' : 'rgba(31,41,55,0.55)') : 'rgba(255,255,255,0.48)',
+              fontWeight: 500,
+              textAlign: 'center',
+              lineHeight: COUNT_LINE_H,
+              // Each count on its own line; wrap a long line if needed.
+              wordBreak: 'normal',
+              overflowWrap: 'anywhere',
+              overflow: 'hidden',
+            }}>
+              {collapseCounts ? (
+                <div>{item.childBubbleCount}b · {item.noteCount}n</div>
+              ) : (
+                <>
+                  {item.childBubbleCount > 0 && (
+                    <div>{item.childBubbleCount} {item.childBubbleCount === 1 ? 'bubble' : 'bubbles'}</div>
+                  )}
+                  {item.noteCount > 0 && (
+                    <div>{item.noteCount} {item.noteCount === 1 ? 'note' : 'notes'}</div>
+                  )}
+                </>
+              )}
+            </div>
+          )}
         </div>
-        {showSub && (
-          <div style={{
-            flexShrink: 0,
-            width: '100%',
-            // Match the title's horizontal padding (aligns with the title content box).
-            padding: `0 ${TEXT_PAD}px`,
-            boxSizing: 'border-box',
-            marginTop: NAME_COUNT_GAP,
-            // Fixed, except that it never outgrows the name above it: a long name in a
-            // small bubble can be sized down past COUNT_FONT, and a count bigger than
-            // the title it belongs to reads as the more important of the two. The
-            // height budget still reserves COUNT_FONT, so this only ever frees space.
-            fontSize: Math.min(COUNT_FONT, fontSize),
-            color: isLight ? (solidText === '#ffffff' ? 'rgba(255,255,255,0.65)' : 'rgba(31,41,55,0.55)') : 'rgba(255,255,255,0.48)',
-            fontWeight: 500,
-            textAlign: 'center',
-            lineHeight: COUNT_LINE_H,
-            // Each count on its own line; wrap a long line if needed.
-            wordBreak: 'normal',
-            overflowWrap: 'anywhere',
-            overflow: 'hidden',
-            pointerEvents: 'none',
-          }}>
-            {collapseCounts ? (
-              <div>{item.childBubbleCount}b · {item.noteCount}n</div>
-            ) : (
-              <>
-                {item.childBubbleCount > 0 && (
-                  <div>{item.childBubbleCount} {item.childBubbleCount === 1 ? 'bubble' : 'bubbles'}</div>
-                )}
-                {item.noteCount > 0 && (
-                  <div>{item.noteCount} {item.noteCount === 1 ? 'note' : 'notes'}</div>
-                )}
-              </>
-            )}
-          </div>
-        )}
       </motion.div>
 
       {/* Selection overlay — ring (when selected) + checkmark badge, in the non-clipped
