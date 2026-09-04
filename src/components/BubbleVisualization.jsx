@@ -2274,6 +2274,12 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
   // preview then fills whatever vertical space is left — as many lines as will fit,
   // NOT a fixed cap. The body is shown ONLY when the whole first line (the title) is
   // fully visible without truncation; if the title is cut off, the body is hidden.
+  //
+  // NOTE: this is the second, separate text-budget implementation on the canvas —
+  // BubbleCircle's label (nameBoxHeight / bubbleText.js) is the other — and both
+  // have had the same class of bug: the budget assuming a line height the render
+  // didn't use. If a third surface needs a title + secondary-line budget, share one
+  // implementation rather than adding a third copy.
   const CHAR_W = 0.55
   const LINE_HT = 1.25
   const usableW = Math.max(W * 0.86, 1)
@@ -2399,7 +2405,7 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
           textAlign: 'center',
           textShadow: isLight ? 'none' : '0 1px 4px rgba(0,0,0,0.55)',
           padding: '0 5px',
-          lineHeight: 1.25,
+          lineHeight: LINE_HT,
           maxWidth: '92%',
           wordBreak: 'break-word',
           pointerEvents: 'none',
@@ -2407,6 +2413,14 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
           display: '-webkit-box',
           WebkitLineClamp: maxTitleLines,
           WebkitBoxOrient: 'vertical',
+          // Never let the title give up height. overflow:hidden makes both spans
+          // shrinkable flex items (no minimum height), so an over-tall card used to
+          // compress the TITLE box below its lines — the last line half-clipped with
+          // the preview drawn straight over it. With the title rigid, any overflow
+          // an engine's metrics produce lands on the preview instead, which loses
+          // its bottom line. The title is always ≤ usableH (maxTitleLines), so it
+          // can never overflow the card on its own.
+          flexShrink: 0,
         }}>
           {label}
         </span>
@@ -2414,6 +2428,11 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
           <span style={{
             fontSize: subSize,
             color: isLight ? (solidText === '#ffffff' ? 'rgba(255,255,255,0.65)' : 'rgba(31,41,55,0.55)') : 'rgba(255,255,255,0.48)',
+            // Explicit: bodyLines is budgeted at subSize * LINE_HT, and without this
+            // the span inherited the page's 1.5 — every preview line rendered 20%
+            // taller than the space reserved for it, which is what pushed the seed
+            // note over its card.
+            lineHeight: LINE_HT,
             marginTop: 2,
             fontWeight: 500,
             pointerEvents: 'none',
