@@ -9,8 +9,18 @@
 // twice: at 12 a side, an 80px bubble gave the name only 56px of line, which put a
 // two-word name like "Past Memories" out of reach of one line at any allowed size.
 export const TEXT_PAD = 8
-export const BUB_V_PAD = 3        // top/bottom breathing room
+// Minimum vertical padding the LABEL BLOCK (name + count, centred together) keeps
+// from the top and bottom borders. The name's font budget is derived from it
+// (nameBoxHeight), so the block can't cross it: the name shrinks or wraps first.
+export const LABEL_MIN_V_PAD = 5
 export const NAME_COUNT_GAP = 4   // vertical gap between the name and the count line
+// Below this radius a bubble with BOTH sub-bubbles and notes shows its counts on one
+// line ("1b · 4n") instead of two ("1 bubble" / "4 notes"): at the 80×53 floor two
+// count lines plus the gap take 25px of a 53px box. Nudge on device. HYST keeps a
+// bubble hovering at the boundary from flipping between forms as it is resized: it
+// collapses below MAX_R and expands again only above MAX_R + HYST_R.
+export const COUNT_ONE_LINE_MAX_R = 50
+export const COUNT_ONE_LINE_HYST_R = 3
 export const COUNT_FONT = 9       // fixed: the count never scales with the name
 export const COUNT_LINE_H = 1.15
 export const NAME_MAX_FONT = 15   // cap, so short names don't dwarf longer ones
@@ -36,12 +46,17 @@ export function wrapLineCount(words, cpl) {
   return lines
 }
 
-// Height available to the name, once the count line has taken its share.
+// Height available to the name, once the count block has taken its share.
+//
+// This budget is only true if the name and the count are centred TOGETHER as one
+// block (BubbleCircle lays them out that way). It used to be computed like this while
+// the count hung below a name centred on its own — so the name was sized as if it had
+// the block's room, and the count landed on the bottom border.
 export function nameBoxHeight(boxH, countLines) {
   const countBlock = countLines > 0
     ? countLines * COUNT_FONT * COUNT_LINE_H + NAME_COUNT_GAP
     : 0
-  return Math.max(boxH - BUB_V_PAD * 2 - countBlock, NAME_MIN_FONT * NAME_LINE_H)
+  return Math.max(boxH - LABEL_MIN_V_PAD * 2 - countBlock, NAME_MIN_FONT * NAME_LINE_H)
 }
 
 // Largest size at which the whole name is estimated to fit in `boxW` × `boxH`.
