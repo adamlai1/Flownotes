@@ -21,8 +21,25 @@ AppShortcutsProvider is compiled in.
 - The intent (the ONE file this checklist adds to the target):
   `voice-capture-src/AddNoteIntent.swift` — `AddNoteIntent` plus
   `NubbleShortcuts`, the App Shortcuts provider that supplies the Siri phrases.
-- Info.plist: `INAlternativeAppNames = [Nubble]` (already in place) — this is
-  what lets the phrase say "Nubble" while `CFBundleDisplayName` stays as it is.
+- Info.plist: `INAlternativeAppNames` (already in place). `.applicationName`
+  in a phrase matches `CFBundleDisplayName` (now "Nubble") *and* every entry
+  here, so this is belt-and-braces: "Add a note to Nubble" keeps working
+  even if the display name changes. Its shape is an **array of dicts**, each
+  with an `INAlternativeAppName` string:
+
+  ```xml
+  <key>INAlternativeAppNames</key>
+  <array>
+      <dict>
+          <key>INAlternativeAppName</key>
+          <string>Nubble</string>
+      </dict>
+  </array>
+  ```
+
+  A bare array of strings is valid plist XML — `plutil` passes it — but the
+  `AppIntentsSSUTraining` build step rejects the structure with *"Unable to
+  parse Info.plist"* and the build fails. Leave the dict form alone.
 - Web side: already wired (`src/lib/voiceCapture.js` + the consumer in
   `App.jsx`).
 
@@ -102,6 +119,11 @@ stop receiving updates from 1.3 on.
 
    If the build says `'AppIntent' is only available in iOS 16.0 or newer`,
    step 2 didn't take on the App target.
+
+   If it fails at **`AppIntentsSSUTraining`** with *"Unable to parse
+   Info.plist"*, `INAlternativeAppNames` has lost its dict shape (see
+   *Sources* above) — the plist is well-formed XML, so `plutil` won't catch
+   it; only the App Intents processor does.
 
 6. **Run on the device once.** The app must behave exactly as before. This
    install is what registers the App Shortcut with the system — from here on
@@ -196,9 +218,14 @@ Two categories: `intent` (the intent ran) and `store` (the queue).
 
 - **Siri says "I don't see an app for that" / phrase not recognised:** the
   App Shortcut isn't registered. Step 6 hasn't been run since step 4, or the
-  metadata processor didn't run (step 5). Also check `INAlternativeAppNames`
-  is still in `App/App/Info.plist` — without it only "…to FlowNotes"
-  matches. Rebooting the device after a reinstall clears Siri's phrase cache.
+  metadata processor didn't run (step 5). Also check `CFBundleDisplayName`
+  is still "Nubble" or `INAlternativeAppNames` is still in
+  `App/App/Info.plist` in its array-of-dicts shape — the phrase matches
+  either. Rebooting the device after a reinstall clears Siri's phrase cache.
+- **Build fails at `AppIntentsSSUTraining`, "Unable to parse Info.plist":**
+  `INAlternativeAppNames` is an array of strings instead of an array of
+  `{ INAlternativeAppName: … }` dicts. Restore the form shown under
+  *Sources*. `plutil -lint` passes either way, so don't use it as the check.
 - **Siri opens Nubble instead of running in the background:** someone set
   `openAppWhenRun` to `true`, or an older build is installed. Also happens if
   the intent throws before its result — check Console for an `intent failed`

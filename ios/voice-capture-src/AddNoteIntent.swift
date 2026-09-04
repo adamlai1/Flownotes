@@ -65,8 +65,9 @@ struct AddNoteIntent: AppIntent {
 
 /// The phrases Siri listens for, available the moment the app is installed —
 /// no Shortcuts setup, no first launch. `.applicationName` matches the
-/// display name AND every entry in Info.plist's INAlternativeAppNames, which is
-/// how "Nubble" resolves while the bundle's display name stays as it is.
+/// display name ("Nubble") AND every entry in Info.plist's
+/// INAlternativeAppNames (also "Nubble", so the phrase survives a display
+/// name change).
 @available(iOS 16.0, *)
 struct NubbleShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {

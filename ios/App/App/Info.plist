@@ -23,12 +23,20 @@
 	<key>CFBundleVersion</key>
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<!-- Names Siri accepts wherever an App Shortcut phrase says
-	     \(.applicationName) — this is how "Add a note to Nubble" resolves
-	     while CFBundleDisplayName stays as it is. Inert until an
-	     AppShortcutsProvider is compiled in (ios/VOICE_CAPTURE_SETUP.md). -->
+	     \(.applicationName). CFBundleDisplayName is "Nubble" too, so this
+	     is belt-and-braces: it keeps "Add a note to Nubble" working even if
+	     the display name ever changes. Inert until an AppShortcutsProvider
+	     is compiled in (ios/VOICE_CAPTURE_SETUP.md).
+	     SHAPE MATTERS: an array of dicts, each carrying INAlternativeAppName.
+	     A bare array of strings is valid plist XML (plutil passes) but the
+	     AppIntentsSSUTraining build step rejects it with "Unable to parse
+	     Info.plist". -->
 	<key>INAlternativeAppNames</key>
 	<array>
-		<string>Nubble</string>
+		<dict>
+			<key>INAlternativeAppName</key>
+			<string>Nubble</string>
+		</dict>
 	</array>
 	<key>CFBundleURLTypes</key>
 	<array>
