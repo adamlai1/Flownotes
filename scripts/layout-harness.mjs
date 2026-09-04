@@ -92,7 +92,7 @@ export const fmtBad = bad => bad.map(b => b.a + '/' + b.b + '(' + b.types + ',' 
 
 // ── Scenario generator ────────────────────────────────────────────────────────
 export function rng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 2 ** 32 } }
-export const W = 390, H = 844, SAFE = 34, SCALE = 1, PID = 'p', CTX = null
+export const W = +(process.env.LAYOUT_W || 390), H = +(process.env.LAYOUT_H || 844), SAFE = +(process.env.LAYOUT_SAFE || 34), SCALE = +(process.env.LAYOUT_SCALE || 1), PID = 'p', CTX = null
 
 export function makeItems(nBubbles, nNotes, rand) {
   const items = []

@@ -84,10 +84,26 @@ function saveSavedPagesMap(projectId, map) {
 // total, so they absorb all the overflow themselves. (A page can therefore end up a
 // couple of items over perPage when notes are pinned onto a page holding bubbles; the
 // layout tolerates that, and keeping bubbles put is what matters here.)
-function assignPages(items, savedPages, projectId, contextId, perPage) {
+//
+// Fullness is judged by what FITS, per type, from the same model pageLoadFor uses to
+// decide that a level paginates at all — not by perPage. perPage is the blended count
+// (total / pageLoad), and it shrinks the moment a note exists: a level of 16 bubbles
+// that fits one page alone got a perPage of 12 when its first note arrived, and this
+// packer split the bubbles 12 + 4 to make room for a note that then landed on page 2
+// anyway. Judged by capacity instead: a page takes bubblesPerPage bubbles, and the
+// notes it takes on top is what pageLoadFor's own arithmetic leaves after those
+// bubbles (notesThatFitWith), so the packer and the "does this level paginate" decision
+// can never disagree — a level that just tipped into two pages keeps everything that
+// was on its one page and only the newcomer overflows. Items already placed stay where
+// they are; items arrive in creation order, so whatever spills is the newest.
+//
+// `caps` is optional so a caller without the capacity breakdown falls back to the
+// count-based rule.
+export function assignPages(items, savedPages, projectId, contextId, perPage, caps = null) {
   const pageOf = {}
   const counts = {}        // every item, per page
   const bubbleCounts = {}  // bubbles only, per page
+  const noteCounts = {}    // notes only, per page
   const unassignedBubbles = []
   const unassignedNotes = []
   for (const it of items) {
@@ -96,21 +112,30 @@ function assignPages(items, savedPages, projectId, contextId, perPage) {
       pageOf[it.id] = p
       counts[p] = (counts[p] || 0) + 1
       if (it.type !== 'note') bubbleCounts[p] = (bubbleCounts[p] || 0) + 1
+      else noteCounts[p] = (noteCounts[p] || 0) + 1
     } else {
       (it.type === 'note' ? unassignedNotes : unassignedBubbles).push(it)
     }
   }
+  const bubbleCap = Math.max(1, caps ? caps.bubblesPerPage : perPage)
   let bubbleCursor = 0
   for (const it of unassignedBubbles) {
-    while ((bubbleCounts[bubbleCursor] || 0) >= perPage) bubbleCursor++
+    while ((bubbleCounts[bubbleCursor] || 0) >= bubbleCap) bubbleCursor++
     pageOf[it.id] = bubbleCursor
     bubbleCounts[bubbleCursor] = (bubbleCounts[bubbleCursor] || 0) + 1
     counts[bubbleCursor] = (counts[bubbleCursor] || 0) + 1
   }
+  // A page is full for notes when it holds what the model says fits beside its
+  // bubbles (at least one, so a page can always take a note rather than being skipped
+  // forever), or — without caps — when it holds perPage items.
+  const noteFull = (p) => caps
+    ? (noteCounts[p] || 0) >= Math.max(1, notesThatFitWith(bubbleCounts[p] || 0, caps))
+    : (counts[p] || 0) >= perPage
   let cursor = 0
   for (const it of unassignedNotes) {
-    while ((counts[cursor] || 0) >= perPage) cursor++
+    while (noteFull(cursor)) cursor++
     pageOf[it.id] = cursor
+    noteCounts[cursor] = (noteCounts[cursor] || 0) + 1
     counts[cursor] = (counts[cursor] || 0) + 1
   }
   return pageOf
@@ -873,6 +898,31 @@ export const PAGE_FILL = 0.72
 export const MIXED_SILHOUETTE_EXTRA = 1.5
 export const MIXED_SILHOUETTE_MAX_LOSS = 0.85
 
+// The notes' room on a page holding bubbleN bubbles (see pageLoadFor): the page's note
+// capacity, less the cluster's silhouette share. With no notes there is nothing to
+// squeeze, so the room is the full capacity (bubbles-only pages are the plain blend).
+function noteRoomBeside(bubbleN, noteN, { bubblesPerPage, notesPerPage }) {
+  const bubbleShare = bubbleN / Math.max(1, bubblesPerPage)
+  const loss = (bubbleN > 0 && noteN > 0)
+    ? Math.min(MIXED_SILHOUETTE_MAX_LOSS, bubbleShare * MIXED_SILHOUETTE_EXTRA)
+    : 0
+  return Math.max(1, notesPerPage * (1 - loss))
+}
+
+// How many notes a page holding bubbleN bubbles can take before pageLoadFor's own
+// arithmetic would call it over: the largest n with n / noteRoom + bubbleShare ≤ 1.
+// The page packer (assignPages) fills pages with this, so it can never place more on
+// a page than the pagination decision allows, nor split a page the decision would
+// have kept whole.
+export function notesThatFitWith(bubbleN, caps) {
+  const bubbleShare = bubbleN / Math.max(1, caps.bubblesPerPage)
+  if (bubbleShare >= 1) return 0
+  // noteRoom depends on noteN only through "any notes at all"; evaluate it as for a
+  // mixed page, which is the case where the answer is being asked.
+  const room = noteRoomBeside(bubbleN, 1, caps)
+  return Math.max(0, Math.floor((1 - bubbleShare) * room + 1e-9))
+}
+
 // How many pages a given mix of bubbles and notes needs, and the blended per-page count.
 // Capacity comes from each type's REAL footprint, not a one-size bubble grid: notes render
 // as small rectangles (W = r*1.55 ≈ 62px, H = r*1.15 ≈ 46px) packed ~5px apart, so counting
@@ -962,10 +1012,7 @@ export function pageLoadFor(bubbleN, noteN, width, height, noteScale, safeBottom
   // room, so a page that is mostly bubbles still takes a handful of notes before
   // paginating instead of splitting on the first one.
   const bubbleShare = bubbleN / bubblesPerPage
-  const silhouetteLoss = (bubbleN > 0 && noteN > 0)
-    ? Math.min(MIXED_SILHOUETTE_MAX_LOSS, bubbleShare * MIXED_SILHOUETTE_EXTRA)
-    : 0
-  const noteRoom = Math.max(1, notesPerPage * (1 - silhouetteLoss))
+  const noteRoom = noteRoomBeside(bubbleN, noteN, { bubblesPerPage, notesPerPage })
   const pageLoad = noteN / noteRoom + bubbleShare
   return {
     pageLoad,
@@ -3654,7 +3701,7 @@ export default function BubbleVisualization({
     // the capacity — none of which a page change touches — so it is memoized on a
     // signature of exactly those. Only the id→page map is kept: the groups themselves are
     // rebuilt from the live item objects below, so nothing stale is ever rendered.
-    let assignKey = `${project.id}|${currentId ?? 'root'}|${perPage}`
+    let assignKey = `${project.id}|${currentId ?? 'root'}|${perPage}|${bubblesPerPage}|${notesPerPage}`
     for (const it of layoutItems) {
       assignKey += `|${it.id}:${it.type === 'note' ? 'n' : 'b'}`
       const p = savedPages[posKey(project.id, currentId, it.id)]
@@ -3663,7 +3710,7 @@ export default function BubbleVisualization({
     if (assignCacheRef.current.key !== assignKey) {
       assignCacheRef.current = {
         key: assignKey,
-        pageOf: assignPages(layoutItems, savedPages, project.id, currentId, perPage),
+        pageOf: assignPages(layoutItems, savedPages, project.id, currentId, perPage, { bubblesPerPage, notesPerPage }),
       }
     }
     const pageOf = assignCacheRef.current.pageOf
