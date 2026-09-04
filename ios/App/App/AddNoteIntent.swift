@@ -9,16 +9,23 @@ import os.log
 // layer (src/lib/voiceCapture.js) turns queued captures into notes the next
 // time it is ready to.
 //
-//   AddNoteIntent          "Add a note to Nubble"           → root
-//   AddNoteToBubbleIntent  "Add a note to Ideas in Nubble"  → that bubble
+//   AddNoteIntent          Siri phrases ("Add a note to Nubble")  → root
+//   AddNoteToBubbleIntent  Shortcuts-app action, NO phrases       → a bubble
 //
-// Why two intents rather than one with an optional bubble: a phrase can only
-// carry a parameter Siri can enumerate ahead of time, and an OPTIONAL
-// parameter in a phrase is not reliably registered by the metadata
-// processor — the bubble phrases can silently fail to exist while everything
-// else works. With the bubble on its own intent it is required there and
-// absent here, so the plain phrase can never prompt "Which bubble?" and the
-// filed phrase always has a bubble to file into.
+// SPOKEN BUBBLE NAMING WAS ATTEMPTED AND DOES NOT MATCH ON iOS 26. "Add a
+// note to Ideas in Nubble" was registered (the Shortcuts tile showed one
+// generated entry per bubble, and tapping those filed correctly), the mirror,
+// entity query and consumer all verified working, the phone restarted — and
+// Siri still routed every spoken bubble phrase to the plain intent. Two
+// hypotheses were eliminated: the bubble being an optional parameter (fixed
+// by this two-intent split; no change) and a collision with Siri's built-in
+// "add a note" grammar ("New note in Ideas in Nubble" also failed). The
+// bubble phrases were removed so nobody is told to say something that
+// doesn't work. The intent stays as a Shortcuts action: it files correctly,
+// and a user can bind their own phrase to it. Full record and the
+// verification checklist: ios/VOICE_CAPTURE_SETUP.md, "Spoken bubble
+// naming: attempted, does not match". Don't re-add phrases without new
+// evidence from that checklist.
 //
 // Both are compiled into the App target itself (NOT an extension). With
 // openAppWhenRun = false, iOS runs perform() in the background: if Nubble is
@@ -36,16 +43,16 @@ import os.log
 // Logging: filter Console.app on subsystem com.adamlai.flownotes.VoiceCapture.
 // Only lengths and ids are logged, never the spoken text.
 
-/// The shared body of both intents: write the capture, refresh Siri's bubble
-/// phrases, return the spoken confirmation.
+/// The shared body of both intents: write the capture, return the spoken
+/// confirmation.
 @available(iOS 16.0, *)
 enum VoiceCaptureIntentSupport {
     private static let log = Logger(subsystem: "com.adamlai.flownotes.VoiceCapture", category: "intent")
 
     /// Filing hints ride along with the capture; the app decides. A real id
-    /// files into that bubble if it still exists. A placeholder (a name Siri
-    /// couldn't match against the mirror) carries only the name, and the app
-    /// files by name if such a bubble exists by then, else root.
+    /// files into that bubble if it still exists. A placeholder (a name the
+    /// mirror doesn't know) carries only the name, and the app files by name
+    /// if such a bubble exists by then, else root.
     static func capture(_ text: String, bubble: BubbleEntity?) throws -> IntentDialog {
         let bubbleId: String? = (bubble?.isPlaceholder ?? true) ? nil : bubble?.id
         let bubbleName: String? = bubble?.name
@@ -59,12 +66,10 @@ enum VoiceCaptureIntentSupport {
             throw error
         }
 
-        // Self-healing phrase refresh. The app also asks Siri to re-read the
-        // bubble list after every mirror write and at launch, but those go
-        // through a by-class-name dispatch (SceneDelegate.swift can't name
-        // this file's types). This call is direct and cannot be a silent
-        // no-op: one plain "add a note to Nubble" after a launch is enough
-        // to make every mirrored bubble sayable.
+        // Keeps Siri's view of the entity set current. With no parameterised
+        // phrases this changes nothing the user can hear; it is left in so
+        // re-adding phrases (if a future iOS matches spoken entities) needs
+        // no plumbing.
         NubbleShortcuts.updateAppShortcutParameters()
 
         // The spoken confirmation is the user's proof the capture landed —
@@ -108,16 +113,16 @@ struct AddNoteIntent: AppIntent {
     }
 }
 
-/// Filed capture → a named bubble. The bubble is REQUIRED on this intent; it
-/// comes from the phrase itself, or — if this intent is somehow reached
-/// without one — from a "Which bubble?" prompt over the mirrored list. A
-/// name the mirror doesn't know still resolves (BubbleQuery hands back a
-/// placeholder), so the capture is never blocked on filing.
+/// Filed capture → a chosen bubble. Reached from the Shortcuts app (or a
+/// phrase the user binds themselves) — it has no phrases of its own, see the
+/// header. The bubble is REQUIRED; a name the mirror doesn't know still
+/// resolves (BubbleQuery hands back a placeholder), so the capture is never
+/// blocked on filing.
 @available(iOS 16.0, *)
 struct AddNoteToBubbleIntent: AppIntent {
     static var title: LocalizedStringResource = "Add a Note to a Bubble"
     static var description = IntentDescription(
-        "Saves what you say as a new note in Nubble, inside the bubble you name."
+        "Saves a note in Nubble inside the bubble you choose."
     )
 
     static var openAppWhenRun: Bool = false
@@ -148,11 +153,8 @@ struct AddNoteToBubbleIntent: AppIntent {
 /// INAlternativeAppNames (also "Nubble", so the phrase survives a display
 /// name change).
 ///
-/// The bubble phrases are generated per mirrored bubble: Siri precomputes
-/// one variant for each entity `BubbleQuery.suggestedEntities()` returns, at
-/// install and on every `updateAppShortcutParameters()` — which is why the
-/// mirror is filtered and capped, and why that call is made from three
-/// places (launch, mirror write, every intent run).
+/// Plain capture only. AddNoteToBubbleIntent deliberately has NO AppShortcut
+/// here — see the file header for why.
 @available(iOS 16.0, *)
 struct NubbleShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
@@ -167,18 +169,6 @@ struct NubbleShortcuts: AppShortcutsProvider {
             ],
             shortTitle: "Add a Note",
             systemImageName: "mic.fill"
-        )
-        AppShortcut(
-            intent: AddNoteToBubbleIntent(),
-            phrases: [
-                "Add a note to \(\.$bubble) in \(.applicationName)",
-                "Add a note in \(\.$bubble) in \(.applicationName)",
-                "New note in \(\.$bubble) in \(.applicationName)",
-                "Add a \(.applicationName) note to \(\.$bubble)",
-                "Note in \(\.$bubble) in \(.applicationName)",
-            ],
-            shortTitle: "Add a Note to a Bubble",
-            systemImageName: "mic.badge.plus"
         )
     }
 }

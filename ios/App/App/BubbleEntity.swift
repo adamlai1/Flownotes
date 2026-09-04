@@ -2,10 +2,13 @@ import AppIntents
 import Foundation
 import os.log
 
-// ── Bubble entity for "add a note to Ideas in Nubble" ───────────────────────
+// ── Bubble entity for the "Add a Note to a Bubble" Shortcuts action ──────────
 //
-// Siri can only put an AppEntity (or AppEnum) inside a spoken phrase, so the
-// bubble parameter is an entity backed by a MIRROR of the device's bubbles:
+// (Spoken "add a note to Ideas in Nubble" was attempted and does not match
+// on iOS 26 — see AddNoteIntent.swift's header. The entity now serves the
+// Shortcuts app's picker; nothing here changed.)
+//
+// The bubble parameter is an entity backed by a MIRROR of the device's bubbles:
 // the web layer pushes {id, name, path, project} records into the App Group
 // (VoiceCapturePlugin.setBubbles → VoiceCaptureStore.writeBubbles) whenever
 // the bubble set changes, and VoiceBubbleSync.refresh() tells Siri to

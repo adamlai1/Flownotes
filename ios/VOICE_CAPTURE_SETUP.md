@@ -21,16 +21,14 @@ AppShortcutsProvider is compiled in.
 - The intent (the TWO files this checklist adds to the target), both in
   `App/App/` next to `SceneDelegate.swift` — **these are the compiled
   copies; there is no template folder**:
-  - `App/App/AddNoteIntent.swift` — `AddNoteIntent` (plain → root),
-    `AddNoteToBubbleIntent` (bubble required → filed), and `NubbleShortcuts`,
-    the App Shortcuts provider that supplies both phrase sets. Two intents
-    on purpose: a phrase parameter on an *optional* property is not
-    reliably registered, so the bubble lives on its own intent where it is
-    required, and the plain intent has no bubble at all.
-  - `App/App/BubbleEntity.swift` — the optional bubble parameter ("add a
-    note to Ideas in Nubble"): `BubbleEntity`, its query, and
-    `VoiceBubbleSync`, which the plugin calls by class name to tell Siri the
-    bubble list changed.
+  - `App/App/AddNoteIntent.swift` — `AddNoteIntent` (the Siri phrases →
+    root), `AddNoteToBubbleIntent` (Shortcuts-app action only, no phrases →
+    files into a chosen bubble), and `NubbleShortcuts`, the App Shortcuts
+    provider. Only the plain intent has phrases — see *Spoken bubble naming:
+    attempted, does not match* under Part C.
+  - `App/App/BubbleEntity.swift` — the bubble parameter of the Shortcuts
+    action: `BubbleEntity`, its query (reads the mirror the app writes into
+    the App Group), and `VoiceBubbleSync` (kept; harmless without phrases).
 
   (They used to live in `ios/voice-capture-src/`. Xcode's *Add Files* copied
   them into `App/App/` rather than referencing them, leaving two copies of
@@ -224,11 +222,14 @@ Two categories: `intent` (the intent ran) and `store` (the queue).
 - **Nubble in the background.** Background it, add a note via Siri, return
   via the app switcher → the note is there on return.
 - **Shortcuts app.** Open Shortcuts → search **"Add a Note"** → BOTH of
-  Nubble's actions are listed (*Add a Note*, *Add a Note to a Bubble*); the
-  second has a *Bubble* picker over the mirrored bubbles. The first: Nubble's
-  action is listed with a *Note* text field. Build a shortcut, run it: same
-  result, no app launch. Also check the Shortcuts *App Shortcuts* tile for
-  Nubble lists all five phrases.
+  Nubble's actions are listed: *Add a Note* (a *Note* text field) and *Add a
+  Note to a Bubble* (a *Note* field plus a *Bubble* picker over the app's
+  bubbles — names under 3 characters are left out on purpose). Build a
+  shortcut from each and run it: same result as Siri for the first; the
+  second files the note into the chosen bubble, in that bubble's project,
+  toast "Added a note to <bubble> from Siri". Neither opens the app. Also
+  check the Shortcuts *App Shortcuts* tile for Nubble lists the five plain
+  phrases — and NO per-bubble entries (see the next section).
 - **Empty note.** *"Add a note to Nubble"* → say nothing / cancel → nothing is
   queued (Siri re-asks or gives up; no `written` line).
 - **Fresh install (works before first launch).** Delete Nubble. Reinstall
@@ -259,91 +260,69 @@ Two categories: `intent` (the intent ran) and `store` (the queue).
 - **Nothing expires.** Add a note via Siri, don't open Nubble for a day, open
   it → the note lands. (Contrast the share flow's 10-minute window: a share
   is an abandoned *import*; a spoken note is a *committed* note.)
-### Filing into a bubble
+### Filing into a bubble — Shortcuts action only
 
-The bubble in "add a note to *Ideas* in Nubble" is an App Entity backed by
-a **mirror** of the device's bubbles that the app writes to the App Group
-(`bubbles.json`) about a second after any bubble change, then asks Siri to
-re-read (Console: `bubble mirror written: N bubble(s)`, category `store`).
-Siri precomputes one phrase variant per mirrored bubble, so only bubbles in
-the mirror are sayable. Names under 3 characters are left out on purpose.
+*Add a Note to a Bubble* is a second App Intent with a REQUIRED bubble
+parameter, backed by a **mirror** of the device's bubbles that the app
+writes to the App Group (`bubbles.json`) about a second after any bubble
+change (Console: `bubble mirror written: N bubble(s)`, category `store`).
+The Shortcuts app's picker reads that mirror through `BubbleQuery`. It has
+**no Siri phrases** — it is reached from the Shortcuts app, or from a phrase
+the user binds to it themselves.
 
-**The audible rule, and why it matters more than filing:** when the intent
-runs, Siri says **"Added to Ideas"** (filed) or **"Added to Nubble"** (root).
-If you hear neither, Siri did not run the intent and **nothing was
-captured** — say it again with the plain phrase. Every test below checks
-what Siri *says*, not just what lands.
-
-**Are the bubble phrases registered at all?** Before testing by voice:
-Shortcuts app → *App Shortcuts* (or search "Nubble") → Nubble's tile. It
-must list TWO actions, *Add a Note* and *Add a Note to a Bubble*, and the
-second's phrases must show a bubble name in them (Shortcuts renders one
-example entity per phrase; tap to see the rest). If the second action is
-missing, or its phrases show no bubble name, the metadata/refresh side is
-the problem and no amount of speaking will help — see Troubleshooting.
-
-**How long to wait, and what forces it.** Siri's phrase index is not
-updated synchronously. After the app launches or a bubble changes, allow
-**up to 60 seconds** before concluding a name isn't sayable. Three things
-force a refresh, in order of how sure they are:
-
-1. **Say the plain phrase once** (*"Add a note to Nubble"*, any text).
-   Every intent run calls `updateAppShortcutParameters()` directly, with no
-   class-name dispatch in the way — this is the path that cannot silently
-   no-op. Then wait ~30 s and try the bubble phrase.
-2. **Force-quit and relaunch** the app: launch calls the refresh again.
-3. **Restart the phone**: rebuilds Siri's index from scratch. Do this once
-   before declaring the feature broken — it is also the only reliable way
-   to shake off a *stale* index left by an older build's phrase set.
-
-- **Plain phrase unchanged.** *"Add a note to Nubble"* → "What's the note?"
-  → "Added to Nubble". Root, as before. Siri must **never** ask "Which
-  bubble?" on this phrase — the parameter is optional.
-- **Filed.** *"Add a note to Ideas in Nubble"* → "What's the note?" → **"Added
-  to Ideas"**. Open Nubble: the note is inside Ideas, toast "Added a note to
-  Ideas from Siri". Console `intent stored capture … bubble: by-id`.
-- **Bubble in another project.** Name a bubble that lives in a project
+- **Filed via Shortcuts.** Run *Add a Note to a Bubble* with Ideas chosen →
+  the note is inside Ideas, toast "Added a note to Ideas from Siri". Console
+  `intent stored capture … bubble: by-id`.
+- **Bubble in another project.** Choose a bubble that lives in a project
   other than the one open. The note lands in *that* bubble in *that*
-  project, not at the open project's root; the open project is untouched.
-- **New bubble becomes sayable.** Create a bubble "Groceries" in the app.
-  Wait ~2 s (Console: `bubble mirror written`, then `siri refresh (mirror
-  write): dispatched to VoiceBubbleSync`). Background the app, wait up to
-  60 s, *"Add a note to Groceries in Nubble"* → "Added to Groceries". If
-  not, say the plain phrase once and retry after ~30 s (the direct
-  refresh). If it only works after a reinstall, the dispatch isn't
-  reaching `VoiceBubbleSync` — Console shows `skipped` instead of
-  `dispatched` — see Troubleshooting.
-- **Duplicate names (disambiguation).** Make two bubbles called "Ideas" in
-  different places (e.g. one under Work). *"Add a note to Ideas in Nubble"* →
-  Siri shows both, each with its path/project as the subtitle (e.g. *Work ·
-  My Notes*) → pick one → "Added to Ideas" → the note is in the one you
-  picked. Same on-screen list in the Shortcuts editor.
-- **Stale mirror — bubble deleted after Siri learned it.** Create "Temp",
-  wait for the mirror, then delete it and IMMEDIATELY (before the next
-  mirror write lands) say *"Add a note to Temp in Nubble"*. Whether Siri
-  still offers Temp or not: the outcome must be one of (a) "Added to Temp"
-  then the note at **root** with toast *"…at root — no bubble called
-  “Temp”"*, or (b) Siri doesn't run the intent and says so. **Never** silence
-  after "What's the note?".
-- **Stale mirror — bubble created on another device, not pulled yet.**
-  Create "Remote" on the web app; do NOT open the iOS app. *"Add a note to
-  Remote in Nubble"*. Listen carefully — this is the case to characterise:
-  - Siri runs the plain intent (says "Added to Nubble") → captured at root.
-    Good.
-  - Siri asks "What's the note?", takes the text, and says "Added to
-    Nubble" → the placeholder path (`bubble: by-name` in Console). Open the
-    iOS app *after* it syncs: the note is **filed into Remote** by name.
-  - Siri does something else (web search, "I can't help with that") → it
-    must be **clearly audible/visible** that nothing was captured. If on
-    this iOS version that response is quiet or ambiguous, record it here:
-    that is the one path where a spoken thought can be lost, and the
-    mitigation is the plain phrase.
+  project; the open project is untouched.
+- **New bubble appears in the picker.** Create "Groceries" in the app, wait
+  ~2 s, reopen the picker in Shortcuts → Groceries is listed.
+- **Duplicate names.** Two bubbles called "Ideas" in different places show
+  in the picker with their path/project as the subtitle (e.g. *Work · My
+  Notes*), so the right one can be chosen.
+- **Bubble deleted after the shortcut was built.** Run it anyway → the
+  note lands at **root** with toast *"…at root — no bubble called “X”"*.
+  Never silence, never lost.
 - **Unsayable names are filtered.** With bubbles "F", "Gj", "G" present,
-  the Shortcuts editor's bubble picker does not list them; *"Add a note to
-  G in Nubble"* does not run the filed intent. Renaming "G" to "Gym" (3+
-  chars) makes it appear after the next mirror write.
-- **Filed capture while offline / gate closed.** Same as the plain cases:
-  the capture waits with its bubble hint attached and files on release.
+  the picker does not list them. Renaming "G" to "Gym" makes it appear
+  after the next mirror write.
+
+#### Spoken bubble naming: attempted, does not match (iOS 26)
+
+**Do not re-add bubble phrases without new evidence.** "Add a note to Ideas
+in Nubble" was built and shipped to a device three times over 2026-09-04,
+and Siri never routed the spoken phrase to the bubble intent. What was
+verified working on the device at the time, so the failure is isolated:
+
+- The web bundle was current (Settings → Build matched the Mac).
+- The mirror was written and readable: the Shortcuts picker listed every
+  bubble.
+- Siri had the entity list: the Shortcuts *App Shortcuts* tile showed **one
+  generated entry per bubble** ("Add a note to Ideas in Nubble", "… Goals
+  …", "… Journal …"), i.e. the parameterised phrases WERE registered and
+  `updateAppShortcutParameters()` had run.
+- Tapping any of those generated entries prompted for text and **filed
+  correctly** into that bubble — the intent, entity resolution and the web
+  consumer all worked end to end.
+- The phone had been restarted, so a stale Siri index was ruled out.
+
+Despite all of that, *saying* the phrase always ran the plain intent
+(note at root, plain toast, Siri: "Added to Nubble"). Two hypotheses were
+tested and eliminated: (1) the bubble parameter being optional on a single
+intent — fixed by splitting into two intents with the bubble required; no
+change; (2) a collision with Siri's built-in "add a note" grammar (Siri
+does answer the plain phrase with "Notes or Nubble?") — but "New note in
+Ideas in Nubble", which avoids those words, ALSO landed at root. So on iOS
+26 Siri simply does not match a spoken entity value in this app's phrases,
+while the same phrases match with the entity stripped.
+
+The bubble phrases were removed from `NubbleShortcuts` so nobody is told to
+say something that doesn't work. Everything else stayed: the mirror, the
+entity query, the second intent (as a Shortcuts action), and the by-name /
+by-id filing in the consumer. If a future iOS makes spoken entities work,
+re-adding the five phrases to the `AddNoteToBubbleIntent` AppShortcut is a
+one-place change — test it against the checklist above first.
 
 - **Share extension still works** (Part C of `SHARE_EXTENSION_SETUP.md`,
   the Apple Notes case is enough) — same App Group, different keys, no
@@ -367,30 +346,19 @@ by design, so it never appears on the dev server in Safari.)
   the queue is intact and every waiting capture lands on that open. (This
   exact symptom cost a multi-hour session on 2026-09-03; the write side was
   fine the whole time.)
-- **Bubble picker in Shortcuts lists the bubbles and running the action
-  files correctly, but the SPOKEN bubble phrase lands at root:** the mirror
-  and the entity query are fine; Siri's phrase set is stale or the bubble
-  phrases never registered. In order:
-  1. Shortcuts → Nubble's tile: is *Add a Note to a Bubble* listed with a
-     bubble name in its phrases? If not, the phrases aren't registered —
-     check the build log for `appintentsmetadataprocessor` warnings naming
-     `AddNoteToBubbleIntent` or `bubble`.
-  2. Say the plain phrase once, wait 30 s, retry. This uses the direct
-     refresh inside the intent (no class-name dispatch).
-  3. Restart the phone, retry. A stale index from an earlier build (e.g.
-     the one where the bubble was an optional parameter on the single
-     intent) can shadow the new phrase set until Siri re-indexes.
-- **A new bubble isn't sayable until the next plain capture or reinstall:**
-  the by-class-name dispatch isn't reaching `VoiceBubbleSync`. Console
-  (category `store`) says `siri refresh (…): VoiceBubbleSync not in this
-  build — skipped` — `BubbleEntity.swift` isn't in the App target (step 4,
-  both files) — or `found but has no +refresh`. `dispatched to
-  VoiceBubbleSync` followed by `updateAppShortcutParameters() called` (category
-  `bubbles`) is the healthy pair.
-- **"Add a note to X in Nubble" lands at root with a "no bubble called"
-  toast although X exists:** X was mirrored under an id the app can no
-  longer find and no other bubble has exactly that name — a rename between
-  Siri learning the bubble and the capture. The note is safe; move it.
+- **Spoken "add a note to X in Nubble" lands at root:** expected — there are
+  no bubble phrases (see *Spoken bubble naming: attempted, does not match*).
+  Filing by voice needs a user-bound phrase on the *Add a Note to a Bubble*
+  action in the Shortcuts app.
+- **Shortcuts picker is empty:** the mirror isn't being written. Console
+  (category `store`) should show `bubble mirror written: N bubble(s)` about
+  a second after launch; if it never does, the web bundle predates the
+  mirror (Build row) or `setBubbles` rejected (`bubble mirror: … none had
+  string id+name`).
+- **Shortcuts action lands at root with a "no bubble called" toast although
+  the bubble exists:** it was picked under an id the app can no longer find
+  and no other bubble has exactly that name — a rename between building the
+  shortcut and running it. The note is safe; move it, rebuild the shortcut.
 - **Bundle is current, captures still don't land while signed in:** the
   readiness gate is holding them — by design when the initial sync didn't
   settle (offline at launch, or a sync error). Force-quit and relaunch
