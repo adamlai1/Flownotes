@@ -84,7 +84,7 @@ import { LockProvider } from './contexts/LockContext'
 import { useAuth } from './contexts/AuthContext'
 import { useEscapeShortcut, useKeyShortcuts } from './lib/escapeStack'
 import { onShareImport } from './lib/shareImport'
-import { onVoiceCaptures } from './lib/voiceCapture'
+import { onVoiceCaptures, buildSiriBubbleMirror, mirrorBubblesToSiri } from './lib/voiceCapture'
 
 // EXPERIMENT (neutral scheme): the bubble-colour vignette, drawn at the app shell
 // so the band spans the FULL screen — safe-area top to bottom — instead of clipping
@@ -949,43 +949,105 @@ export default function App() {
     const current = activeProjectRef.current
     if (!current) return [] // nothing acked — captures stay queued
 
-    // The capture id IS the note id, so a capture already persisted (crash
-    // between persist and ack, or a project switch in between) is skipped
-    // wherever it lives, not re-created. Checked against storage, not state:
-    // every project on the device, not just the one on screen.
+    // Every project on the device, from storage — not state — with the
+    // on-screen one swapped in from state so unsaved edits count. Used both
+    // to dedupe (the capture id IS the note id, so a capture already
+    // persisted — crash between persist and ack, project switch in between —
+    // is skipped wherever it lives) and to resolve filing hints.
+    const stored = loadAllProjects(loadProjectList() ?? [])
+    const projects = [current, ...stored.filter(p => p.id !== current.id)]
     const known = new Set()
-    for (const p of loadAllProjects(loadProjectList() ?? [])) {
-      for (const n of p.notes ?? []) known.add(n.id)
+    for (const p of projects) for (const n of p.notes ?? []) known.add(n.id)
+
+    // Filing: capture outranks filing, always. A hint that can't be honoured
+    // sends the note to the active project's root — never nowhere.
+    //   bubbleId   → that bubble, in whichever project owns it, if it still
+    //                exists.
+    //   bubbleName → the bubble with exactly that name (case-insensitive),
+    //                preferring the active project; more than one match
+    //                elsewhere is ambiguous, so root.
+    function resolveTarget(c) {
+      if (typeof c.bubbleId === 'string' && c.bubbleId) {
+        for (const p of projects) {
+          const b = (p.bubbles ?? []).find(x => x.id === c.bubbleId)
+          if (b) return { project: p, bubble: b }
+        }
+      }
+      const wanted = typeof c.bubbleName === 'string' ? c.bubbleName.trim().toLowerCase() : ''
+      if (wanted) {
+        for (const p of projects) {
+          const hits = (p.bubbles ?? []).filter(x => (x.name ?? '').trim().toLowerCase() === wanted)
+          if (hits.length === 1) return { project: p, bubble: hits[0] }
+          if (hits.length > 1) break
+        }
+        return { project: current, bubble: null, missing: c.bubbleName.trim() }
+      }
+      return { project: current, bubble: null }
     }
-    for (const n of current.notes) known.add(n.id)
 
     const fresh = captures.filter(c => !known.has(c.id))
     if (fresh.length) {
-      const newNotes = fresh.map(c => {
+      // Notes grouped by the project they land in. The active project is
+      // committed through updateProject (state + save + cloud); any other
+      // project goes straight to storage plus a dirty mark, the same path an
+      // offline edit takes.
+      const byProject = new Map()
+      const filed = []      // bubble names, for the toast
+      const missing = []    // hints that resolved to nothing
+      for (const c of fresh) {
+        const target = resolveTarget(c)
+        if (target.bubble) filed.push(target.bubble.name)
+        if (target.missing) missing.push(target.missing)
         // Stamp the note with when it was SPOKEN (ms from Swift), falling back
         // to now if a capture somehow carries no timestamp.
         const when = Number.isFinite(c.ts) && c.ts > 0 ? new Date(c.ts) : new Date()
         const iso = Number.isNaN(when.getTime()) ? new Date().toISOString() : when.toISOString()
-        return {
+        const note = {
           id: c.id,
           content: c.text.trim(),
           created_at: iso,
           updated_at: iso,
-          // Capture only: root level, no bubble membership guessed.
-          bubble_ids: [ROOT_BUBBLE_ID],
+          bubble_ids: target.bubble ? [target.bubble.id] : [ROOT_BUBBLE_ID],
           tags: [],
           connections: [],
           locked: false,
         }
-      })
-      const updated = { ...current, notes: [...newNotes, ...current.notes] }
-      // Land it in localStorage NOW — not on scheduleSave's 400 ms debounce —
-      // because the ack that follows deletes the only other copy.
-      saveProject(updated)
-      updateProject(updated)
-      toastRef.current?.(newNotes.length === 1
-        ? 'Added a note from Siri'
-        : `Added ${newNotes.length} notes from Siri`)
+        if (!byProject.has(target.project.id)) byProject.set(target.project.id, { project: target.project, notes: [] })
+        byProject.get(target.project.id).notes.push(note)
+      }
+
+      const uid = userRef.current?.id
+      let touchedOther = false
+      for (const { project, notes } of byProject.values()) {
+        if (project.id === current.id) continue
+        // Re-read at write time so a stale in-memory copy can't drop edits.
+        const latest = loadProject(project.id) ?? project
+        const updatedOther = { ...latest, notes: [...notes, ...(latest.notes ?? [])] }
+        saveProject(updatedOther)
+        if (uid) markProjectDirty(uid, updatedOther.id)
+        touchedOther = true
+      }
+      const mine = byProject.get(current.id)
+      if (mine) {
+        const updated = { ...current, notes: [...mine.notes, ...current.notes] }
+        // Land it in localStorage NOW — not on scheduleSave's 400 ms debounce —
+        // because the ack that follows deletes the only other copy.
+        saveProject(updated)
+        updateProject(updated)
+      }
+      if (touchedOther && uid) runFlush()
+
+      const n = fresh.length
+      let msg
+      if (n === 1) {
+        msg = filed.length ? `Added a note to ${filed[0]} from Siri`
+          : missing.length ? `Added a note from Siri at root — no bubble called “${missing[0]}”`
+          : 'Added a note from Siri'
+      } else {
+        msg = `Added ${n} notes from Siri`
+        if (missing.length) msg += ` (${missing.length} at root — bubble not found)`
+      }
+      toastRef.current?.(msg)
     }
     // Everything listed is now in storage (fresh just written, the rest
     // already there), so all of it is safe to delete from the queue.
@@ -995,6 +1057,25 @@ export default function App() {
     if (!voiceReady) return
     return onVoiceCaptures(captures => voiceConsumerRef.current(captures))
   }, [voiceReady])
+
+  // Bubble mirror for Siri: rebuilt whenever the bubble set can have
+  // changed — edits to the active project's bubbles (array identity), a
+  // project switch, create, delete, a cloud pull replacing projects, and
+  // sign-out (which resets local data, so the previous account's bubbles
+  // leave Siri too). Debounced: a rename mid-typing is many changes. Other
+  // projects' bubbles only change through those same list-level events, so
+  // reading them from storage here is current.
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return
+    const timer = setTimeout(() => {
+      const stored = loadAllProjects(loadProjectList() ?? [])
+      const projects = activeProject
+        ? [activeProject, ...stored.filter(p => p.id !== activeProject.id)]
+        : stored
+      mirrorBubblesToSiri(buildSiriBubbleMirror(projects))
+    }, 1000)
+    return () => clearTimeout(timer)
+  }, [projectList, activeProject?.id, activeProject?.bubbles])
 
   const [showOnboarding, setShowOnboarding] = useState(() =>
     !localStorage.getItem('hasSeenOnboarding')

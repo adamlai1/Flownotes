@@ -18,9 +18,14 @@ AppShortcutsProvider is compiled in.
   `App/App/SceneDelegate.swift` next to `SharedImportPlugin`, and
   `MainViewController` already registers the plugin — so main compiles today,
   before any of these steps.
-- The intent (the ONE file this checklist adds to the target):
-  `voice-capture-src/AddNoteIntent.swift` — `AddNoteIntent` plus
-  `NubbleShortcuts`, the App Shortcuts provider that supplies the Siri phrases.
+- The intent (the TWO files this checklist adds to the target):
+  - `voice-capture-src/AddNoteIntent.swift` — `AddNoteIntent` plus
+    `NubbleShortcuts`, the App Shortcuts provider that supplies the Siri
+    phrases.
+  - `voice-capture-src/BubbleEntity.swift` — the optional bubble parameter
+    ("add a note to Ideas in Nubble"): `BubbleEntity`, its query, and
+    `VoiceBubbleSync`, which the plugin calls by class name to tell Siri the
+    bubble list changed.
 - Info.plist: `INAlternativeAppNames` (already in place). `.applicationName`
   in a phrase matches `CFBundleDisplayName` (now "Nubble") *and* every entry
   here, so this is belt-and-braces: "Add a note to Nubble" keeps working
@@ -116,17 +121,23 @@ stop receiving updates from 1.3 on.
 
 ## Part B — Add the intent (~5 min)
 
-4. **Add the file to the App target.** In the navigator select the **App**
+4. **Add the files to the App target.** In the navigator select the **App**
    group (the folder holding `SceneDelegate.swift`) → *File → Add Files to
-   "App"…* → pick `ios/voice-capture-src/AddNoteIntent.swift`.
+   "App"…* → select BOTH `ios/voice-capture-src/AddNoteIntent.swift` and
+   `ios/voice-capture-src/BubbleEntity.swift`.
    - **Copy items if needed: UNCHECKED** (add by reference — the repo file is
      the one compiled).
    - *Added folders*: irrelevant for a single file.
    - *Add to targets*: **App** only. Not ShareExtension.
 
-   Xcode writes the file reference and build-phase entries into
-   `project.pbxproj`. The file shows in the navigator with a slightly
+   Xcode writes the file references and build-phase entries into
+   `project.pbxproj`. The files show in the navigator with a slightly
    different path (`../../voice-capture-src/…`) — that is expected.
+
+   Both or neither: `AddNoteIntent.swift` references `BubbleEntity`, so
+   adding only the intent file fails to compile. (If a build from before the
+   bubble parameter is on the Mac, add `BubbleEntity.swift` to the same
+   target now — the intent file already in the target picks it up.)
 
 5. **Build the App scheme.** Expected: no errors, and a build log line from
    `appintentsmetadataprocessor` (Xcode extracts the intent + shortcut
@@ -227,6 +238,67 @@ Two categories: `intent` (the intent ran) and `store` (the queue).
 - **Nothing expires.** Add a note via Siri, don't open Nubble for a day, open
   it → the note lands. (Contrast the share flow's 10-minute window: a share
   is an abandoned *import*; a spoken note is a *committed* note.)
+### Filing into a bubble
+
+The bubble in "add a note to *Ideas* in Nubble" is an App Entity backed by
+a **mirror** of the device's bubbles that the app writes to the App Group
+(`bubbles.json`) about a second after any bubble change, then asks Siri to
+re-read (Console: `bubble mirror written: N bubble(s)`, category `store`).
+Siri precomputes one phrase variant per mirrored bubble, so only bubbles in
+the mirror are sayable. Names under 3 characters are left out on purpose.
+
+**The audible rule, and why it matters more than filing:** when the intent
+runs, Siri says **"Added to Ideas"** (filed) or **"Added to Nubble"** (root).
+If you hear neither, Siri did not run the intent and **nothing was
+captured** — say it again with the plain phrase. Every test below checks
+what Siri *says*, not just what lands.
+
+- **Plain phrase unchanged.** *"Add a note to Nubble"* → "What's the note?"
+  → "Added to Nubble". Root, as before. Siri must **never** ask "Which
+  bubble?" on this phrase — the parameter is optional.
+- **Filed.** *"Add a note to Ideas in Nubble"* → "What's the note?" → **"Added
+  to Ideas"**. Open Nubble: the note is inside Ideas, toast "Added a note to
+  Ideas from Siri". Console `intent stored capture … bubble: by-id`.
+- **Bubble in another project.** Name a bubble that lives in a project
+  other than the one open. The note lands in *that* bubble in *that*
+  project, not at the open project's root; the open project is untouched.
+- **New bubble is sayable within seconds.** Create a bubble "Groceries" in
+  the app. Wait ~2 s (Console: `bubble mirror written`). Background the app,
+  *"Add a note to Groceries in Nubble"* → "Added to Groceries". If Siri
+  doesn't know the name until a reinstall, `VoiceBubbleSync.refresh()` isn't
+  being reached — see Troubleshooting.
+- **Duplicate names (disambiguation).** Make two bubbles called "Ideas" in
+  different places (e.g. one under Work). *"Add a note to Ideas in Nubble"* →
+  Siri shows both, each with its path/project as the subtitle (e.g. *Work ·
+  My Notes*) → pick one → "Added to Ideas" → the note is in the one you
+  picked. Same on-screen list in the Shortcuts editor.
+- **Stale mirror — bubble deleted after Siri learned it.** Create "Temp",
+  wait for the mirror, then delete it and IMMEDIATELY (before the next
+  mirror write lands) say *"Add a note to Temp in Nubble"*. Whether Siri
+  still offers Temp or not: the outcome must be one of (a) "Added to Temp"
+  then the note at **root** with toast *"…at root — no bubble called
+  “Temp”"*, or (b) Siri doesn't run the intent and says so. **Never** silence
+  after "What's the note?".
+- **Stale mirror — bubble created on another device, not pulled yet.**
+  Create "Remote" on the web app; do NOT open the iOS app. *"Add a note to
+  Remote in Nubble"*. Listen carefully — this is the case to characterise:
+  - Siri runs the plain intent (says "Added to Nubble") → captured at root.
+    Good.
+  - Siri asks "What's the note?", takes the text, and says "Added to
+    Nubble" → the placeholder path (`bubble: by-name` in Console). Open the
+    iOS app *after* it syncs: the note is **filed into Remote** by name.
+  - Siri does something else (web search, "I can't help with that") → it
+    must be **clearly audible/visible** that nothing was captured. If on
+    this iOS version that response is quiet or ambiguous, record it here:
+    that is the one path where a spoken thought can be lost, and the
+    mitigation is the plain phrase.
+- **Unsayable names are filtered.** With bubbles "F", "Gj", "G" present,
+  the Shortcuts editor's bubble picker does not list them; *"Add a note to
+  G in Nubble"* does not run the filed intent. Renaming "G" to "Gym" (3+
+  chars) makes it appear after the next mirror write.
+- **Filed capture while offline / gate closed.** Same as the plain cases:
+  the capture waits with its bubble hint attached and files on release.
+
 - **Share extension still works** (Part C of `SHARE_EXTENSION_SETUP.md`,
   the Apple Notes case is enough) — same App Group, different keys, no
   interaction, but the deployment-target change rebuilt it.
@@ -242,6 +314,16 @@ Two categories: `intent` (the intent ran) and `store` (the queue).
   the queue is intact and every waiting capture lands on that open. (This
   exact symptom cost a multi-hour session on 2026-09-03; the write side was
   fine the whole time.)
+- **A new bubble isn't sayable until reinstall:** Siri's parameter cache
+  isn't being refreshed. `VoiceCapturePlugin.setBubbles` looks up
+  `VoiceBubbleSync` by class name and calls `refresh()`; if
+  `BubbleEntity.swift` isn't in the App target that lookup silently finds
+  nothing (step 4, both files). Confirm the mirror itself is written
+  (Console `bubble mirror written`) — if it is, only the refresh is missing.
+- **"Add a note to X in Nubble" lands at root with a "no bubble called"
+  toast although X exists:** X was mirrored under an id the app can no
+  longer find and no other bubble has exactly that name — a rename between
+  Siri learning the bubble and the capture. The note is safe; move it.
 - **Bundle is current, captures still don't land while signed in:** the
   readiness gate is holding them — by design when the initial sync didn't
   settle (offline at launch, or a sync error). Force-quit and relaunch

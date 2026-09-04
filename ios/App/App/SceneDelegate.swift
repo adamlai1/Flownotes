@@ -107,17 +107,23 @@ enum VoiceCaptureStore {
     /// Writes one capture as its own file and returns its id. The id becomes
     /// the note's id on the web side, which is what makes re-delivery after a
     /// crash between persist and ack idempotent.
+    ///
+    /// bubbleId / bubbleName are FILING HINTS, both optional and independent:
+    /// the web consumer files by id if that bubble still exists, else by name
+    /// if exactly one bubble has it, else at root. They never gate the write.
     @discardableResult
-    static func append(_ text: String) throws -> String {
+    static func append(_ text: String, bubbleId: String? = nil, bubbleName: String? = nil) throws -> String {
         let dir = try directory()
         let id = UUID().uuidString.lowercased()
         // ts in milliseconds so JS can feed it straight to new Date(): the
         // note is stamped with when it was SPOKEN, not when Nubble next opened.
-        let payload: [String: Any] = [
+        var payload: [String: Any] = [
             "id": id,
             "text": text,
             "ts": Date().timeIntervalSince1970 * 1000,
         ]
+        if let bubbleId = bubbleId, !bubbleId.isEmpty { payload["bubbleId"] = bubbleId }
+        if let bubbleName = bubbleName, !bubbleName.isEmpty { payload["bubbleName"] = bubbleName }
         let data = try JSONSerialization.data(withJSONObject: payload)
         let url = dir.appendingPathComponent(id).appendingPathExtension("json")
         try data.write(to: url, options: .atomic)
@@ -155,11 +161,14 @@ enum VoiceCaptureStore {
                 log.error("skipping unreadable capture file \(name, privacy: .public)")
                 continue
             }
-            captures.append([
+            var capture: [String: Any] = [
                 "id": id,
                 "text": text,
                 "ts": (obj["ts"] as? Double) ?? 0,
-            ])
+            ]
+            if let bubbleId = obj["bubbleId"] as? String, !bubbleId.isEmpty { capture["bubbleId"] = bubbleId }
+            if let bubbleName = obj["bubbleName"] as? String, !bubbleName.isEmpty { capture["bubbleName"] = bubbleName }
+            captures.append(capture)
         }
         captures.sort { (($0["ts"] as? Double) ?? 0) < (($1["ts"] as? Double) ?? 0) }
         if !captures.isEmpty {
@@ -182,6 +191,38 @@ enum VoiceCaptureStore {
         }
         log.notice("ack: removed \(removed, privacy: .public) of \(ids.count, privacy: .public)")
     }
+
+    // ── Bubble mirror ────────────────────────────────────────────────────────
+    //
+    // The bubble list Siri's entity query reads (voice-capture-src/
+    // BubbleEntity.swift). Written by the web layer through setBubbles();
+    // lives beside the queue, NOT inside it, so list()/ack() never see it.
+    // Read best-effort: an unreadable mirror means "no bubbles", never an
+    // error, because the intent must run regardless.
+
+    private static let bubblesFileName = "bubbles.json"
+
+    private static func bubblesURL() throws -> URL {
+        guard let container = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: appGroupId) else {
+            throw VoiceCaptureError.appGroupUnavailable
+        }
+        return container.appendingPathComponent(bubblesFileName)
+    }
+
+    static func writeBubbles(_ records: [[String: Any]]) throws {
+        let url = try bubblesURL()
+        let data = try JSONSerialization.data(withJSONObject: records)
+        try data.write(to: url, options: .atomic)
+        log.notice("bubble mirror written: \(records.count, privacy: .public) bubble(s)")
+    }
+
+    static func bubbleRecords() -> [[String: Any]] {
+        guard let url = try? bubblesURL(),
+              let data = try? Data(contentsOf: url),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
+        else { return [] }
+        return arr
+    }
 }
 
 /// Bridge between VoiceCaptureStore and the web layer (src/lib/voiceCapture.js).
@@ -198,6 +239,7 @@ public class VoiceCapturePlugin: CAPPlugin, CAPBridgedPlugin {
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "list", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "ack", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "setBubbles", returnType: CAPPluginReturnPromise),
     ]
 
     private var observer: NSObjectProtocol?
@@ -225,6 +267,45 @@ public class VoiceCapturePlugin: CAPPlugin, CAPBridgedPlugin {
         let ids = call.getArray("ids", String.self) ?? []
         VoiceCaptureStore.ack(ids)
         call.resolve()
+    }
+
+    /// Replace the bubble mirror with what the web layer sends, then ask
+    /// Siri to re-read it. Only string fields are kept, so nothing the web
+    /// side didn't mean to expose can end up in the file.
+    @objc func setBubbles(_ call: CAPPluginCall) {
+        let raw = call.getArray("bubbles") ?? []
+        let records: [[String: Any]] = raw.compactMap { item in
+            guard let d = item as? [String: Any],
+                  let id = d["id"] as? String, !id.isEmpty,
+                  let name = d["name"] as? String, !name.isEmpty else { return nil }
+            var r: [String: Any] = ["id": id, "name": name]
+            if let path = d["path"] as? String, !path.isEmpty { r["path"] = path }
+            if let project = d["project"] as? String, !project.isEmpty { r["project"] = project }
+            if let projectId = d["projectId"] as? String, !projectId.isEmpty { r["projectId"] = projectId }
+            return r
+        }
+        do {
+            try VoiceCaptureStore.writeBubbles(records)
+        } catch {
+            call.reject("bubble mirror write failed: \(error.localizedDescription)")
+            return
+        }
+        Self.refreshSiriParameters()
+        call.resolve()
+    }
+
+    /// Tell Siri the bubble entity set changed. Dispatched BY CLASS NAME so
+    /// this file keeps compiling before voice-capture-src is in the target
+    /// (the same necessity the share extension's launchHostApp documents):
+    /// VoiceBubbleSync lives in BubbleEntity.swift and imports AppIntents.
+    /// Absent, this is a silent no-op — the mirror is still written and the
+    /// next reinstall picks it up.
+    private static func refreshSiriParameters() {
+        guard let cls = NSClassFromString("VoiceBubbleSync") else { return }
+        let sel = NSSelectorFromString("refresh")
+        let obj = cls as AnyObject
+        guard obj.responds(to: sel) else { return }
+        _ = obj.perform(sel)
     }
 }
 

@@ -39,8 +39,17 @@ struct AddNoteIntent: AppIntent {
     @Parameter(title: "Note", requestValueDialog: "What's the note?")
     var text: String
 
+    // OPTIONAL, and never prompted for: the plain phrase leaves it nil and
+    // the note lands at root exactly as before. Siri fills it only when the
+    // spoken phrase named a bubble (see BubbleEntity.swift for how names
+    // resolve and why resolution can never block the capture).
+    @Parameter(title: "Bubble")
+    var bubble: BubbleEntity?
+
     static var parameterSummary: some ParameterSummary {
-        Summary("Add \(\.$text) to Nubble")
+        Summary("Add \(\.$text) to Nubble") {
+            \.$bubble
+        }
     }
 
     private static let log = Logger(subsystem: "com.adamlai.flownotes.VoiceCapture", category: "intent")
@@ -50,14 +59,25 @@ struct AddNoteIntent: AppIntent {
         guard !trimmed.isEmpty else {
             throw $text.needsValueError("What's the note?")
         }
+        // Filing hints ride along with the capture; the app decides. A real
+        // id files into that bubble if it still exists. A placeholder (name
+        // Siri couldn't match against the mirror) carries only the name, and
+        // the app files by name if such a bubble exists by then, else root.
+        let bubbleId: String? = (bubble?.isPlaceholder ?? true) ? nil : bubble?.id
+        let bubbleName: String? = bubble?.name
         do {
-            let id = try VoiceCaptureStore.append(trimmed)
-            Self.log.notice("intent stored capture \(id, privacy: .public) (\(trimmed.count, privacy: .public) chars)")
+            let id = try VoiceCaptureStore.append(trimmed, bubbleId: bubbleId, bubbleName: bubbleName)
+            Self.log.notice("intent stored capture \(id, privacy: .public) (\(trimmed.count, privacy: .public) chars, bubble: \(bubbleId == nil ? (bubbleName == nil ? "none" : "by-name") : "by-id", privacy: .public))")
         } catch {
             // Siri reads errorDescription aloud, so VoiceCaptureError's copy
             // must make sense spoken.
             Self.log.error("intent failed to store capture: \(String(describing: error), privacy: .public)")
             throw error
+        }
+        // The spoken confirmation is the user's proof the capture landed —
+        // and where. Its ABSENCE is the tell that Siri never ran the intent.
+        if let bubble = bubble, !bubble.isPlaceholder {
+            return .result(dialog: "Added to \(bubble.name)")
         }
         return .result(dialog: "Added to Nubble")
     }
@@ -74,11 +94,19 @@ struct NubbleShortcuts: AppShortcutsProvider {
         AppShortcut(
             intent: AddNoteIntent(),
             phrases: [
+                // Plain capture → root.
                 "Add a note to \(.applicationName)",
                 "Add a note in \(.applicationName)",
                 "New note in \(.applicationName)",
                 "Take a note in \(.applicationName)",
                 "Note in \(.applicationName)",
+                // Filed capture. Siri precomputes one variant per mirrored
+                // bubble, which is why the mirror is filtered and capped.
+                "Add a note to \(\.$bubble) in \(.applicationName)",
+                "Add a note in \(\.$bubble) in \(.applicationName)",
+                "New note in \(\.$bubble) in \(.applicationName)",
+                "Add a \(.applicationName) note to \(\.$bubble)",
+                "Note in \(\.$bubble) in \(.applicationName)",
             ],
             shortTitle: "Add a Note",
             systemImageName: "mic.fill"
