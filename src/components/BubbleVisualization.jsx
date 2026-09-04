@@ -1639,6 +1639,11 @@ function BubbleNameFontScope({ children, liveIds = null }) {
 // during a swipe every float competes with the track for the same frames. The item
 // simply rests at its layout position; the layout's vertical gaps are measured from
 // there (the bob only ever travels UP), so a paused item can't overlap a neighbour.
+// `selected` / `pressed` pause it the same way, per item: a selected item and an item
+// under a finger are HELD, and a held thing shouldn't idle — the bob reads as the item
+// ignoring the hand on it. Both go through the same eased settle-to-rest as the swipe
+// pause (never a cut mid-bob) and the bob resumes on deselect / release. With Bouncy
+// Animations off there is no bob to pause, so neither flag changes anything.
 // Bubble glow — the coloured halo behind a bubble scales with its rendered size, so
 // a small bubble gets a tight, subtle glow and a large one a bigger, slightly stronger
 // one. (A fixed halo read backwards: small bubbles were proportionally MORE glow than
@@ -1786,7 +1791,7 @@ function liftedFill(base, isLight, enabled = true) {
   return `${axis('to right')}, ${axis('to bottom')}, ${base}`
 }
 
-function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating = true, selectable = false, selected = false }) {
+function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating = true, selectable = false, selected = false, pressed = false }) {
   const { theme } = useTheme()
   const isLight = theme === 'light'
   const rgb = hexToRgb(item.color)
@@ -1925,7 +1930,8 @@ function BubbleCircle({ item, index, hidden, isDragging, animateLayout, floating
     : ''
   const { bouncy } = usePreferences()
   const feel = feelFor(bouncy)
-  const floats = floating && bouncy
+  // Held (selected, or under a finger) → rest. See the `floating` contract above.
+  const floats = floating && bouncy && !selected && !pressed
 
   return (
     // Outer wrapper: framer only animates opacity here, so style.transform is safe to set
@@ -2129,7 +2135,7 @@ function SelectionOverlay({ selected, radius }) {
 
 // `floating` — same contract as BubbleCircle's: run the idle bob only when this item is
 // on the current page and no swipe is in flight.
-function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout, floating = true, selectable = false, selected = false }) {
+function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout, floating = true, selectable = false, selected = false, pressed = false }) {
   const { theme } = useTheme()
   const isLight = theme === 'light'
   const rgb = hexToRgb(item.color)
@@ -2150,7 +2156,8 @@ function NoteCard({ item, index, customTagColors = {}, isDragging, animateLayout
   const floatDelay    = (index * 0.22) % 3
   const { bouncy } = usePreferences()
   const feel = feelFor(bouncy)
-  const floats = floating && bouncy
+  // Held (selected, or under a finger) → rest. See the `floating` contract above.
+  const floats = floating && bouncy && !selected && !pressed
 
   const label    = gated ? 'Locked' : (noteTitle(item) || 'New note')
   const lines    = (item.content || '').split('\n').filter(l => l.trim())
@@ -3149,6 +3156,13 @@ export default function BubbleVisualization({
 
   // ── Drag state ────────────────────────────────────────────────────────────────
   const [draggingId, setDraggingId] = useState(null)
+  // The item currently under a finger (pointer down on it, not yet released). A held
+  // item is not idling — its float pauses (settles, via the same eased rest the swipe
+  // pause uses) for exactly the press, and resumes on release unless it was left
+  // selected. Set wherever a press lands on an item, cleared wherever that press ends:
+  // release, cancel, movement that turns it into a swipe, a drag abandon, a project
+  // change.
+  const [pressedId, setPressedId] = useState(null)
   const [savedPositions, setSavedPositions] = useState({})
   // Per-level layout mode map (contextKey → { sort }); see loadSortModes.
   const [sortModes, setSortModes] = useState(() => loadSortModes(project.id))
@@ -3263,6 +3277,7 @@ export default function BubbleVisualization({
     resolvedAllPosRef.current = []
     dragActivatedRef.current = false
     pendingPointerRef.current = null
+    setPressedId(null)
     pagedRef.current = null
     if (layoutAnimTimerRef.current) { clearTimeout(layoutAnimTimerRef.current); layoutAnimTimerRef.current = null }
     setLayoutAnim(false)
@@ -4080,6 +4095,7 @@ export default function BubbleVisualization({
     if (dragRafRef.current) { cancelAnimationFrame(dragRafRef.current); dragRafRef.current = null }
     dragActivatedRef.current = false
     pendingPointerRef.current = null
+    setPressedId(null)
     dragInfoRef.current = null
     resolvedDragPosRef.current = null
     resolvedAllPosRef.current = []
@@ -4137,6 +4153,7 @@ export default function BubbleVisualization({
       Math.abs(localY - item.cy) <= halfHeightOf(item))
     const st = { mode: 'pending', startX: e.clientX, startY: e.clientY, itemId: hit?.id ?? null, lpTimer: null }
     pagedRef.current = st
+    if (hit) setPressedId(hit.id)
     if (DEBUG_SWIPE_PERF) {
       // TEMP (swipe perf): what is actually on screen when the gesture starts. Counts the
       // whole container — which now holds only the mounted window of pages, so the item
@@ -4203,6 +4220,8 @@ export default function BubbleVisualization({
       if (Math.hypot(dx, dy) <= 8) return
       if (st.lpTimer) { clearTimeout(st.lpTimer); st.lpTimer = null }
       st.mode = 'swipe' // moved before the long-press fired → treat as a page swipe
+      // No longer a press on the item — the swipe pause takes over for every float.
+      setPressedId(null)
       // Hold every float still for the duration of the gesture (see `swiping`).
       swipeSettleRef.current++
       setSwiping(true)
@@ -4265,6 +4284,7 @@ export default function BubbleVisualization({
       }
     }
     pagedRef.current = null
+    setPressedId(null)
     // Anything that isn't a swipe releases the float pause here: only the swipe path
     // ends in animateToPage, whose settle completion is what normally resumes them.
     if (st.mode !== 'swipe') { swipeSettleRef.current++; setSwiping(false) }
@@ -4412,6 +4432,7 @@ export default function BubbleVisualization({
 
     pendingPointerRef.current = { item: hit, startClientX: e.clientX, startClientY: e.clientY }
     dragActivatedRef.current = false
+    setPressedId(hit.id)
 
     // In select mode a press never becomes a drag — pointer-up toggles the item instead.
     if (selectModeRef.current) return
@@ -4454,6 +4475,7 @@ export default function BubbleVisualization({
         clearTimeout(longPressTimerRef.current)
         longPressTimerRef.current = null
         pendingPointerRef.current = null
+        setPressedId(null)
         return
       }
     }
@@ -4474,6 +4496,8 @@ export default function BubbleVisualization({
   }
 
   function handlePointerUp() {
+    // The finger is off the item whatever happens next (tap, drag drop, menu).
+    setPressedId(null)
     if (longPressTimerRef.current) {
       clearTimeout(longPressTimerRef.current)
       longPressTimerRef.current = null
@@ -5036,6 +5060,7 @@ export default function BubbleVisualization({
                               index={i % 6}
                               customTagColors={project.customTagColors || {}}
                               isDragging={draggingId === item.id}
+                              pressed={pressedId === item.id}
                               animateLayout={animatingLayout && draggingId !== item.id}
                               floating={floating}
                               selectable={selectMode}
@@ -5048,6 +5073,7 @@ export default function BubbleVisualization({
                               index={i % 6}
                               hidden={expandAnim?.id === item.id}
                               isDragging={draggingId === item.id}
+                              pressed={pressedId === item.id}
                               animateLayout={animatingLayout && draggingId !== item.id}
                               floating={floating}
                               selectable={selectMode}
@@ -5075,6 +5101,7 @@ export default function BubbleVisualization({
                         index={i}
                         customTagColors={project.customTagColors || {}}
                         isDragging={draggingId === item.id}
+                        pressed={pressedId === item.id}
                         animateLayout={animatingLayout && draggingId !== item.id}
                         selectable={selectMode}
                         selected={selectedIds.has(item.id)}
@@ -5086,6 +5113,7 @@ export default function BubbleVisualization({
                         index={i}
                         hidden={expandAnim?.id === item.id}
                         isDragging={draggingId === item.id}
+                        pressed={pressedId === item.id}
                         animateLayout={animatingLayout && draggingId !== item.id}
                         selectable={selectMode}
                         selected={selectedIds.has(item.id)}
