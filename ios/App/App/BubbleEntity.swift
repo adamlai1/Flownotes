@@ -123,16 +123,23 @@ struct BubbleQuery: EntityQuery, EntityStringQuery {
     }
 }
 
-/// Called by VoiceCapturePlugin (SceneDelegate.swift) after every mirror
-/// write — by CLASS NAME at runtime, because that file must keep compiling
-/// when this one isn't in the target yet. Tells Siri the entity set changed
-/// so the new phrase variants exist. Without this a freshly created bubble
-/// isn't sayable until the next reinstall.
+/// Called by VoiceCaptureStore.refreshSiriParameters (SceneDelegate.swift) at
+/// launch and after every mirror write — by CLASS NAME at runtime, because
+/// that file must keep compiling when this one isn't in the target yet. The
+/// `@objc(VoiceBubbleSync)` attribute IS the contract: it pins the ObjC name
+/// the lookup uses (without it the runtime name would be module-qualified).
+/// Tells Siri the entity set changed so the per-bubble phrase variants exist.
+/// Every intent run also calls updateAppShortcutParameters() directly, so a
+/// missed dispatch here degrades to "sayable after the next plain capture",
+/// never to "never sayable".
 @objc(VoiceBubbleSync)
 final class VoiceBubbleSync: NSObject {
+    private static let log = Logger(subsystem: "com.adamlai.flownotes.VoiceCapture", category: "bubbles")
+
     @objc static func refresh() {
         if #available(iOS 16.0, *) {
             NubbleShortcuts.updateAppShortcutParameters()
+            log.notice("updateAppShortcutParameters() called (\(BubbleEntity.mirror().count, privacy: .public) mirrored bubble(s))")
         }
     }
 }

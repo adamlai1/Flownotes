@@ -164,7 +164,14 @@ export function buildSiriBubbleMirror(projects) {
 export async function mirrorBubblesToSiri(records) {
   if (!Capacitor.isNativePlatform()) return
   try {
-    await VoiceCapture.setBubbles({ bubbles: records })
+    const result = await VoiceCapture.setBubbles({ bubbles: records })
+    // `refreshed` false means the native side wrote the mirror but could not
+    // reach VoiceBubbleSync (intent files not in this build). Siri then only
+    // learns new bubbles at launch or on the next intent run — see the
+    // self-healing note in AddNoteIntent.swift.
+    if (result && result.refreshed === false) {
+      console.warn('[voice] bubble mirror written but Siri phrase refresh was skipped (VoiceBubbleSync not in this build)')
+    }
   } catch (e) {
     console.warn('[voice] bubble mirror push failed:', e)
   }

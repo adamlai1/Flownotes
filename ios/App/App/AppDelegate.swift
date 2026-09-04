@@ -7,7 +7,12 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     var window: UIWindow?
 
     func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
-        // Override point for customization after application launch.
+        // Siri voice capture: re-register the per-bubble phrases from the
+        // mirror already in the App Group, so a bubble created on a previous
+        // run is sayable without waiting for the web layer to rewrite the
+        // mirror. Best-effort by-class-name dispatch (see VoiceCaptureStore);
+        // a build without the intent files logs "skipped" and moves on.
+        VoiceCaptureStore.refreshSiriParameters(reason: "launch")
         return true
     }
 

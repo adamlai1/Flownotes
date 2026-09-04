@@ -223,6 +223,43 @@ enum VoiceCaptureStore {
         else { return [] }
         return arr
     }
+
+    // ── Siri phrase refresh ──────────────────────────────────────────────────
+    //
+    // Tell Siri the bubble entity set changed so the per-bubble phrase
+    // variants exist. Dispatched BY CLASS NAME because this file must keep
+    // compiling before the intent files are in the target (main's project
+    // still has neither, at deployment target 15): VoiceBubbleSync lives in
+    // BubbleEntity.swift and imports AppIntents. Returns whether the class
+    // was found and called, so callers can log a miss instead of assuming.
+    //
+    // Called from three places: app launch (AppDelegate), after every mirror
+    // write (VoiceCapturePlugin.setBubbles), and — directly, no lookup —
+    // inside every intent run (AddNoteIntent.swift), which is the path that
+    // cannot silently no-op.
+
+    @discardableResult
+    static func refreshSiriParameters(reason: String) -> Bool {
+        // Swift classes get a module-qualified ObjC name unless @objc(...)
+        // names them; VoiceBubbleSync is named explicitly, but try both so a
+        // future edit to that attribute can't turn this into a silent miss.
+        let candidates = ["VoiceBubbleSync", "App.VoiceBubbleSync"]
+        let sel = NSSelectorFromString("refresh")
+        for name in candidates {
+            guard let cls = NSClassFromString(name) else { continue }
+            let obj = cls as AnyObject
+            guard obj.responds(to: sel) else {
+                log.error("siri refresh (\(reason, privacy: .public)): \(name, privacy: .public) found but has no +refresh")
+                return false
+            }
+            let run = { _ = obj.perform(sel) }
+            if Thread.isMainThread { run() } else { DispatchQueue.main.async(execute: run) }
+            log.notice("siri refresh (\(reason, privacy: .public)): dispatched to \(name, privacy: .public)")
+            return true
+        }
+        log.notice("siri refresh (\(reason, privacy: .public)): VoiceBubbleSync not in this build — skipped")
+        return false
+    }
 }
 
 /// Bridge between VoiceCaptureStore and the web layer (src/lib/voiceCapture.js).
@@ -298,22 +335,10 @@ public class VoiceCapturePlugin: CAPPlugin, CAPBridgedPlugin {
             call.reject("bubble mirror write failed: \(error.localizedDescription)")
             return
         }
-        Self.refreshSiriParameters()
-        call.resolve()
-    }
-
-    /// Tell Siri the bubble entity set changed. Dispatched BY CLASS NAME so
-    /// this file keeps compiling before the two intent files are in the target
-    /// (the same necessity the share extension's launchHostApp documents):
-    /// VoiceBubbleSync lives in BubbleEntity.swift and imports AppIntents.
-    /// Absent, this is a silent no-op — the mirror is still written and the
-    /// next reinstall picks it up.
-    private static func refreshSiriParameters() {
-        guard let cls = NSClassFromString("VoiceBubbleSync") else { return }
-        let sel = NSSelectorFromString("refresh")
-        let obj = cls as AnyObject
-        guard obj.responds(to: sel) else { return }
-        _ = obj.perform(sel)
+        // Reported back so the web side can log a miss; never a failure of
+        // the mirror write itself.
+        let refreshed = VoiceCaptureStore.refreshSiriParameters(reason: "mirror write")
+        call.resolve(["count": records.count, "refreshed": refreshed])
     }
 }
 
