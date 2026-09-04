@@ -1727,10 +1727,11 @@ function BubbleNameFontScope({ children, liveIds = null }) {
 // simply rests at its layout position; the layout's vertical gaps are measured from
 // there (the bob only ever travels UP), so a paused item can't overlap a neighbour.
 // `selected` / `pressed` pause it the same way, per item: a selected item and an item
-// under a finger are HELD, and a held thing shouldn't idle — the bob reads as the item
-// ignoring the hand on it. Both go through the same eased settle-to-rest as the swipe
-// pause (never a cut mid-bob) and the bob resumes on deselect / release. With Bouncy
-// Animations off there is no bob to pause, so neither flag changes anything.
+// under a finger — or with its long-press menu open — are HELD, and a held thing
+// shouldn't idle: the bob reads as the item ignoring the hand on it. Both go through
+// the same eased settle-to-rest as the swipe pause (never a cut mid-bob) and the bob
+// resumes on deselect / release / menu dismissal. With Bouncy Animations off there is
+// no bob to pause, so neither flag changes anything.
 // Bubble glow — the coloured halo behind a bubble scales with its rendered size, so
 // a small bubble gets a tight, subtle glow and a large one a bigger, slightly stronger
 // one. (A fixed halo read backwards: small bubbles were proportionally MORE glow than
@@ -2516,7 +2517,7 @@ function ZoomExpand({ anim, size, onDone, offset }) {
 // Anchored at the press point and clamped to stay on screen. Stops its own pointer
 // events so the canvas's drag handlers underneath don't pick them up.
 
-function LockMenu({ menu, gated, onLock, onCopy, onShare, onRename, onColor, onDelete, onClose, width, height }) {
+function LockMenu({ menu, gated, onSelect, onLock, onCopy, onShare, onRename, onColor, onDelete, onClose, width, height }) {
   // Outside-press dismissal via the shared hook (Escape stays with the
   // parent's existing popup-level registration).
   const lockMenuPanelRef = useRef(null)
@@ -2538,7 +2539,8 @@ function LockMenu({ menu, gated, onLock, onCopy, onShare, onRename, onColor, onD
   // bottom edge exactly where a long-press near the bottom puts it.
   const HEADER_H = 30
   const ROW_H = 54
-  const rows = 2 + (showCopy ? 1 : 0) + (showShare ? 1 : 0) + (showRename ? 1 : 0) + (showColor ? 1 : 0)
+  // Select, Lock and Delete are always present; the rest depend on the item.
+  const rows = 3 + (showCopy ? 1 : 0) + (showShare ? 1 : 0) + (showRename ? 1 : 0) + (showColor ? 1 : 0)
   const MENU_H = HEADER_H + rows * ROW_H
   const x = Math.max(8, Math.min(menu.x, width - MENU_W - 8))
   const y = Math.max(SUB_BAR_H + 8, Math.min(menu.y, height - MENU_H - 8))
@@ -2572,6 +2574,21 @@ function LockMenu({ menu, gated, onLock, onCopy, onShare, onRename, onColor, onD
         >
           {gated ? 'Locked' : (item.type === 'note' ? (noteTitle(item) || 'New note') : item.name)}
         </div>
+        {/* Select: enter multi-select with this item already picked — a path into
+            select mode from the item itself rather than the header button. Offered
+            for locked items too, since select mode's own taps don't gate on locks. */}
+        <button
+          onClick={e => { e.stopPropagation(); onSelect() }}
+          className="w-full flex items-center gap-2 px-3 py-3 text-sm text-left active:opacity-70"
+          style={{ color: 'var(--text)' }}
+        >
+          <svg width={15} height={15} viewBox="0 0 24 24" fill="none" stroke="currentColor" className="flex-shrink-0">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+          </svg>
+          Select
+        </button>
+        <div style={{ height: 1, background: 'var(--border)' }} />
         {showCopy && (
           <>
             <button
@@ -3203,6 +3220,12 @@ export default function BubbleVisualization({
     setConfirmDelete(false)
     setAddToOpen(false)
   }
+  // Enter select mode with one item already selected (long-press menu → Select). The
+  // header button enters with an empty selection; this is the same mode, just seeded.
+  function enterSelectWith(id) {
+    setSelectedIds(new Set([id]))
+    setSelectMode(true)
+  }
   // Changing project or navigating to another bubble level clears the selection — the
   // selected items may no longer be on screen. (Page swipes keep it: same level.)
   useEffect(() => {
@@ -3286,8 +3309,14 @@ export default function BubbleVisualization({
   // pause uses) for exactly the press, and resumes on release unless it was left
   // selected. Set wherever a press lands on an item, cleared wherever that press ends:
   // release, cancel, movement that turns it into a swipe, a drag abandon, a project
-  // change.
+  // change. The long-press menu extends the hold past the release: the item whose
+  // menu is open stays `pressed` (see heldId at the render) until the menu closes.
   const [pressedId, setPressedId] = useState(null)
+  // The item whose float is held still: the one under a finger, or — once the finger
+  // has lifted to leave its menu open — the menu's item. Pausing on pressedId alone
+  // resumed the bob the moment the long-press ended, with the menu still up; the hold
+  // belongs to the menu's open state, so the pause follows lockMenu until it closes.
+  const heldId = pressedId ?? lockMenu?.item.id ?? null
   const [savedPositions, setSavedPositions] = useState({})
   // Per-level layout mode map (contextKey → { sort }); see loadSortModes.
   const [sortModes, setSortModes] = useState(() => loadSortModes(project.id))
@@ -5185,7 +5214,7 @@ export default function BubbleVisualization({
                               index={i % 6}
                               customTagColors={project.customTagColors || {}}
                               isDragging={draggingId === item.id}
-                              pressed={pressedId === item.id}
+                              pressed={heldId === item.id}
                               animateLayout={animatingLayout && draggingId !== item.id}
                               floating={floating}
                               selectable={selectMode}
@@ -5198,7 +5227,7 @@ export default function BubbleVisualization({
                               index={i % 6}
                               hidden={expandAnim?.id === item.id}
                               isDragging={draggingId === item.id}
-                              pressed={pressedId === item.id}
+                              pressed={heldId === item.id}
                               animateLayout={animatingLayout && draggingId !== item.id}
                               floating={floating}
                               selectable={selectMode}
@@ -5226,7 +5255,7 @@ export default function BubbleVisualization({
                         index={i}
                         customTagColors={project.customTagColors || {}}
                         isDragging={draggingId === item.id}
-                        pressed={pressedId === item.id}
+                        pressed={heldId === item.id}
                         animateLayout={animatingLayout && draggingId !== item.id}
                         selectable={selectMode}
                         selected={selectedIds.has(item.id)}
@@ -5238,7 +5267,7 @@ export default function BubbleVisualization({
                         index={i}
                         hidden={expandAnim?.id === item.id}
                         isDragging={draggingId === item.id}
-                        pressed={pressedId === item.id}
+                        pressed={heldId === item.id}
                         animateLayout={animatingLayout && draggingId !== item.id}
                         selectable={selectMode}
                         selected={selectedIds.has(item.id)}
@@ -5296,6 +5325,7 @@ export default function BubbleVisualization({
             width={size.width}
             height={size.height}
             onClose={closeLockMenu}
+            onSelect={() => { closeLockMenu(); enterSelectWith(lockMenu.item.id) }}
             onLock={() => { closeLockMenu(); toggleItemLock(lockMenu.item) }}
             onCopy={() => { closeLockMenu(); copyItem(lockMenu.item) }}
             onShare={() => { closeLockMenu(); shareItem(lockMenu.item) }}
