@@ -638,6 +638,17 @@ export default function Settings({ onClose, zIndex = 50, project, onImportNotes,
               >
                 <span className="text-sm font-medium" style={{ color: 'var(--text)' }}>Support</span>
               </button>
+              <Divider />
+              {/* Which web bundle this is: commit + build date, substituted at build
+                  time (vite.config.js). On the native shell this is the only way to
+                  tell from inside the app whether `npx cap sync ios` ran after the
+                  last pull — compare it with `git log` on the Mac. */}
+              <div className="flex items-center justify-between px-4 py-3.5">
+                <span className="text-sm" style={{ color: 'var(--text-muted)' }}>Build</span>
+                <span className="text-xs" style={{ color: 'var(--text-muted)', fontVariantNumeric: 'tabular-nums' }}>
+                  {typeof __BUILD_STAMP__ === 'string' ? __BUILD_STAMP__ : 'dev'}
+                </span>
+              </div>
             </Card>
           </div>
 

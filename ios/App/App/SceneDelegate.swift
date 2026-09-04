@@ -273,16 +273,24 @@ public class VoiceCapturePlugin: CAPPlugin, CAPBridgedPlugin {
     /// Siri to re-read it. Only string fields are kept, so nothing the web
     /// side didn't mean to expose can end up in the file.
     @objc func setBubbles(_ call: CAPPluginCall) {
-        let raw = call.getArray("bubbles") ?? []
-        let records: [[String: Any]] = raw.compactMap { item in
-            guard let d = item as? [String: Any],
-                  let id = d["id"] as? String, !id.isEmpty,
+        // Typed read (JSObject = [String: JSValue]) — Capacitor's own element
+        // type — rather than an `as? [String: Any]` on each item, so the
+        // records can't silently come out empty on a failed bridge cast.
+        let raw: [JSObject] = call.getArray("bubbles", JSObject.self) ?? []
+        let records: [[String: Any]] = raw.compactMap { d in
+            guard let id = d["id"] as? String, !id.isEmpty,
                   let name = d["name"] as? String, !name.isEmpty else { return nil }
             var r: [String: Any] = ["id": id, "name": name]
             if let path = d["path"] as? String, !path.isEmpty { r["path"] = path }
             if let project = d["project"] as? String, !project.isEmpty { r["project"] = project }
             if let projectId = d["projectId"] as? String, !projectId.isEmpty { r["projectId"] = projectId }
             return r
+        }
+        if !raw.isEmpty && records.isEmpty {
+            // The web side sent bubbles and none survived — a shape mismatch,
+            // never "no bubbles". Say so instead of writing an empty mirror.
+            call.reject("bubble mirror: \(raw.count) item(s) received, none had string id+name")
+            return
         }
         do {
             try VoiceCaptureStore.writeBubbles(records)

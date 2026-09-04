@@ -320,6 +320,13 @@ what Siri *says*, not just what lands.
 
 ## Troubleshooting
 
+**Which bundle is on the device?** Settings → bottom card → **Build** shows
+the commit and date the web bundle was built from. Compare with `git log
+-1 --format=%h` on the Mac. If it's behind, nothing else here is worth
+reading until `npm run build && npx cap sync ios` and a rebuild. (The Siri
+tip in Settings is NOT a bundle check — it's hidden outside the native shell
+by design, so it never appears on the dev server in Safari.)
+
 - **Siri says "Added" (Console shows `written`, queue depth climbing) but
   opening Nubble does nothing — no toast, no notes:** rule out a stale web
   bundle FIRST, before any log filtering. See the warning at the top: the

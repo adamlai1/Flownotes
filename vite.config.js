@@ -1,7 +1,22 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { readFileSync } from 'node:fs'
+import { execSync } from 'node:child_process'
 import { SEED_BUBBLES } from './src/data/defaultData.js'
+
+// Build identity, shown at the bottom of Settings. Answers "which web bundle is
+// this device actually running?" from inside the app — the question behind
+// every stale-bundle debugging session (ios/App/App/public is untracked, so
+// the native shell can silently run JavaScript older than the Swift beside
+// it). The commit is the truth; the date makes an uncommitted local build
+// distinguishable from the last commit's.
+function buildStamp() {
+  let sha = 'nogit'
+  try { sha = execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() } catch {}
+  const d = new Date()
+  const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  return `${sha} · ${date}`
+}
 
 // The version feedback rows are stamped with. Read from package.json at build time and
 // substituted as a literal, so the client ships the string alone rather than importing
@@ -53,6 +68,7 @@ export default defineConfig({
   plugins: [react(), splashSeedBubbles()],
   define: {
     __APP_VERSION__: JSON.stringify(version),
+    __BUILD_STAMP__: JSON.stringify(buildStamp()),
   },
   server: {
     host: true,
