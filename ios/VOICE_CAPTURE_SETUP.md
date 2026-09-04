@@ -216,6 +216,36 @@ Two categories: `intent` (the intent ran) and `store` (the queue).
 
 ## Troubleshooting
 
+**Start with the in-app panel, not Console.** Settings → **Siri capture**
+(native builds only) shows, live: the bundle marker, whether the readiness
+gate is open and *which condition* is holding it shut, whether the consumer
+is subscribed, the queue depth (read-only — looking never deletes), and the
+last drain's listed/acked counts or error. **Refresh** re-reads the queue;
+**Drain now** runs a drain by hand (only enabled when the gate is open).
+
+- **Settings has no "Siri capture" section at all:** the native app is
+  running an OLD web bundle — the section ships in the same bundle as the
+  consumer, so no section means no consumer either, and the queue can only
+  grow. `ios/App/App/public` is untracked; `git pull` never refreshes it.
+  Run `npm run build && npx cap sync ios`, then rebuild in Xcode. This is
+  the first thing to rule out whenever Siri says "Added" (Console shows
+  `written`) but opening Nubble does nothing.
+- **Panel present, Gate says "Closed: initial sync not settled for …":**
+  the sync effect never resolved for this user — read the sync status the
+  row includes. `syncing` that never ends means a hung initial sync;
+  `error`/`offline` means it bailed and captures are deliberately held
+  (see Part C, offline case).
+- **Panel present, Gate open, Queue shows N waiting, Last drain "never":**
+  the consumer subscribed but no drain ran — tap **Drain now** and read the
+  Last drain row.
+- **Queue says "plugin error: … not implemented":** `VoiceCapturePlugin`
+  isn't registered on the bridge — `MainViewController.capacitorDidLoad`
+  must call `registerPluginInstance(VoiceCapturePlugin())`, and the
+  storyboard must point at `MainViewController`.
+- **Last drain shows "listed N, acked 0" with an error:** the web consumer
+  threw before persisting — the error text is the JS message. Queue is
+  intact.
+
 - **Siri says "I don't see an app for that" / phrase not recognised:** the
   App Shortcut isn't registered. Step 6 hasn't been run since step 4, or the
   metadata processor didn't run (step 5). Also check `CFBundleDisplayName`

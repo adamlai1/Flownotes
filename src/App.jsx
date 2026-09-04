@@ -84,7 +84,7 @@ import { LockProvider } from './contexts/LockContext'
 import { useAuth } from './contexts/AuthContext'
 import { useEscapeShortcut, useKeyShortcuts } from './lib/escapeStack'
 import { onShareImport } from './lib/shareImport'
-import { onVoiceCaptures } from './lib/voiceCapture'
+import { onVoiceCaptures, setVoiceGate } from './lib/voiceCapture'
 
 // EXPERIMENT (neutral scheme): the bubble-colour vignette, drawn at the app shell
 // so the band spans the FULL screen — safe-area top to bottom — instead of clipping
@@ -942,6 +942,19 @@ export default function App() {
   const [initialSyncSettledFor, setInitialSyncSettledFor] = useState(null)
   const voiceReady = Boolean(activeProject) && !loading &&
     (user ? initialSyncSettledFor === user.id : guestMode)
+  // The specific condition holding the gate shut, for the Settings panel —
+  // null when open. Mirrors the expression above term by term.
+  const voiceGateReason =
+    !activeProject ? 'no project loaded yet'
+    : loading ? 'auth session still loading'
+    : user
+      ? (initialSyncSettledFor === user.id
+          ? null
+          : `initial sync not settled for ${user.id.slice(0, 8)} (settled for: ${initialSyncSettledFor ? initialSyncSettledFor.slice(0, 8) : 'nobody yet'}; sync status: ${syncStatus})`)
+      : guestMode ? null : 'on the login screen'
+  useEffect(() => {
+    setVoiceGate({ ready: voiceReady, reason: voiceGateReason })
+  }, [voiceReady, voiceGateReason])
   // Always-current consumer, so the single subscription below never calls a
   // stale closure over updateProject / the toast bridge.
   const voiceConsumerRef = useRef(null)
