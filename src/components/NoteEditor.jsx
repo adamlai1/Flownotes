@@ -410,7 +410,7 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
   // now, natively — a forwarding handler here would scroll it twice.)
   const tagInputRef = useRef(null)
   const saveTimerRef = useRef(null)
-  const swipeRef = useRef({ active: false, startX: 0, currentX: 0 })
+  const swipeRef = useRef({ active: false, decided: false, engaged: false, released: false, startX: 0, startY: 0, currentX: 0 })
   // ── Claiming a touch for the sheet ──────────────────────────────────────
   // React's touch listeners are PASSIVE, so nothing in the JSX handlers can
   // stop iOS from also scrolling the note under a sheet drag. The claim is
@@ -452,6 +452,24 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
           d.decided = true
           d.horizontal = e.cancelable && Math.abs(dx) > Math.abs(dy)
           if (d.horizontal) touchClaimRef.current = 'sheet'
+        }
+      }
+      // Edge swipe-back: same axis decision. Horizontal-and-rightward engages
+      // and CLAIMS the touch, so the note's scroller never sees it — without the
+      // claim, a diagonal swipe scrolled the note vertically under the finger
+      // while the panel slid sideways, which read as the panel following the
+      // finger on both axes. Vertical wins → released; the edge touch is a
+      // scroll like any other. Vertical delta is used here for the decision
+      // only; the panel's position is dx alone (handleTouchMove).
+      const sw = swipeRef.current
+      if (sw.active && !sw.decided) {
+        const dx = t.clientX - sw.startX
+        const dy = t.clientY - sw.startY
+        if (Math.abs(dx) >= 6 || Math.abs(dy) >= 6) {
+          sw.decided = true
+          sw.engaged = e.cancelable && Math.abs(dx) > Math.abs(dy) && dx > 0
+          if (sw.engaged) touchClaimRef.current = 'back'
+          else { sw.active = false; sw.released = true }
         }
       }
       if (touchClaimRef.current && e.cancelable) e.preventDefault()
@@ -1290,7 +1308,10 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
     // the sheet itself), never to swipe-back — the conflict is resolved by
     // construction, not by racing recognizers.
     if (!isDesktop && !sheetOpen && touch.clientX < 28) {
-      swipeRef.current = { active: true, startX: touch.clientX, currentX: touch.clientX }
+      // Armed, not yet engaged: the native claim listener decides on the first
+      // real movement whether this is a horizontal swipe-back (engage + claim)
+      // or a vertical scroll from the edge (release).
+      swipeRef.current = { active: true, decided: false, engaged: false, released: false, startX: touch.clientX, startY: touch.clientY, currentX: touch.clientX }
       // Move the layer beneath to its parallax start position while it's still fully
       // hidden behind this panel, so there's no visible jump when the reveal begins.
       onSwipeProgress?.(0, true)
@@ -1316,7 +1337,9 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
       const odx = touch.clientX - os.startX
       sheetX.set(Math.min(sheetClosedX(), Math.max(0, sheetClosedX() + odx)))
     }
-    if (!swipeRef.current.active) return
+    // Tracks the finger 1:1 on the HORIZONTAL axis only, and only once the claim
+    // listener has engaged the swipe; clientY never reaches the panel's position.
+    if (!swipeRef.current.active || !swipeRef.current.engaged) return
     const dx = e.touches[0].clientX - swipeRef.current.startX
     swipeRef.current.currentX = e.touches[0].clientX
     if (dx > 0) {
@@ -1365,6 +1388,13 @@ export default function NoteEditor({ note, project, onClose, onUpdateNote, onDel
         if (v < -500 || (pulled > 80 && v < 200)) openSheet()
         else settleSheet(false)
       }
+    }
+    // Armed at the edge but released as a scroll: the layer beneath was moved to
+    // its parallax start on touchstart, so put it back; nothing else happened.
+    if (swipeRef.current.released) {
+      swipeRef.current.released = false
+      onSwipeProgress?.(0, false)
+      return
     }
     if (!swipeRef.current.active) return
     swipeRef.current.active = false
