@@ -5,6 +5,9 @@
 //   LAYOUT_ENTRY=<variant.jsx> node scripts/layout-sparse-exp.mjs
 import { loadLayout, overlaps, rng, makeItems, W, H, SAFE, SCALE, PID, CTX } from './layout-harness.mjs'
 const BV = await loadLayout()
+if (process.env.LAYOUT_FILL) BV.LAYOUT_TUNING.areaFill = Number(process.env.LAYOUT_FILL)
+if (process.env.LAYOUT_NOTE_WASTE) BV.LAYOUT_TUNING.noteMixedWaste = Number(process.env.LAYOUT_NOTE_WASTE)
+const geom = { width: W, height: H, noteScale: SCALE, safeBottom: SAFE }
 
 const rows = []
 let cliffs = 0, badSingles = 0, singles = 0, displaced = 0
@@ -13,14 +16,12 @@ for (const nB of [8, 12, 16, 20, 30]) {
   let prevPageOf = null
   const cells = []
   for (let n = 0; n <= 8; n++) {
-    const { pageLoad, perPage, bubblesPerPage, notesPerPage } = BV.pageLoadFor(nB, n, W, H, SCALE, SAFE)
-    const pages = Math.max(1, Math.ceil(pageLoad - 1e-9))
+    const itemsNow = makeItems(nB, n, rng(7))
+    const { pageLoad } = BV.pageLoadFor(itemsNow, W, H, SCALE, SAFE)
     // Displacement: adding a note must not move any item that was already placed.
     // (No saved pages — the fresh-level case, which is where re-packing bites.)
-    const itemsNow = makeItems(nB, n, rng(7))
-    const pageOf = pages > 1
-      ? (BV.assignPages ? BV.assignPages(itemsNow, {}, PID, CTX, perPage, { bubblesPerPage, notesPerPage }) : null)
-      : Object.fromEntries(itemsNow.map(it => [it.id, 0]))
+    const pageOf = BV.assignPages(itemsNow, {}, PID, CTX, geom)
+    const pages = Math.max(1, ...Object.values(pageOf).map(p => p + 1))
     let moved = 0
     if (prevPageOf && pageOf) for (const [id, p] of Object.entries(prevPageOf)) if (pageOf[id] !== undefined && pageOf[id] !== p) moved++
     displaced += moved

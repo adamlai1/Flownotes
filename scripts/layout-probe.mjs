@@ -5,6 +5,7 @@ import { loadLayout, overlaps, fmtBad, run, W, H, SAFE } from './layout-harness.
 const seed = +(process.argv[2] ?? 1), nBubbles = +(process.argv[3] ?? 5)
 const anchorMode = process.argv[4] ?? 'all', wantN = +(process.argv[5] ?? 26)
 const BV = await loadLayout()
+if (process.env.LAYOUT_FILL) BV.LAYOUT_TUNING.areaFill = +process.env.LAYOUT_FILL
 
 let cap = null
 run(BV, { seed, nBubbles, n0: 4, anchorMode, onStep: s => { if (s.noteN === wantN) cap = s } })

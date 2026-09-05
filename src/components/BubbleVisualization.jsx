@@ -66,6 +66,10 @@ function saveSavedPositions(projectId, positions) {
 // reuse the normal per-item saved x/y (an item is only ever on one page at a time),
 // so every page keeps the same free-form layout + physics as the single-page view.
 
+// Bumped when the capacity model changes what a page holds, so saved assignments made
+// under the old model are re-flowed once (see the re-flow effect in the component).
+const PAGE_MODEL_VERSION = 2
+
 function loadSavedPages(projectId) {
   try { return JSON.parse(localStorage.getItem(`mindmap-pages-${projectId}`)) || {} }
   catch { return {} }
@@ -76,115 +80,106 @@ function saveSavedPagesMap(projectId, map) {
   catch {}
 }
 
-// Assign each item to a page: honour saved assignments, then bin-pack the rest into
-// the first page that still has room (so overflow naturally spills to a new page).
+// Assign each item to a page: honour saved assignments, then first-fit the rest.
 //
-// Bubbles are packed FIRST and judge a page's fullness by its BUBBLE count only, so a
-// note dropped onto a full page can never displace a bubble — the page's note count no
-// longer pushes bubbles to the next page. Notes are packed afterwards against the true
-// total, so they absorb all the overflow themselves. (A page can therefore end up a
-// couple of items over perPage when notes are pinned onto a page holding bubbles; the
-// layout tolerates that, and keeping bubbles put is what matters here.)
+// ONE rule for every item, whatever the page holds: a page takes an item iff the page's
+// summed charge stays within its area budget (see the area model, below the note grid),
+// each item charged at its FLOOR radius — the radius it renders at when its page is
+// full, which is the only state in which "does one more fit" is ever asked. That is
+// what keeps this packer and the layout from disagreeing: the layout renders every
+// item at or above the floor the packer charged, and only ever on a page the packer
+// said fits (see pageRadii).
 //
-// Fullness is judged by what FITS, per type, from the same model pageLoadFor uses to
-// decide that a level paginates at all — not by perPage. perPage is the blended count
-// (total / pageLoad), and it shrinks the moment a note exists: a level of 16 bubbles
-// that fits one page alone got a perPage of 12 when its first note arrived, and this
-// packer split the bubbles 12 + 4 to make room for a note that then landed on page 2
-// anyway. Judged by capacity instead: a page takes bubblesPerPage bubbles, and the
-// notes it takes on top is what pageLoadFor's own arithmetic leaves after those
-// bubbles (notesThatFitWith), so the packer and the "does this level paginate" decision
-// can never disagree — a level that just tipped into two pages keeps everything that
-// was on its one page and only the newcomer overflows. Items already placed stay where
-// they are; items arrive in creation order, so whatever spills is the newest.
+// Notes and bubbles are walked TOGETHER in creation order, so an item's page depends
+// only on the items created before it: adding an item can never move one that was
+// already placed, because the newcomer is the newest and therefore the only thing
+// that can spill, whatever its type. (Bubbles used to be packed first, so a bubble
+// created after a page had filled with notes could push a placed note off it.)
 //
-// `caps` is optional so a caller without the capacity breakdown falls back to the
-// count-based rule.
-export function assignPages(items, savedPages, projectId, contextId, perPage, caps = null) {
-  const pageOf = {}
-  const counts = {}        // every item, per page
-  const bubbleCounts = {}  // bubbles only, per page
-  const noteCounts = {}    // notes only, per page
-  const unassignedBubbles = []
-  const unassignedNotes = []
-  for (const it of items) {
+// Items with a saved page keep it unconditionally — the user put them there. With
+// `spillSaved` (the re-flow), a saved page is a PREFERENCE instead: the item starts
+// there and moves forward only if that page is already over budget, so a hand-arranged
+// level is touched only where it no longer fits. Each page's own residents are placed
+// before anything spills onto it, so spill-over never evicts a page's own items.
+export function assignPages(items, savedPages, projectId, contextId, geom, spillSaved = false) {
+  const { width, height, noteScale, safeBottom = 0 } = geom
+  const levelMaxContent = geom.levelMaxContent ?? levelMaxContentOf(items)
+  const budget = pageBudget(width, height, safeBottom)
+  const savedOf = (it) => {
     const p = savedPages[posKey(projectId, contextId, it.id)]
-    if (Number.isInteger(p) && p >= 0) {
-      pageOf[it.id] = p
-      counts[p] = (counts[p] || 0) + 1
-      if (it.type !== 'note') bubbleCounts[p] = (bubbleCounts[p] || 0) + 1
-      else noteCounts[p] = (noteCounts[p] || 0) + 1
-    } else {
-      (it.type === 'note' ? unassignedNotes : unassignedBubbles).push(it)
+    return (Number.isInteger(p) && p >= 0) ? p : null
+  }
+  const pageOf = {}
+  // A page's charge is a function of its whole content — a note costs more once a bubble
+  // shares its page — so each page keeps its item list and is re-summed on demand.
+  const members = {}
+  const loadWith = (p, extra) => pageChargeAtFloor([...(members[p] || []), ...(extra ? [extra] : [])], levelMaxContent, noteScale)
+  const place = (it, p) => { pageOf[it.id] = p; (members[p] ||= []).push(it) }
+  let ordered = creationOrder(items)
+  if (spillSaved) {
+    const pref = new Map(ordered.map((it, i) => [it.id, [savedOf(it) ?? 0, i]]))
+    ordered = ordered.slice().sort((a, b) => pref.get(a.id)[0] - pref.get(b.id)[0] || pref.get(a.id)[1] - pref.get(b.id)[1])
+  } else {
+    for (const it of ordered) {
+      const p = savedOf(it)
+      if (p !== null) place(it, p)
     }
   }
-  const bubbleCap = Math.max(1, caps ? caps.bubblesPerPage : perPage)
-  let bubbleCursor = 0
-  for (const it of unassignedBubbles) {
-    while ((bubbleCounts[bubbleCursor] || 0) >= bubbleCap) bubbleCursor++
-    pageOf[it.id] = bubbleCursor
-    bubbleCounts[bubbleCursor] = (bubbleCounts[bubbleCursor] || 0) + 1
-    counts[bubbleCursor] = (counts[bubbleCursor] || 0) + 1
-  }
-  // A page is full for notes when it holds what the model says fits beside its
-  // bubbles (at least one, so a page can always take a note rather than being skipped
-  // forever), or — without caps — when it holds perPage items.
-  const noteFull = (p) => caps
-    ? (noteCounts[p] || 0) >= Math.max(1, notesThatFitWith(bubbleCounts[p] || 0, caps))
-    : (counts[p] || 0) >= perPage
-  let cursor = 0
-  for (const it of unassignedNotes) {
-    while (noteFull(cursor)) cursor++
-    pageOf[it.id] = cursor
-    noteCounts[cursor] = (noteCounts[cursor] || 0) + 1
-    counts[cursor] = (counts[cursor] || 0) + 1
+  for (const it of ordered) {
+    if (pageOf[it.id] !== undefined) continue
+    let p = spillSaved ? (savedOf(it) ?? 0) : 0
+    // An empty page always takes an item, so one larger than the whole budget still
+    // lands somewhere instead of walking off to infinity.
+    while ((members[p]?.length || 0) > 0 && loadWith(p, it) > budget + 1e-6) p++
+    place(it, p)
   }
   return pageOf
 }
 
-// Re-flow one level's SAVED page assignments against a new per-page capacity.
-//
-// Only saved assignments need this: everything else is packed from scratch by
-// assignPages on the next render, so it already tracks the current capacity. A saved
-// assignment is an absolute page number written when the user dragged an item across a
-// page edge, and it survives a capacity change unchanged — which is exactly what leaves
-// pages overfull after the note size grows, and half-empty after it shrinks.
-//
-// Two rules, applied in order, both keyed off the new capacity:
-//   • Pull forward — the level can only span ceil(total / perPage) pages now, so an
-//     assignment past the last of them is clamped onto it. This is what fills the room
-//     a smaller note size just freed up.
-//   • Spill forward — walking the assignments in page order, an item landing on a page
-//     already holding perPage of them moves to the next page with room, cascading. This
-//     is what empties a page the larger note size just overfilled.
-// Relative order is preserved throughout, so a hand-made arrangement survives the
-// change as far as the new capacity allows.
-export function reflowSavedPages(entries, perPage, totalItems) {
-  const maxPage = Math.max(0, Math.ceil(totalItems / perPage) - 1)
-  const ordered = entries
-    .map(([id, page], i) => ({ id, page: Math.min(Math.max(page, 0), maxPage), i }))
-    .sort((a, b) => a.page - b.page || a.i - b.i)
-  const next = {}
-  const counts = {}
-  for (const { id, page } of ordered) {
-    let p = page
-    while ((counts[p] || 0) >= perPage) p++
-    next[id] = p
-    counts[p] = (counts[p] || 0) + 1
-  }
-  return next
+// Creation order, regardless of where an item sits in its array: notes are prepended
+// (newest first) and bubbles appended, so array order is not creation order. Items
+// without a timestamp (the seed bubbles) sort oldest, in array order.
+export function creationOrder(items) {
+  return items
+    .map((it, i) => ({ it, i, t: Date.parse(it.created_at ?? '') || 0 }))
+    .sort((a, b) => a.t - b.t || a.i - b.i)
+    .map(o => o.it)
 }
 
-// The items a level holds, by type — the same membership rules the render path uses,
-// but for an arbitrary level rather than the visible one (contextKey is a bubble id, or
-// 'root' for the top level, matching posKey).
-function levelItemCounts(project, contextKey) {
+// Re-flow one level's SAVED page assignments against the current budget.
+//
+// Only saved assignments need this: everything else is packed from scratch by
+// assignPages on the next render, so it already tracks the current budget. A saved
+// assignment is an absolute page number written when the user dragged an item across a
+// page edge, and it survives a budget change unchanged — which is what leaves pages
+// overfull after the note size grows, or after the capacity model changes.
+//
+// One rule: an item moves only when the page it is saved on is over budget, and then
+// only forward, to the first page with room. Nothing is pulled back to fill freed room
+// — saved positions are the user's arrangement, and an under-full page is a choice
+// they can make; an over-full one ships overlap, which is not. Relative order is
+// preserved throughout, so what spills is the newest item on the over-full page.
+// `items` are the level's saved-page items with their type and contentCount.
+export function reflowSavedPages(items, savedPages, projectId, contextId, geom) {
+  return assignPages(items, savedPages, projectId, contextId, geom, true)
+}
+
+// The items a level holds — the same membership rules the render path uses, but for an
+// arbitrary level rather than the visible one (contextKey is a bubble id, or 'root' for
+// the top level, matching posKey). Each carries what the packer charges by: its type,
+// and for a bubble its nested content count, exactly as layoutItems computes it.
+function levelItems(project, contextKey) {
   const contextId = contextKey === 'root' ? null : contextKey
-  const bubbleN = project.bubbles.filter(b => b.parent_id === contextId).length
-  const noteN = contextId
-    ? project.notes.filter(n => n.bubble_ids.includes(contextId)).length
-    : project.notes.filter(n => realBubbleIds(n).length === 0 || n.bubble_ids.includes(ROOT_BUBBLE_ID)).length
-  return { bubbleN, noteN }
+  const bubbles = project.bubbles.filter(b => b.parent_id === contextId).map(b => ({
+    ...b, type: 'bubble',
+    contentCount: getNoteCountForBubble(project.notes, b.id, project.bubbles)
+      + getBubbleDescendantIds(project.bubbles, b.id).length - 1,
+  }))
+  const notes = (contextId
+    ? project.notes.filter(n => n.bubble_ids.includes(contextId))
+    : project.notes.filter(n => realBubbleIds(n).length === 0 || n.bubble_ids.includes(ROOT_BUBBLE_ID))
+  ).map(n => ({ ...n, type: 'note' }))
+  return [...bubbles, ...notes]
 }
 
 // Split a saved-pages/positions key back into its level and item parts, or null if the
@@ -232,9 +227,19 @@ const layoutSeed = (contextId, pageIndex = 0) =>
 // Exported for the layout harness (scripts/layout-harness.mjs), which drives this exact
 // pipeline with generated pages to measure residual overlap — nothing in the app
 // imports it.
-export function layoutPage(pageItems, savedPositions, projectId, contextId, width, height, noteScale = 1, seed = 0, safeBottom = 0) {
+export function layoutPage(pageItems, savedPositions, projectId, contextId, width, height, noteScale = 1, seed = 0, safeBottom = 0, levelMaxContent = null) {
   if (width <= 0) return []
-  const laid = computeLayout(pageItems, width, height, SUB_BAR_H, BOTTOM_PAD, noteScale, seed, safeBottom)
+  const levelMax = levelMaxContent ?? levelMaxContentOf(pageItems)
+  // Saved positions cap how far the bubbles may grow (see growthCapFor).
+  const anchoredPos = new Map()
+  for (const it of pageItems) {
+    const saved = savedPositions[posKey(projectId, contextId, it.id)]
+    if (saved) anchoredPos.set(it.id, { cx: saved.xFrac * width, cy: saved.yFrac * height })
+  }
+  const sCap = anchoredPos.size > 0
+    ? growthCapFor(pageItems, anchoredPos, levelMax, width, height, noteScale, safeBottom)
+    : Infinity
+  const laid = computeLayout(pageItems, width, height, SUB_BAR_H, BOTTOM_PAD, noteScale, seed, safeBottom, levelMax, sCap)
   const laidMapped = laid.map(item => {
     const saved = savedPositions[posKey(projectId, contextId, item.id)]
     return saved ? { ...item, cx: saved.xFrac * width, cy: saved.yFrac * height } : item
@@ -244,14 +249,37 @@ export function layoutPage(pageItems, savedPositions, projectId, contextId, widt
   )
   // Mixed page with saved positions: flow the free notes around the bubbles' actual
   // (loaded) locations instead of just settling them off the phantom fresh layout.
+  let out = null
+  let pin, freeIds = null
   if (anchored.size > 0) {
-    const arranged = arrangeNotesAroundBubbles(laidMapped, anchored, width, height, safeBottom)
-    if (arranged) return arranged
+    out = arrangeNotesAroundBubbles(laidMapped, anchored, width, height, safeBottom)
+    if (out) {
+      pin = true
+      freeIds = new Set(laidMapped.filter(p => p.type === 'note' && !anchored.has(p.id)).map(p => p.id))
+    }
   }
-  const settled = (anchored.size > 0 && anchored.size < laidMapped.length)
-    ? settleItems(laidMapped, anchored, width, height, safeBottom)
-    : laidMapped
-  return separateOverlaps(settled, width, height, shouldPinBubbles(settled, anchored.size), null, safeBottom)
+  if (!out) {
+    const settled = (anchored.size > 0 && anchored.size < laidMapped.length)
+      ? settleItems(laidMapped, anchored, width, height, safeBottom)
+      : laidMapped
+    pin = shouldPinBubbles(settled, anchored.size)
+    out = separateOverlaps(settled, width, height, pin, null, safeBottom)
+  }
+  // Convergence retry — not capacity. The separation pass keeps per-pair stall state
+  // (its jam escape) that a fresh run resets, and the harness measured that most of
+  // the pages it hands back still overlapped are cleared by exactly one more run of
+  // the same pass with the same inputs. A page that stays overlapped after the
+  // retries is a page the constraints cannot satisfy, which the harness reports as
+  // "stuck" and which is a capacity (fill) question, not an iteration one.
+  // The last retry runs UNPINNED: what survives two pinned passes is a note wedged
+  // between a pinned bubble and a bound, a 1–2px residual the pinned transfer cannot
+  // close. Letting the bubble yield by that much is invisible, and layout never writes
+  // positions back, so an anchored bubble's saved position is untouched.
+  for (let k = 0; k < 3; k++) {
+    if (layoutPenalty(out, width, height, SUB_BAR_H, BOTTOM_PAD, safeBottom) <= LAYOUT_PENALTY_EPS) break
+    out = separateOverlaps(out, width, height, k < 2 ? pin : false, k < 2 ? freeIds : null, safeBottom)
+  }
+  return out
 }
 
 // Everything layoutPage's OUTPUT depends on, as one string — the cache key for a page.
@@ -268,8 +296,10 @@ export function layoutPage(pageItems, savedPositions, projectId, contextId, widt
 // Adding, removing or moving an item between pages changes some page's id list; a
 // resize or a note-size change alters the geometry for every page; a drop rewrites the
 // saved positions. Each of those falls out of the key on its own.
-function pageLayoutKey(group, savedPositions, projectId, contextId, width, height, noteScale, seed, safeBottom = 0) {
-  let key = `${projectId}|${contextId ?? 'root'}|${width}x${height}+${safeBottom}|${noteScale}|${seed}`
+function pageLayoutKey(group, savedPositions, projectId, contextId, width, height, noteScale, seed, safeBottom = 0, levelMaxContent = 0) {
+  // The level's busiest content count sets every bubble's floor (contentT), so it is a
+  // size input of the page even though it may belong to a bubble on another page.
+  let key = `${projectId}|${contextId ?? 'root'}|${width}x${height}+${safeBottom}|${noteScale}|${seed}|${LAYOUT_TUNING.areaFill}|m${levelMaxContent}`
   for (const it of group) {
     key += `|${it.id}:${it.type === 'note' ? 'n' : it.contentCount || 0}`
     const saved = savedPositions[posKey(projectId, contextId, it.id)]
@@ -574,7 +604,9 @@ function projectOutOfEllipse(p, e, clearX, clearY) {
 // pins bubbles), so mixed pages read as "bubbles in the middle, notes around them".
 function recenterBubbles(items, width, height, headerH, bottomPad, noteScale = 1) {
   const pos = items.map(i => ({ ...i }))
-  const bubs = pos.filter(p => p.type !== 'note')
+  // Largest first: the triangle core and the innermost spiral slots go to the biggest
+  // bubbles, so a mixed page reads big-in-the-middle like every other page.
+  const bubs = pos.filter(p => p.type !== 'note').sort((a, b) => b.r - a.r)
   if (bubs.length === 0) return pos
   const cx0 = width / 2
   const cy0 = headerH + (height - headerH - bottomPad) / 2
@@ -874,158 +906,225 @@ export function noteGridCapacity(width, height, headerH, bottomPad, noteScale = 
   return Math.max(1, lo)
 }
 
-// ── Page capacity ─────────────────────────────────────────────────────────────
+// ── Page capacity: the area model ─────────────────────────────────────────────
 //
-// Pages are deliberately NOT filled to their theoretical maximum. Both layout paths
-// degenerate at 100% fill:
+// ONE budget, in area: the page's usable area times a fill fraction. ONE charge per
+// item: its rendered box plus a gap allowance. A page fits its items iff the summed
+// charge is within the budget. No count, no per-type cell, and no structural difference
+// between a notes-only, a bubbles-only and a mixed page — the same sum decides all
+// three. (The count model this replaces kept two capacities and a silhouette
+// correction to blend them, and every disagreement between that blend and what the
+// layout could actually place became a layout bug.)
 //
-//   • Notes: jitterFor() returns the leftover pitch above the minimum gap, so a page at
-//     noteGridCapacity() has almost none to spend. Measured across common viewports it
-//     collapses to 0.2–2px on at least one axis (iPad small 0.4/1.7, Pixel 7 medium
-//     7.8/0.2, desktop large 0.3/4.4) — sub-pixel wobble on one axis is what makes the
-//     page read as exact rows or columns. At PAGE_FILL the same viewports get several
-//     px on BOTH axes (8.9/6.3, 7.8/10.0, 11.9/10.0).
-//   • Bubbles: the golden-angle scatter and the separation passes have nothing left to
-//     push into, so items pin against the bounds clamp and settle into tight rows.
+// Notes are a fixed box per note size. Bubbles scale with radius, and a bubble's radius
+// depends on how full its page is — which depends on the charges, which depend on the
+// radii. That circle is broken by charging every bubble at its FLOOR (floorRFor): the
+// radius it renders at when its page is full, which is the only state in which the
+// packer asks whether one more item fits. The floor is closed-form — the note-size
+// floor scaled by a bounded content ratio — and depends on nothing about the page. The
+// layout then GROWS the bubbles from their floors until the page's charge meets the
+// budget or the bubbles hit their ceiling (pageRadii), so on any page the packer built,
+// every bubble renders at or above what it was charged, and the page's real charge
+// never exceeds the budget. Packer and layout agree by construction, on every page.
 //
-// Holding a page to a fraction of its maximum keeps the pitch above its minimum, which
-// is what leaves jitter and the organic scatter room to work. The cost is more pages
-// with fewer items each — the intended trade. Items are never shrunk to fit more in;
-// the floors (noteRFor / minBubbleRFor) are untouched by any of this.
-export const PAGE_FILL = 0.72
-// Mixed-page silhouette model (see pageLoadFor). Calibrated against the layout harness
-// on 2026-09-04: dense add/remove sweeps at 3 and 5 bubbles, plus the sparse set
-// (8–30 bubbles with 0–8 notes) that guards the bubbles-only → mixed transition.
-export const MIXED_SILHOUETTE_EXTRA = 1.5
-export const MIXED_SILHOUETTE_MAX_LOSS = 0.85
-
-// The notes' room on a page holding bubbleN bubbles (see pageLoadFor): the page's note
-// capacity, less the cluster's silhouette share. With no notes there is nothing to
-// squeeze, so the room is the full capacity (bubbles-only pages are the plain blend).
-function noteRoomBeside(bubbleN, noteN, { bubblesPerPage, notesPerPage }) {
-  const bubbleShare = bubbleN / Math.max(1, bubblesPerPage)
-  const loss = (bubbleN > 0 && noteN > 0)
-    ? Math.min(MIXED_SILHOUETTE_MAX_LOSS, bubbleShare * MIXED_SILHOUETTE_EXTRA)
-    : 0
-  return Math.max(1, notesPerPage * (1 - loss))
+// Pages are deliberately not filled to 100%: the organic scatter, the jitter and the
+// separation passes all need slack to work in, and at full fill the layout reads as a
+// grid. AREA_FILL is the one knob for that, for every page type. Calibrated against the
+// layout harness (scripts/layout-harness.mjs) — see LAYOUT_TUNING for the values and
+// the harness output in the commit that set them.
+export const LAYOUT_TUNING = {
+  // Fraction of the usable page area the charges may sum to. 0.50 is the highest fill
+  // at which the harness (add + remove sweeps, varied anchor capture, sparse set) is
+  // clean; 0.55 leaves the notes-only all-anchored scenario overlapping by 1–2px on one
+  // seed, and 0.62 fails broadly. Each 0.05 of fill is roughly four notes per page.
+  areaFill: 0.50,
+  // Multiplier on a bubble's charge. 1.0: a bubble costs its box plus gap, no more. A
+  // 1.25 "convexity" surcharge was tried for the pockets a cluster wastes on a mixed
+  // page, and it charged every bubbles-only page for pockets that page doesn't have
+  // (13 empty bubbles paginated where 22 used to fit). The mixed-page waste is real
+  // but it is the NOTES that pack badly around a cluster, so it is charged to them
+  // (noteMixedWaste), not to the bubbles.
+  bubbleConvexity: 1.0,
+  // Multiplier on a note's charge when bubbles share its page. Notes on a bubbles-free
+  // page tile an even grid; around a cluster they are spread by Lloyd, kept off the
+  // cluster's ellipse, and fragmented by it, and the harness shows that arrangement
+  // holds far fewer notes than the same area's worth of grid. Two honest terms rather
+  // than one blanket surcharge. Calibrated at fill 0.50 against the dense mixed sweeps:
+  // 1.0 leaves five anchored mixed steps overlapping (≤3px, one seed); 1.15 is the
+  // lowest value at which every sweep and anchor variant is clean; each further 0.15
+  // costs about three notes per page beside three bubbles.
+  noteMixedWaste: 1.15,
+  // The busiest bubble's floor radius, as a multiple of the emptiest one's. This is
+  // what makes a busy bubble cost more than an empty one; at 1 the model counts again.
+  floorContentRatio: 1.5,
+  // The content count that buys the full ratio is at least this, whatever the level's
+  // busiest bubble holds. Without a floor, on a level whose busiest bubble holds one
+  // note that one note bought the whole 1.5 — twice an empty bubble's charge.
+  floorContentMin: 3,
+  // EXPERIMENT: whether bubbles grow past their floors on a page that also holds notes.
+  mixedGrowth: true,
 }
 
-// How many notes a page holding bubbleN bubbles can take before pageLoadFor's own
-// arithmetic would call it over: the largest n with n / noteRoom + bubbleShare ≤ 1.
-// The page packer (assignPages) fills pages with this, so it can never place more on
-// a page than the pagination decision allows, nor split a page the decision would
-// have kept whole.
-export function notesThatFitWith(bubbleN, caps) {
-  const bubbleShare = bubbleN / Math.max(1, caps.bubblesPerPage)
-  if (bubbleShare >= 1) return 0
-  // noteRoom depends on noteN only through "any notes at all"; evaluate it as for a
-  // mixed page, which is the case where the answer is being asked.
-  const room = noteRoomBeside(bubbleN, 1, caps)
-  return Math.max(0, Math.floor((1 - bubbleShare) * room + 1e-9))
+// The page's usable area: the band under the sub-bar down to the painted bottom, inside
+// the edge insets, less the + button's exclusion circle. Multiplied by the fill.
+export function pageBudget(width, height, safeBottom = 0) {
+  const usableW = Math.max(width - 2 * EDGE_INSET, 1)
+  const usableH = Math.max((height + safeBottom) - SUB_BAR_H - 2 * EDGE_INSET, 1)
+  const btnR = PLUS_BTN_EXCL_R + BTN_ROW_PAD
+  return Math.max(usableW * usableH - Math.PI * btnR * btnR, 1) * LAYOUT_TUNING.areaFill
 }
 
-// How many pages a given mix of bubbles and notes needs, and the blended per-page count.
-// Capacity comes from each type's REAL footprint, not a one-size bubble grid: notes render
-// as small rectangles (W = r*1.55 ≈ 62px, H = r*1.15 ≈ 46px) packed ~5px apart, so counting
-// them as 98px bubble cells paginated note pages long before they were visually full.
-// pageLoad > 1 means the mix doesn't fit one screen; perPage is the count assignPages
-// splits on (it is count-based, so the two capacities blend into one number).
-export function pageLoadFor(bubbleN, noteN, width, height, noteScale, safeBottom = 0) {
-  if (width <= 0) return { pageLoad: 0, perPage: 1 }
-  // Capacity is solved against the same grown span placement uses, or pages under-fill
-  // by exactly the strip this change recovered.
-  const gridPad = BOTTOM_PAD - safeBottom
-  const pageAvailH = height - SUB_BAR_H - gridPad
-  // The cell is the bubble FLOOR, and it has to be.
-  //
-  // Sizing it to the biggest bubble a page can hold sounds more honest and is badly
-  // wrong, because a bubble has no fixed size: computeLayout scales the whole cluster to
-  // the page, so the same set of bubbles renders at r 118–298px when three share a page
-  // and r 40–61px when twenty-four do. The biggest bubble is only big when there are few
-  // of them — precisely the case where capacity doesn't bind. A full page converges on
-  // the floor, which is what this measures. (Cell = maxR was tried: iPad capacity fell
-  // from 101 bubbles to 7, paginating pages that render fine as one.)
-  //
-  // The floor rises with the note-size preference (see minBubbleRFor), so the cell rises
-  // with it too — otherwise larger note sizes would be told more bubbles fit than the
-  // packer can place, and pages would overfill instead of paginating.
-  const bubR = minBubbleRFor(noteScale)
-  const bubD = bubR * 2
-  // The packer keeps item centers a half-extent + EDGE_INSET inside each edge (see
-  // clampToBounds), so the usable band is the screen minus that inset on both sides.
-  // Bubbles are wide rectangles, so the horizontal and vertical insets differ.
-  const usablePageW = Math.max(width - 2 * (bubR * BUB_HW + EDGE_INSET), 1)
-  const usablePageH = Math.max(pageAvailH - 2 * (bubR * BUB_HH + EDGE_INSET), 1)
-  // Notes: the even-spread grid's true capacity (densest legal pitch incl. float-bob
-  // clearance, minus the cells lost to the + button), held back to PAGE_FILL so the
-  // solver always lands on a looser pitch than the densest one and jitterFor has slack
-  // to spend. Filling to rawNotesPerPage is precisely the zero-jitter case.
-  const rawNotesPerPage = noteGridCapacity(width, height, SUB_BAR_H, gridPad, noteScale)
-  const notesPerPage = Math.max(1, Math.floor(rawNotesPerPage * PAGE_FILL))
-  // Reported for the capacity log: the one usable width every note count is derived from
-  // (centre-to-centre, i.e. the page minus the header, the edge margin and half a card at
-  // each end), and how many cards fit across it as pure arithmetic. If the placement ever
-  // puts fewer than noteCols in a full row again, these two numbers show it immediately.
-  const noteFrame = noteGridFrame(width, height, SUB_BAR_H, gridPad, noteRFor(noteScale), 0, 0)
-  const usableW = noteFrame.spanW
-  const noteCols = cellsAcross(usableW, noteFrame.BOX_W, NOTE_GAP_X)
-  const noteRows = cellsAcross(noteFrame.spanH, noteFrame.BOX_H, NOTE_GAP_Y)
-  // Bubbles are wide rounded rectangles, and the packer separates them by that box — so at
-  // the crowded gap they settle into a roughly RECTANGULAR arrangement, not the hexagonal
-  // circle packing this used to model. Estimate from the cell area of the region the packer
-  // can place centers in, bounded by the row/column count so narrow pages stay sane.
-  // Pagination only triggers on a crowded page, where the packer uses its tightest gap.
-  const gap = bubPackGap(Infinity)
-  const cellW = bubD * BUB_HW + gap
-  const cellH = bubD * BUB_HH + gap + BUB_FLOAT_PAD
-  const rawBubblesPerPage = Math.max(1, Math.floor(Math.min(
-    (usablePageW * usablePageH) / (cellW * cellH),
-    (Math.floor(usablePageW / cellW) + 1) * (Math.floor(usablePageH / cellH) + 1),
-  )))
-  // PAGE_FILL also subsumes the 20% derate this used to carry for the size variation of
-  // content-scaled bubbles (the cell is sized for the minimum bubble, and only the
-  // smallest are actually that size) — 0.72 is the stricter of the two.
-  const bubblesPerPage = Math.max(1, Math.floor(rawBubblesPerPage * PAGE_FILL))
-  // Mixed pages: the bubble cluster takes more room from the NOTES than its cells.
-  // In pinned mode every free note is kept OUTSIDE the cluster's ellipse
-  // (separateOverlaps' projectOutOfEllipse), and that silhouette encloses the
-  // pockets between bubbles and the slivers beside them that no note box fits into
-  // — area the plain blend counted as note room. The harness
-  // (scripts/layout-harness.mjs) measured it: with 3–5 bubbles, pages the blend
-  // admitted left notes overlapping from 6–12 notes below their nominal note
-  // capacity, unrecoverable by iteration because no arrangement exists.
-  //
-  // The SHAPE of the correction matters as much as its size. A flat per-bubble
-  // charge (tried first) switched on at the first note and turned a one-page
-  // 16-bubble level into three pages when a single note was added — a cliff. The
-  // silhouette doesn't add load; it shrinks the room the notes have. So it is
-  // modelled as exactly that: the notes' capacity on this page is reduced by the
-  // cluster's silhouette share, and the note term is measured against THAT. With no
-  // notes it costs nothing (bubbles-only pages are the plain blend); with a few notes
-  // it costs almost nothing; it bites only as the notes approach the room that is
-  // actually left. Pure pagination: no size, gap or physics change, and a level that
-  // already fit keeps its layout.
-  //
-  // MIXED_SILHOUETTE_EXTRA: how much larger the cluster's silhouette is than the
-  // bubbles' packed cells, as a fraction of the cell share (1.5 → the silhouette is
-  // 2.5× the cells; the harness measured ~2.4–2.7× at 3 and 5 bubbles).
-  // MIXED_SILHOUETTE_MAX_LOSS: the notes always keep at least this much of their
-  // room, so a page that is mostly bubbles still takes a handful of notes before
-  // paginating instead of splitting on the first one.
-  const bubbleShare = bubbleN / bubblesPerPage
-  const noteRoom = noteRoomBeside(bubbleN, noteN, { bubblesPerPage, notesPerPage })
-  const pageLoad = noteN / noteRoom + bubbleShare
-  return {
-    pageLoad,
-    perPage: Math.max(1, Math.floor((bubbleN + noteN) / Math.max(pageLoad, 0.001))),
-    notesPerPage,
-    bubblesPerPage,
-    rawNotesPerPage,
-    rawBubblesPerPage,
-    usableW,
-    noteCols,
-    noteRows,
+// What an item costs the page at radius r: its rendered box plus the gap allowance the
+// separation passes hold around it. Notes carry the note grid's per-axis gaps; bubbles
+// the crowded pack gap plus the float-bob clearance, times the convexity waste.
+// `mixed`: whether bubbles share the item's page — a note then carries noteMixedWaste.
+export function chargeOf(type, r, mixed = false) {
+  if (type === 'note') {
+    return (2 * r * NOTE_HW + NOTE_GAP_X) * (2 * r * NOTE_HH + NOTE_GAP_Y) * (mixed ? LAYOUT_TUNING.noteMixedWaste : 1)
   }
+  const gap = bubPackGap(Infinity)
+  return (2 * r * BUB_HW + gap) * (2 * r * BUB_HH + gap + BUB_FLOAT_PAD) * LAYOUT_TUNING.bubbleConvexity
+}
+
+// A bubble's content, as a 0..1 log fraction of the busiest bubble on its LEVEL (not
+// its page: a bubble must not change size when it is swiped to another page, and a
+// page's charges must not depend on which other bubbles share it).
+export function contentT(item, levelMaxContent) {
+  if (item.type === 'note') return 0
+  const denom = Math.log(Math.max(levelMaxContent, LAYOUT_TUNING.floorContentMin) + 1)
+  return denom > 0 ? Math.log((item.contentCount || 0) + 1) / denom : 0
+}
+export const levelMaxContentOf = (items) =>
+  items.reduce((m, i) => i.type === 'note' ? m : Math.max(m, i.contentCount || 0), 0)
+
+// The smallest radius an item renders at — a note's fixed size, or a bubble's
+// note-size floor scaled by its content ratio (up to floorContentRatio for the busiest
+// bubble on the level). The packer charges this; the layout never goes below it.
+export function floorRFor(item, levelMaxContent, noteScale) {
+  if (item.type === 'note') return noteRFor(noteScale)
+  return minBubbleRFor(noteScale) * (1 + (LAYOUT_TUNING.floorContentRatio - 1) * contentT(item, levelMaxContent))
+}
+
+// The page's charge with every item at its floor — what the packer measures against
+// the budget.
+export const isMixed = (items) => items.some(it => it.type === 'note') && items.some(it => it.type !== 'note')
+export function pageChargeAtFloor(items, levelMaxContent, noteScale) {
+  const mixed = isMixed(items)
+  let sum = 0
+  for (const it of items) sum += chargeOf(it.type, floorRFor(it, levelMaxContent, noteScale), mixed)
+  return sum
+}
+
+// The radii a page's items render at. Notes at their fixed size; every bubble at
+// floor × s, one shared scale s ≥ 1 found by bisection so the page's charge meets the
+// budget exactly — or as close as the ceiling lets it on a sparse page. Monotone in s,
+// so the bisection cannot miss. A page over budget at s = 1 (only possible when a saved
+// assignment or a removal left it so) renders at the floors and lets the separation
+// pass absorb the excess.
+export function pageRadii(items, levelMaxContent, width, height, noteScale, safeBottom = 0, sCap = Infinity) {
+  const budget = pageBudget(width, height, safeBottom)
+  const availH = height - SUB_BAR_H + safeBottom
+  // The ceiling is the page itself: a sparse page's bubbles grow until the budget binds
+  // or a bubble would no longer fit the page on either axis (the old fill-scale let
+  // them reach the same bound). A tighter ceiling — bubbleRRange's seed maximum was
+  // tried — flattens every sparse page's bubbles to one size, content or not.
+  const ceil = maxFittingBubbleR(width, availH)
+  const floors = items.map(it => floorRFor(it, levelMaxContent, noteScale))
+  const mixed = isMixed(items)
+  const rAt = (i, s) => items[i].type === 'note' ? floors[i] : Math.min(floors[i] * s, ceil)
+  const chargeAt = (s) => items.reduce((sum, it, i) => sum + chargeOf(it.type, rAt(i, s), mixed), 0)
+  let s = 1
+  if (chargeAt(1) < budget && (LAYOUT_TUNING.mixedGrowth || !mixed) && sCap > 1) {
+    let lo = 1, hi = 1
+    for (const f of floors) hi = Math.max(hi, ceil / Math.max(f, 1e-6))
+    hi = Math.min(hi, sCap)
+    if (chargeAt(hi) <= budget) s = hi
+    else {
+      for (let k = 0; k < 40; k++) {
+        const mid = (lo + hi) / 2
+        if (chargeAt(mid) <= budget) lo = mid
+        else hi = mid
+      }
+      s = lo
+    }
+  }
+  return items.map((it, i) => rAt(i, s))
+}
+
+// Growth cap for a page holding SAVED positions. The area rule lets bubbles grow until
+// the page's charge meets the budget, which assumes the free area is wherever the
+// growth needs it. On a page the user has arranged, it isn't: a note deleted from the
+// edge frees area at the edge, while the bubbles grow in place — straight into the
+// anchored items around them, which the separation pass then has to shove (and, the
+// harness showed, often can't: the remove sweep's residual overlap was almost entirely
+// this, and vanished with growth off). Saved positions are the user's work, so growth
+// yields to them: the shared scale is capped at the largest value at which no bubble's
+// box — an anchored bubble at its saved centre, a free one where the centred formation
+// puts it — reaches any anchored item's box. Bisection on a monotone test; ~10 cheap
+// formation passes per anchored page, once per layout.
+export function growthCapFor(items, anchoredPos, levelMaxContent, width, height, noteScale, safeBottom = 0) {
+  const anchoredBubbles = items.filter(it => it.type !== 'note' && anchoredPos.has(it.id))
+  const anchoredNotes = items.filter(it => it.type === 'note' && anchoredPos.has(it.id))
+  const freeBubbles = items.filter(it => it.type !== 'note' && !anchoredPos.has(it.id))
+  if (anchoredBubbles.length + anchoredNotes.length === 0) return Infinity
+  if (anchoredBubbles.length === 0 && freeBubbles.length === 0) return Infinity
+  const gap = bubPackGap(Infinity)
+  const clear = (a, b) => {
+    const gx = Math.abs(a.cx - b.cx) - halfWidthOf(a) - halfWidthOf(b) - pairGapX(a, b, gap)
+    const gy = Math.abs(a.cy - b.cy) - halfHeightOf(a) - halfHeightOf(b) - pairGapY(a, b, gap)
+    return gx >= 0 || gy >= 0
+  }
+  const fits = (sCap) => {
+    const radii = pageRadii(items, levelMaxContent, width, height, noteScale, safeBottom, sCap)
+    const withR = items.map((it, i) => ({ ...it, r: radii[i] }))
+    const placed = withR.map(it => anchoredPos.has(it.id)
+      ? { ...it, cx: anchoredPos.get(it.id).cx, cy: anchoredPos.get(it.id).cy }
+      : it)
+    // Free bubbles: where the centred formation puts them for these radii. The notes
+    // among them are free too and re-flow, so they are not tested.
+    let formation = placed
+    if (freeBubbles.length > 0) {
+      const seeded = placed.map(it => anchoredPos.has(it.id) ? it : { ...it, cx: width / 2, cy: height / 2 })
+      formation = recenterBubbles(seeded, width, height, SUB_BAR_H, BOTTOM_PAD - safeBottom, noteScale)
+    }
+    const bubbles = formation.filter(it => it.type !== 'note')
+    const anchoredItems = formation.filter(it => anchoredPos.has(it.id))
+    for (const b of bubbles) {
+      for (const a of anchoredItems) {
+        if (a.id === b.id) continue
+        if (!clear(a, b)) return false
+      }
+      if (b.cx - halfWidthOf(b) < EDGE_INSET || b.cx + halfWidthOf(b) > width - EDGE_INSET) return false
+      if (b.cy - halfHeightOf(b) < SUB_BAR_H + EDGE_INSET || b.cy + halfHeightOf(b) > bottomEdgeLimit(b.cx, halfWidthOf(b), width, height, safeBottom)) return false
+    }
+    return true
+  }
+  // Largest cap in [1, unbounded] that fits. If even the floors don't fit the anchored
+  // arrangement, the cap is 1 and the separation pass takes what is left.
+  const unbounded = pageRadii(items, levelMaxContent, width, height, noteScale, safeBottom)
+  const floors = items.map(it => floorRFor(it, levelMaxContent, noteScale))
+  let hi = 1
+  items.forEach((it, i) => { if (it.type !== 'note') hi = Math.max(hi, unbounded[i] / Math.max(floors[i], 1e-6)) })
+  if (hi <= 1 + 1e-6) return 1
+  if (fits(hi)) return hi
+  let lo = 1
+  for (let k = 0; k < 12; k++) {
+    const mid = (lo + hi) / 2
+    if (fits(mid)) lo = mid
+    else hi = mid
+  }
+  return lo
+}
+
+// How full a level is against ONE page's budget: > 1 means it paginates. The summed
+// floor charge over the budget, so it is exactly the packer's test on the whole level.
+// Exported for the layout harness alongside the pieces above.
+export function pageLoadFor(items, width, height, noteScale, safeBottom = 0, levelMaxContent = null) {
+  if (width <= 0) return { pageLoad: 0, budget: 0, charge: 0 }
+  const lm = levelMaxContent ?? levelMaxContentOf(items)
+  const budget = pageBudget(width, height, safeBottom)
+  const charge = pageChargeAtFloor(items, lm, noteScale)
+  return { pageLoad: charge / budget, budget, charge, fill: LAYOUT_TUNING.areaFill }
 }
 
 // How wrong a finished layout is, in pixels: how deeply every pair penetrates, plus how
@@ -1179,9 +1278,10 @@ export function computeSortedPages(items, width, height, noteScale, safeBottom, 
   return pages
 }
 
-export function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteScale = 1, seed = 0, safeBottom = 0) {
+export function computeLayout(items, width, height, headerH = 56, bottomPad = 0, noteScale = 1, seed = 0, safeBottom = 0, levelMaxContent = null, sCap = Infinity) {
   const n = items.length
   if (n === 0) return []
+  const levelMax = levelMaxContent ?? levelMaxContentOf(items)
 
   // availH excludes the header and the bottom clearance needed for the + button
   // The strip beside the home indicator is usable now, so every span below is solved
@@ -1205,9 +1305,9 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
   const MAX_R = maxFittingBubbleR(width, availH)
 
   if (n === 1) {
-    const r = items[0].type === 'note'
-      ? NOTE_R
-      : Math.min(Math.max(Math.min(width, availH) * 0.27, MIN_R), MAX_R)
+    // The same rule as every other page: one item grows from its floor to the budget
+    // or its ceiling (pageRadii), so a lone bubble is sized by the page, not a magic 0.27.
+    const [r] = pageRadii(items, levelMax, width, height, noteScale, safeBottom, sCap)
     return [{ ...items[0], cx: cx0, cy: cy0, r }]
   }
 
@@ -1354,21 +1454,20 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
     })
   }
 
-  const bubbleItems = items.filter(i => i.type !== 'note')
-  // Log-scale bubble sizes by total nested content (notes + descendant bubbles),
-  // relative to the busiest bubble in this view.
-  const maxContent = Math.max(...bubbleItems.map(i => i.contentCount || 0), 1)
-  const { minR, maxR } = bubbleRRange(width, availH, noteScale)
-  // Note cards are the user-chosen size (independent of content) — only category
-  // bubbles scale by content.
-  const noteR = NOTE_R
-
-  const radii = items.map(item => {
-    if (item.type === 'note') return noteR
-    const content = item.contentCount || 0
-    const t = Math.log(content + 1) / Math.log(maxContent + 1)
-    return minR + (maxR - minR) * t
-  })
+  // Sizes come from the area rule, not from the fill-scaling below: every bubble grows
+  // from its content-scaled floor by one shared factor until the page's charge meets
+  // the budget (see pageRadii). The packer charged exactly these floors, so nothing
+  // renders smaller than it was charged. Note cards are the user-chosen size.
+  const radii = pageRadii(items, levelMax, width, height, noteScale, safeBottom, sCap)
+  // Centre-weighting: the golden-angle spiral hands its lowest indices to the middle of
+  // the page, so items are RANKED by charged area — largest first — and the spiral is
+  // walked in rank order. A placement bias in the seed only: the separation passes
+  // below still only ever push pairs apart, so there is no inward force for them to
+  // fight and no new way for them to fail to converge.
+  const rank = new Array(n)
+  items.map((it, i) => ({ i, c: chargeOf(it.type, radii[i]) }))
+    .sort((a, b) => b.c - a.c || a.i - b.i)
+    .forEach((o, k) => { rank[o.i] = k })
 
   // Tighter box-packing when crowded: shrink the inter-bubble gap as the
   // count grows so many bubbles pack closer together.
@@ -1412,11 +1511,12 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
   const RADIAL_WOBBLE = 0.45  // ± this fraction of the item's own size scalar
   const scatterSeed = (amount) => items.map((item, i) => {
     const wobble = hasNotes ? amount : 0
-    const angle = i * GA
+    const k = rank[i]
+    const angle = k * GA
       + hash2(seed, 17) * Math.PI * wobble
-      + hash2(i, seed) * ANGLE_WOBBLE * wobble
-    const dist = base * 0.46 * Math.sqrt(i / (n - 1 || 1))
-      + radii[i] * RADIAL_WOBBLE * wobble * hash2(i + 4093, seed + 7)
+      + hash2(k, seed) * ANGLE_WOBBLE * wobble
+    const dist = base * 0.46 * Math.sqrt(k / (n - 1 || 1))
+      + radii[i] * RADIAL_WOBBLE * wobble * hash2(k + 4093, seed + 7)
     return {
       ...item,
       x: dist * Math.cos(angle) * ellX,
@@ -1463,22 +1563,19 @@ export function computeLayout(items, width, height, headerH = 56, bottomPad = 0,
   const scaleY = Math.min((availH - pad * 2) / bh, FILL_CAP)
   const lcx = (minX + maxX) / 2, lcy = (minY + maxY) / 2
 
+  // The fill-scale spreads POSITIONS to the page. Sizes are the rule's and stay put:
+  // scaling the radius by the spread factor is what used to tie a bubble's size to the
+  // scatter's bounding box, and so to positions, and so (circularly) to capacity.
   const result = pos.map(p => ({
     ...p,
     cx: cx0 + (p.x - lcx) * scaleX,
     cy: cy0 + (p.y - lcy) * scaleY,
-    // Notes are always fixed at the minimum size (never scaled). Category bubbles keep the
-    // minimum ON SCREEN — scaled by the smaller axis factor so their box keeps its aspect
-    // ratio (never stretched), never shrinking below MIN_R nor growing past what fits.
-    r: p.type === 'note'
-      ? NOTE_R
-      : Math.min(Math.max(p.r * Math.min(scaleX, scaleY), MIN_R), MAX_R),
+    r: p.type === 'note' ? NOTE_R : Math.min(Math.max(p.r, MIN_R), MAX_R),
   }))
 
-  // Flooring the radius can re-introduce overlaps; relax in screen space with a
-  // tight gap, clamping every item fully on-screen each pass so nothing ends up
-  // off the viewport. (When bubbles can't all fit at the minimum size they will
-  // pack tightly / overlap rather than shrink below it.)
+  // The anisotropic spread can put boxes back into each other; relax in screen space
+  // with a tight gap, clamping every item fully on-screen each pass so nothing ends up
+  // off the viewport.
   const clampXY = (p) => {
     const hw = halfWidthOf(p), hh = halfHeightOf(p)
     p.cx = Math.max(hw + 8, Math.min(width - hw - 8, p.cx))
@@ -3395,7 +3492,6 @@ export default function BubbleVisualization({
   // work that used to run unconditionally, so nothing has to invalidate them by hand.
   const pageLayoutCacheRef = useRef(new Map())
   const assignCacheRef = useRef({ key: null, pageOf: {} })
-  const perPageRef = useRef(1)
   const paginatedRef = useRef(false)
   const sortedRef = useRef(false) // mirrors isSorted for the pointer handlers
   const pagedRef = useRef(null)       // active paged gesture state
@@ -3704,55 +3800,24 @@ export default function BubbleVisualization({
   }
 
   // Pagination trigger (computed before the single-page layout so it can be skipped
-  // when paged). More items than fit one screen at the minimum size → paginate.
+  // when paged). The level's summed floor charge over one page's budget (the area
+  // model, see pageLoadFor): more than a page's worth → paginate. The level's busiest
+  // bubble sets every bubble's floor, so it rides along to every layout call below.
   const noteN = layoutItems.filter(i => i.type === 'note').length
   const bubbleN = layoutItems.length - noteN
-  // Pure function of five numbers, and it runs two grid searches to get there — so it is
-  // memoized on exactly those numbers rather than re-solved on every render.
-  const {
-    pageLoad, perPage, notesPerPage, bubblesPerPage, rawNotesPerPage, rawBubblesPerPage,
-    usableW, noteCols, noteRows,
-  } = useMemo(
-    () => pageLoadFor(bubbleN, noteN, size.width, size.height, noteScale, size.safeBottom),
-    [bubbleN, noteN, size.width, size.height, noteScale, size.safeBottom],
-  )
+  const levelMaxContent = levelMaxContentOf(layoutItems)
+  const pageGeom = { width: size.width, height: size.height, noteScale, safeBottom: size.safeBottom, levelMaxContent }
+  const { pageLoad, budget: pageBudgetPx } = pageLoadFor(layoutItems, size.width, size.height, noteScale, size.safeBottom, levelMaxContent)
   const paginated = size.width > 0 && pageLoad > 1
 
   // Single-page organic layout (skipped when paginated — each page lays out its own).
-  const laid = (!paginated && size.width > 0)
-    ? computeLayout(layoutItems, size.width, size.height, SUB_BAR_H, BOTTOM_PAD, noteScale, layoutSeed(currentId), size.safeBottom)
+  // The very same pipeline a paged level runs per page (layoutPage): fresh scatter,
+  // saved positions on top, new items settled or arranged around the anchored ones,
+  // overlaps separated, with the convergence retry. One implementation, so the single
+  // page and the paged pages cannot drift apart.
+  const laidWithOverrides = (!paginated && size.width > 0)
+    ? layoutPage(layoutItems, savedPositions, project.id, currentId, size.width, size.height, noteScale, layoutSeed(currentId), size.safeBottom, levelMaxContent)
     : []
-
-  // Apply saved positions on top of auto-layout
-  const laidMapped = laid.map(item => {
-    const key = posKey(project.id, currentId, item.id)
-    const saved = savedPositions[key]
-    if (saved && size.width > 0) {
-      return { ...item, cx: saved.xFrac * size.width, cy: saved.yFrac * size.height }
-    }
-    return item
-  })
-
-  // If some items have saved positions and others don't, settle the new ones
-  // into empty spots so they don't overlap existing placed items.
-  const anchoredIds = new Set(
-    laidMapped.filter(item => savedPositions[posKey(project.id, currentId, item.id)]).map(i => i.id)
-  )
-  // Mixed page with saved positions: flow the free notes around the bubbles' actual
-  // (loaded) locations instead of just settling them off the phantom fresh layout.
-  const arrangedAroundBubbles = (anchoredIds.size > 0 && size.width > 0)
-    ? arrangeNotesAroundBubbles(laidMapped, anchoredIds, size.width, size.height, size.safeBottom)
-    : null
-
-  const laidSettled = (anchoredIds.size > 0 && anchoredIds.size < laidMapped.length && size.width > 0)
-    ? settleItems(laidMapped, anchoredIds, size.width, size.height, size.safeBottom)
-    : laidMapped
-
-  // Final safety pass every render: separate any overlapping bubbles (with a small
-  // buffer so they never touch) and re-apply the + button barrier and bounds.
-  const laidWithOverrides = arrangedAroundBubbles ?? (size.width > 0
-    ? separateOverlaps(laidSettled, size.width, size.height, shouldPinBubbles(laidSettled, anchoredIds.size), null, size.safeBottom)
-    : laidSettled)
 
   // ── Pagination ────────────────────────────────────────────────────────────────
   // Each page keeps the SAME free-form organic layout + physics as the single-page
@@ -3766,24 +3831,22 @@ export default function BubbleVisualization({
     // the capacity — none of which a page change touches — so it is memoized on a
     // signature of exactly those. Only the id→page map is kept: the groups themselves are
     // rebuilt from the live item objects below, so nothing stale is ever rendered.
-    let assignKey = `${project.id}|${currentId ?? 'root'}|${perPage}|${bubblesPerPage}|${notesPerPage}`
+    // A bubble's charge is its content-scaled floor, so each bubble's content count is
+    // an input here, as are the budget (page size, note size, fill) and the level max.
+    let assignKey = `${project.id}|${currentId ?? 'root'}|${Math.round(pageBudgetPx)}|${noteScale}|m${levelMaxContent}`
     for (const it of layoutItems) {
-      assignKey += `|${it.id}:${it.type === 'note' ? 'n' : 'b'}`
+      assignKey += `|${it.id}:${it.type === 'note' ? 'n' : (it.contentCount || 0)}:${it.created_at ?? ''}`
       const p = savedPages[posKey(project.id, currentId, it.id)]
       if (Number.isInteger(p)) assignKey += `=${p}`
     }
     if (assignCacheRef.current.key !== assignKey) {
       assignCacheRef.current = {
         key: assignKey,
-        pageOf: assignPages(layoutItems, savedPages, project.id, currentId, perPage, { bubblesPerPage, notesPerPage }),
+        pageOf: assignPages(layoutItems, savedPages, project.id, currentId, pageGeom),
       }
     }
     const pageOf = assignCacheRef.current.pageOf
-    const numPages = Math.max(
-      Math.ceil(layoutItems.length / perPage),
-      ...layoutItems.map(it => (pageOf[it.id] ?? 0) + 1),
-      1,
-    )
+    const numPages = Math.max(...layoutItems.map(it => (pageOf[it.id] ?? 0) + 1), 1)
     const groups = Array.from({ length: numPages }, () => [])
     for (const it of layoutItems) groups[pageOf[it.id] ?? 0].push(it)
 
@@ -3797,7 +3860,7 @@ export default function BubbleVisualization({
     pages = groups.map((group, pi) => {
       const key = pageLayoutKey(
         group, savedPositions, project.id, currentId,
-        size.width, size.height, noteScale, layoutSeed(currentId, pi), size.safeBottom,
+        size.width, size.height, noteScale, layoutSeed(currentId, pi), size.safeBottom, levelMaxContent,
       )
       const hit = cache.get(pi)
       if (hit && hit.key === key) {
@@ -3810,7 +3873,7 @@ export default function BubbleVisualization({
       recomputed++
       const laidPage = layoutPage(
         group, savedPositions, project.id, currentId,
-        size.width, size.height, noteScale, layoutSeed(currentId, pi), size.safeBottom,
+        size.width, size.height, noteScale, layoutSeed(currentId, pi), size.safeBottom, levelMaxContent,
       )
       cache.set(pi, { key, geom: laidPage.map(p => ({ id: p.id, cx: p.cx, cy: p.cy, r: p.r })) })
       return laidPage
@@ -3857,33 +3920,26 @@ export default function BubbleVisualization({
     if (!pageFillSig || lastFillLogRef.current === pageFillSig) return
     lastFillLogRef.current = pageFillSig
     const noteR = noteRFor(noteScale)
+    const share = (items) => Math.round(100 * pageChargeAtFloor(items, levelMaxContent, noteScale) / Math.max(pageBudgetPx, 1))
     const cap =
       `note size ${noteSize} (${noteScale}× → card ${Math.round(noteR * 2 * NOTE_HW)}×` +
-      `${Math.round(noteR * 2 * NOTE_HH)}px, bubble floor r ${Math.round(minBubbleRFor(noteScale))}px) · ` +
-      `usable ${Math.round(usableW ?? 0)}px wide → ${noteCols} across × ${noteRows} down = ` +
-      `${(noteCols ?? 0) * (noteRows ?? 0)} cells · ` +
-      `notes ${notesPerPage}/page (max ${rawNotesPerPage}), bubbles ${bubblesPerPage}/page ` +
-      `(max ${rawBubblesPerPage}), blended perPage ${perPage}`
+      `${Math.round(noteR * 2 * NOTE_HH)}px, bubble floor r ${Math.round(minBubbleRFor(noteScale))}` +
+      `–${Math.round(minBubbleRFor(noteScale) * LAYOUT_TUNING.floorContentRatio)}px) · ` +
+      `budget ${Math.round(pageBudgetPx / 1000)}k px² (fill ${Math.round(LAYOUT_TUNING.areaFill * 100)}%)`
     if (!paginated) {
       console.log(
         `[bubble-pages] ${currentBubble?.name ?? 'root'}: 1 page (unpaginated), ` +
-        `${layoutItems.length} items (${bubbleN} bubbles + ${noteN} notes) · ${cap} · fill target ${Math.round(PAGE_FILL * 100)}%`
+        `${layoutItems.length} items (${bubbleN} bubbles + ${noteN} notes) = ${share(layoutItems)}% of budget · ${cap}`
       )
       return
     }
     const rows = pages.map((p, i) => {
       const b = p.filter(it => it.type !== 'note').length
-      const nts = p.length - b
-      // Share of the page's real (unfilled) capacity this page is using.
-      const used = rawNotesPerPage > 0 && rawBubblesPerPage > 0
-        ? nts / rawNotesPerPage + b / rawBubblesPerPage
-        : 0
-      return `page ${i}: ${p.length} items (${b} bubbles + ${nts} notes) = ${Math.round(used * 100)}% of max`
+      return `page ${i}: ${p.length} items (${b} bubbles + ${p.length - b} notes) = ${share(p)}% of budget`
     })
     console.log(
       `[bubble-pages] ${currentBubble?.name ?? 'root'}: ${pages.length} pages, ` +
-      `${layoutItems.length} items · ${cap} · fill target ${Math.round(PAGE_FILL * 100)}%\n  ` +
-      rows.join('\n  ')
+      `${layoutItems.length} items · ${cap}\n  ` + rows.join('\n  ')
     )
   }, [pageFillSig]) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -3891,49 +3947,70 @@ export default function BubbleVisualization({
   // Page capacity is derived from the user's note size, so changing that setting
   // changes how much fits on a page — immediately, for every level of the project,
   // not just the one on screen. Levels with no saved page assignments re-flow for
-  // free (assignPages packs them against the new perPage on the render that follows
+  // free (assignPages packs them against the new budget on the render that follows
   // this one); the levels handled here are the ones the user has hand-arranged, whose
   // saved assignments would otherwise pin items to pages that no longer fit them.
   // See reflowSavedPages for the two rules. Items that land on a different page lose
   // their saved position too, so they settle into the new page's layout rather than
   // keeping coordinates chosen on the old one.
+  //
+  // The same pass runs ONCE per project when the capacity model itself changes
+  // (PAGE_MODEL_VERSION): the area model charges some levels more than the count model
+  // did, so a saved page can be over budget on first load. It moves an item only when
+  // its page is actually over budget, and only forward (see reflowSavedPages), so a
+  // deliberately arranged level is touched exactly where it would otherwise ship
+  // overlap and nowhere else. It reports what it moved to the console.
   const reflowedScaleRef = useRef(noteScale)
+  const reflowedVersionRef = useRef(null)
   useEffect(() => {
-    if (reflowedScaleRef.current === noteScale) return
-    reflowedScaleRef.current = noteScale
     const { width: W, height: H } = sizeRef.current
     if (W <= 0) return
+    let storedVersion = null
+    try { storedVersion = localStorage.getItem(`mindmap-pages-model-${project.id}`) } catch {}
+    const versionDue = storedVersion !== String(PAGE_MODEL_VERSION) && reflowedVersionRef.current !== project.id
+    if (reflowedScaleRef.current === noteScale && !versionDue) return
+    reflowedScaleRef.current = noteScale
+    if (versionDue) {
+      reflowedVersionRef.current = project.id
+      try { localStorage.setItem(`mindmap-pages-model-${project.id}`, String(PAGE_MODEL_VERSION)) } catch {}
+    }
     // Group this project's saved assignments by level.
-    const levels = new Map() // contextKey → [ [itemId, page], … ]
+    const levels = new Map() // contextKey → Set of item ids with a saved page
     for (const [key, page] of Object.entries(savedPagesRef.current)) {
       if (!Number.isInteger(page)) continue
       const parts = splitPosKey(key, project.id)
       if (!parts) continue
-      if (!levels.has(parts.contextKey)) levels.set(parts.contextKey, [])
-      levels.get(parts.contextKey).push([parts.itemId, page])
+      if (!levels.has(parts.contextKey)) levels.set(parts.contextKey, new Set())
+      levels.get(parts.contextKey).add(parts.itemId)
     }
     const nextPages = { ...savedPagesRef.current }
     const nextPositions = { ...savedPositionsRef.current }
     let changed = false
-    for (const [contextKey, entries] of levels) {
-      const { bubbleN, noteN } = levelItemCounts(project, contextKey)
-      const total = bubbleN + noteN
-      if (total === 0) continue
-      const { pageLoad: lvlLoad, perPage: lvlPerPage } =
-        pageLoadFor(bubbleN, noteN, W, H, noteScale, sizeRef.current.safeBottom)
+    const movedByLevel = []
+    for (const [contextKey, savedIds] of levels) {
+      const contextId = contextKey === 'root' ? null : contextKey
+      const all = levelItems(project, contextKey)
+      if (all.length === 0) continue
+      const levelMax = levelMaxContentOf(all)
+      const geom = { width: W, height: H, noteScale, safeBottom: sizeRef.current.safeBottom, levelMaxContent: levelMax }
       // Unpaginated at this size: the level renders as a single page and its saved
       // assignments are dormant. Left as they are — if a later size brings pagination
       // back, this same pass re-flows them then.
-      if (lvlLoad <= 1) continue
-      const reflowed = reflowSavedPages(entries, lvlPerPage, total)
-      for (const [itemId, oldPage] of entries) {
-        if (reflowed[itemId] === oldPage) continue
-        const key = posKey(project.id, contextKey === 'root' ? null : contextKey, itemId)
-        nextPages[key] = reflowed[itemId]
+      if (pageLoadFor(all, W, H, noteScale, sizeRef.current.safeBottom, levelMax).pageLoad <= 1) continue
+      const savedItems = all.filter(it => savedIds.has(it.id))
+      const reflowed = reflowSavedPages(savedItems, savedPagesRef.current, project.id, contextId, geom)
+      let moved = 0
+      for (const it of savedItems) {
+        const key = posKey(project.id, contextId, it.id)
+        if (reflowed[it.id] === savedPagesRef.current[key]) continue
+        nextPages[key] = reflowed[it.id]
         delete nextPositions[key]
         changed = true
+        moved++
       }
+      if (moved) movedByLevel.push(`${contextKey}: ${moved} of ${savedItems.length}`)
     }
+    if (movedByLevel.length) console.info(`[bubble-pages] re-flow moved items on ${movedByLevel.length} level(s): ${movedByLevel.join('; ')}`)
     if (!changed) return
     // Batched with the assignment change, so the items this pass shuffles get their new
     // positions and the transition in one commit. (The resize itself is already covered
@@ -3950,7 +4027,6 @@ export default function BubbleVisualization({
   laidWithOverridesRef.current = effPaginated ? (effPages[clampedPageIndex] || []) : effLaid
   currentIdRef.current = currentId
   pagesRef.current = effPages
-  perPageRef.current = perPage
   paginatedRef.current = effPaginated
   sortedRef.current = isSorted
 
@@ -4004,17 +4080,19 @@ export default function BubbleVisualization({
     if (!paginated) return
 
     const from = Math.min(pageIndexRef.current, Math.max(pages.length - 1, 0))
-    // At capacity by the same measure the packer uses for a page's items. Counting
-    // everything, not just bubbles, is the stricter reading: it won't drop a bubble
-    // onto a page already filled edge to edge with notes.
-    const full = (pages[from]?.length ?? 0) >= perPage
+    // At capacity by the same measure the packer uses: the page's floor charge with
+    // the new bubble added would exceed the budget. (The bubble may already be on this
+    // page from the fresh pack — charge the page's other items plus it, once.)
+    const newBubble = layoutItems.find(it => it.id === placeBubbleId)
+    const others = (pages[from] ?? []).filter(it => it.id !== placeBubbleId)
+    const full = pageChargeAtFloor([...others, newBubble], levelMaxContent, noteScale) > pageBudgetPx + 1e-6
     const target = full ? from + 1 : from
 
     const nextPages = { ...savedPagesRef.current, [posKey(project.id, currentId, placeBubbleId)]: target }
     setSavedPages(nextPages)
     saveSavedPagesMap(project.id, nextPages)
     if (target !== from) followPageRef.current = target
-  }, [placeBubbleId, layoutItems, paginated, pages, perPage, currentId, project.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [placeBubbleId, layoutItems, paginated, pages, pageBudgetPx, levelMaxContent, noteScale, currentId, project.id]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Navigation ────────────────────────────────────────────────────────────────
 
@@ -5171,7 +5249,7 @@ export default function BubbleVisualization({
               )}
 
               {/* Empty state (paged mode always has items) */}
-              {!paginated && laid.length === 0 && !expandAnim && (
+              {!paginated && laidWithOverrides.length === 0 && !expandAnim && (
                 <div
                   className="absolute inset-0 flex items-center justify-center"
                   style={{ paddingTop: SUB_BAR_H }}

@@ -1904,7 +1904,10 @@ export default function App() {
 
   // Bubble operations
   function addBubble(bubble) {
-    const updated = { ...activeProject, bubbles: [...activeProject.bubbles, bubble] }
+    // Stamped so the canvas packer can walk bubbles and notes in one creation order
+    // (local only: the cloud bubble row has no such column and is mapped by field).
+    const stamped = bubble.created_at ? bubble : { ...bubble, created_at: new Date().toISOString() }
+    const updated = { ...activeProject, bubbles: [...activeProject.bubbles, stamped] }
     updateProject(updated)
   }
 
